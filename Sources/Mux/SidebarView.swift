@@ -143,6 +143,10 @@ struct SidebarView: View {
             EnvironmentSheet(initial: appModel.environment(for: conn), sessionName: conn.title) { env in
                 appModel.setEnvironment(env, for: conn)
                 envTarget = nil
+            } onSaveAndRestart: { env in
+                appModel.setEnvironment(env, for: conn)
+                conn.restartShell()   // respawn the shell so the current pane gets the new env now
+                envTarget = nil
             } onCancel: { envTarget = nil }
         }
     }
@@ -611,6 +615,7 @@ struct EnvironmentSheet: View {
     let initial: [String: String]
     let sessionName: String
     let onSave: ([String: String]) -> Void
+    let onSaveAndRestart: ([String: String]) -> Void
     let onCancel: () -> Void
 
     private struct EnvRow: Identifiable { let id = UUID(); var key: String; var value: String }
@@ -661,6 +666,8 @@ struct EnvironmentSheet: View {
             HStack {
                 Spacer()
                 Button("取消", role: .cancel, action: onCancel)
+                Button("保存并重启 shell") { onSaveAndRestart(collected()) }
+                    .help("重启该会话的 shell 让变量立即生效（会结束当前 shell 正在跑的东西）")
                 Button("保存") { onSave(collected()) }
                     .keyboardShortcut(.defaultAction)
             }

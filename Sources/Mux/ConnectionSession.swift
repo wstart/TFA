@@ -384,6 +384,11 @@ final class ConnectionSession: Identifiable {
         terminals.removeAll()
     }
 
+    /// Respawn the primary pane's shell so it picks up updated session environment immediately.
+    /// Destructive to whatever runs in that pane — invoked only on explicit user request (the env
+    /// editor's "保存并重启 shell").
+    func restartShell() { controller.respawnPrimaryPane() }
+
     // MARK: - Terminals
 
     /// Lazily create (and hydrate) the SwiftTerm-backed terminal for a pane. Identity is stable:
