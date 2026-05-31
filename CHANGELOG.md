@@ -3,6 +3,14 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
+## [0.5.1] — 2026-05-31
+
+### 优化
+- **Token 用量面板打开更快**：改为**只读取一次**使用记录并缓存，切换日/周/月/会话视图时只在内存里
+  **重新聚合**，不再每次重读所有 `~/.claude` / `~/.codex` 的 jsonl。
+- **显示重做**为原生**对齐多列表格**（周期 / 模型 / Input / Output / Cache / Total / Cost），数字千
+  分位、成本右对齐 + brand 色，可读性接近 ccusage。
+
 ## [0.5.0] — 2026-05-31
 
 ### 新增
@@ -82,6 +90,7 @@
   跨终端搜索（⌘F）、可拖拽分组。
 - 原生设计系统、色盲友好的状态指示、设置窗口（⌘,，含快捷键速查）、app 图标。
 
+[0.5.1]: https://github.com/wstart/TFA/releases/tag/v0.5.1
 [0.5.0]: https://github.com/wstart/TFA/releases/tag/v0.5.0
 [0.4.1]: https://github.com/wstart/TFA/releases/tag/v0.4.1
 [0.4.0]: https://github.com/wstart/TFA/releases/tag/v0.4.0

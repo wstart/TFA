@@ -7,7 +7,7 @@ import Foundation
 extension CCUsage {
 
     /// One usage record after parsing + costing (the unit fed to aggregation/blocks).
-    struct LoadedEntry {
+    struct LoadedEntry: Sendable {
         var timestamp: TimestampMs
         var date: String                 // YYYY-MM-DD in the chosen tz
         var sessionId: String

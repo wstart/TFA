@@ -84,9 +84,9 @@ enum CCUsage {
 
     // MARK: - Token usage (spec §3)
 
-    enum Speed: String, Codable { case standard, fast }
+    enum Speed: String, Codable, Sendable { case standard, fast }
 
-    struct TokenUsageRaw {
+    struct TokenUsageRaw: Sendable {
         var inputTokens: UInt64 = 0
         var outputTokens: UInt64 = 0
         var cacheCreationInputTokens: UInt64 = 0
