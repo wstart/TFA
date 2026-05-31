@@ -96,7 +96,9 @@ struct SidebarView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
 
-            // Bottom-left entry into the Lab (experiments).
+            // Bottom-left entries: CLAUDE.md rules + Skills manager + the Lab (experiments).
+            ClaudeMdEntry(selected: appModel.claudeMdSelected) { appModel.openClaudeMd() }
+            SkillsEntry(selected: appModel.skillsSelected) { appModel.openSkills() }
             LabEntry(selected: appModel.labSelected) { appModel.openLab() }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -408,6 +410,54 @@ private struct HeaderButton: View {
         .buttonStyle(.borderless)
         .help(help)
         .accessibilityLabel(help)
+    }
+}
+
+/// Bottom-of-sidebar entry into the global CLAUDE.md rules editor.
+private struct ClaudeMdEntry: View {
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: Theme.Space.sm) {
+                Image(systemName: "text.book.closed")
+                    .foregroundStyle(selected ? Theme.brand : Color.secondary)
+                Text("CLAUDE.md").font(Theme.Font.rowTitle)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, Theme.Space.md)
+            .padding(.vertical, Theme.Space.sm)
+        }
+        .buttonStyle(.plain)
+        .background(selected ? Theme.brand.opacity(0.12) : Color.clear)
+        .overlay(alignment: .top) { Divider() }
+        .accessibilityLabel("CLAUDE.md 规则")
+    }
+}
+
+/// Bottom-of-sidebar entry into the Skills manager. Selected → the detail area shows Skills.
+private struct SkillsEntry: View {
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: Theme.Space.sm) {
+                Image(systemName: "wand.and.stars")
+                    .foregroundStyle(selected ? Theme.brand : Color.secondary)
+                Text("Skills").font(Theme.Font.rowTitle)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, Theme.Space.md)
+            .padding(.vertical, Theme.Space.sm)
+        }
+        .buttonStyle(.plain)
+        .background(selected ? Theme.brand.opacity(0.12) : Color.clear)
+        .overlay(alignment: .top) { Divider() }
+        .accessibilityLabel("Skills 管理")
     }
 }
 

@@ -18,11 +18,15 @@ final class AppModel {
     /// per-terminal viewing/activity state in `didSet` covers every selection path.
     /// True when the Lab (experiments) pane is shown in the detail area instead of a terminal.
     var labSelected = false
+    /// True when the Skills manager is shown in the detail area instead of a terminal.
+    var skillsSelected = false
+    /// True when the global CLAUDE.md rules editor is shown in the detail area instead of a terminal.
+    var claudeMdSelected = false
 
     var selectedConnectionID: UUID? {
         didSet {
             guard oldValue != selectedConnectionID else { return }
-            labSelected = false // selecting a terminal leaves the Lab
+            labSelected = false; skillsSelected = false; claudeMdSelected = false // a terminal leaves the tool panes
             for c in connections {
                 if c.id == selectedConnectionID { c.markViewed() } else { c.resignViewing() }
             }
@@ -208,8 +212,20 @@ final class AppModel {
     /// Show the Lab (experiments) pane in the detail area. Keeps `selectedConnectionID` so returning
     /// to a terminal restores the last one — this just flips the detail area over to the Lab.
     func openLab() {
-        labSelected = true
+        labSelected = true; skillsSelected = false; claudeMdSelected = false
         for c in connections { c.resignViewing() } // no terminal is on screen while the Lab shows
+    }
+
+    /// Show the Skills manager in the detail area. Mutually exclusive with the other tool panes / a terminal.
+    func openSkills() {
+        skillsSelected = true; labSelected = false; claudeMdSelected = false
+        for c in connections { c.resignViewing() } // no terminal is on screen while Skills shows
+    }
+
+    /// Show the global CLAUDE.md rules editor. Mutually exclusive with the other tool panes / a terminal.
+    func openClaudeMd() {
+        claudeMdSelected = true; labSelected = false; skillsSelected = false
+        for c in connections { c.resignViewing() }
     }
 
     /// The terminals the sidebar actually shows for the current host, in sidebar order (each group in

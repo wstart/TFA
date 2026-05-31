@@ -3,6 +3,32 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
+## [0.7.0] — 2026-05-31
+
+### 新增
+- **CLAUDE.md 全局规则编辑器**：侧栏底部新增 `CLAUDE.md` 入口（在 Skills 之上），直接编辑
+  `~/.claude/CLAUDE.md`，Markdown 语法高亮、⌘S 保存、首次保存留 `.bak`、文件不存在则保存时自动创建；
+  带 **reload 按钮**从磁盘重新加载（有未保存改动会二次确认）。
+- **Skills 改为目录树**：每个 skill 作为可展开文件夹浏览其全部文件/子目录；编辑器对 **md / py / shell /
+  json** 做语法高亮。
+
+### 修复
+- **无法连接 Homebrew 远程 macOS 主机**：ssh 一次性命令走 `shell -c` 不读 `.zprofile`，导致
+  `/opt/homebrew/bin` 不在 PATH、裸 `tmux` 找不到而连接失败。现在远程 tmux 调用（含会话发现）统一用
+  `env PATH=…` 显式带上 Homebrew / 系统 bin 目录。
+- **Skills 目录展不开**：符号链接的 skill（如 gstack 系列）`contentsOfDirectory` 返回空，先
+  `resolvingSymlinksInPath()` 解析；并把列表从 `List(children:)` 换成自绘树，规避 macOS 上 List
+  disclosure / 行点击失灵。
+
+## [0.6.0] — 2026-05-31
+
+### 新增
+- **Skills 管理**：侧栏底部新增「Skills」入口（在「实验室」之上），点击在主区打开**管理 / 查看 / 编辑**面板。
+  - 扫描 `~/.claude/skills/<name>/SKILL.md`，左侧列出每个 skill 的**名称 + 描述**（解析 YAML frontmatter）。
+  - 右侧 `TextEditor` 直接编辑 SKILL.md，**⌘S / 保存**带「已保存 ✓」提示；首次保存自动留 `.bak` 备份。
+  - 支持**新建**（按模板生成目录 + SKILL.md）与**删除**（移除整个 skill 目录，二次确认）。
+  - 空状态有引导文案；与「实验室」、终端三者互斥切换，chrome 一致。
+
 ## [0.5.1] — 2026-05-31
 
 ### 优化

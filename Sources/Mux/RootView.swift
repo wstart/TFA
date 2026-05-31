@@ -38,7 +38,17 @@ struct RootView: View {
                                 onUndo: { model.undoDetach() },
                                 onDismiss: { model.dismissDetachNotice() })
                 }
-                if appModel.labSelected {
+                if appModel.claudeMdSelected {
+                    ClaudeMdHeaderBar()
+                    Divider()
+                    ClaudeMdView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if appModel.skillsSelected {
+                    SkillsHeaderBar()
+                    Divider()
+                    SkillsView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if appModel.labSelected {
                     LabHeaderBar()
                     Divider()
                     LabView()
@@ -196,6 +206,55 @@ private struct ErrorBanner: View {
         .padding(.vertical, Theme.Space.md)
         .background(Theme.Status.failed.opacity(0.12))
         .overlay(alignment: .bottom) { Divider() }
+    }
+}
+
+/// Slim header for the CLAUDE.md detail pane — mirrors `LabHeaderBar`'s chrome.
+private struct ClaudeMdHeaderBar: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        HStack(spacing: Theme.Space.md) {
+            Button { appModel.toggleSidebar() } label: {
+                Image(systemName: "sidebar.left")
+            }
+            .buttonStyle(.borderless)
+            .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
+            .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
+
+            Image(systemName: "text.book.closed").foregroundStyle(Theme.brand)
+            Text("CLAUDE.md · 全局规则").font(Theme.Font.headerTitle).lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, Theme.Space.lg)
+        .padding(.vertical, Theme.Space.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+/// Slim header for the Skills detail pane — mirrors `LabHeaderBar`'s chrome so switching between a
+/// terminal, the Lab, and Skills feels consistent.
+private struct SkillsHeaderBar: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        HStack(spacing: Theme.Space.md) {
+            Button { appModel.toggleSidebar() } label: {
+                Image(systemName: "sidebar.left")
+            }
+            .buttonStyle(.borderless)
+            .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
+            .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
+
+            Image(systemName: "wand.and.stars").foregroundStyle(Theme.brand)
+            Text("Skills 管理").font(Theme.Font.headerTitle).lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, Theme.Space.lg)
+        .padding(.vertical, Theme.Space.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 

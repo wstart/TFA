@@ -70,6 +70,11 @@ public struct TmuxConnection: Sendable {
             : ["new-session", "-A", "-s", sessionName]
     }
 
+    /// PATH used for remote tmux invocations. ssh's one-shot remote command runs under `shell -c`,
+    /// which skips login profiles, so Homebrew's bin dir is missing — prepend the common Homebrew
+    /// (Apple-Silicon + Intel) and standard system bin dirs so `tmux` resolves on macOS remotes.
+    public static let remotePATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
     /// Resolve (executable, argv). argv[0] is the executable path by convention.
     public func resolvedArgv() throws -> (exec: String, argv: [String]) {
         switch endpoint {
@@ -93,7 +98,12 @@ public struct TmuxConnection: Sendable {
                 args += ["-o", "StrictHostKeyChecking=accept-new", "-o", "NumberOfPasswordPrompts=1"]
             }
             args += sshArgs
-            args += [host, "--", "tmux", "-u", "-CC"]
+            // ssh runs a one-shot remote command through the user's login shell as `shell -c "<args>"`,
+            // which does NOT source .zprofile/.zshrc — so Homebrew's bin dir is absent from PATH and a
+            // bare `tmux` isn't found on macOS remotes (the classic Homebrew-over-ssh PATH gap). Resolve
+            // tmux against a PATH that explicitly includes the common Homebrew / local bin dirs via `env`.
+            let remoteTmux = tmuxPath ?? "tmux"
+            args += [host, "--", "env", "PATH=\(Self.remotePATH)", remoteTmux, "-u", "-CC"]
             args += tmuxSubcommand
             return (ssh, args)
         }

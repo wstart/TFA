@@ -88,8 +88,9 @@ public enum TmuxServer {
             // The remote command must be ONE pre-quoted token: ssh joins everything after the host
             // with spaces and hands it to the remote LOGIN shell, which re-parses it. An unquoted
             // `#{session_name}` would be read as a shell comment (a `#` starting a word), eating the
-            // `-F` argument. Single-quoting the format keeps it intact through that re-parse.
-            argv += [host, "tmux -u list-sessions -F '#{session_name}'"]
+            // `-F` argument. Single-quoting the format keeps it intact through that re-parse. The
+            // `env PATH=…` prefix makes `tmux` resolvable on macOS (Homebrew) remotes — see remotePATH.
+            argv += [host, "env PATH=\(TmuxConnection.remotePATH) tmux -u list-sessions -F '#{session_name}'"]
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")

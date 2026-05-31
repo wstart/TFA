@@ -108,16 +108,24 @@ extension CCUsage {
         /// Load + cost + dedup all Claude entries.
         static func load(mode: CostMode, pricing: PricingMap, timeZone: TimeZone? = nil,
                          env: [String: String] = ProcessInfo.processInfo.environment) -> [LoadedEntry] {
-            var deduper = ClaudeDeduper()
-            for file in files(roots: dataRoots(env: env)) {
-                guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            let allFiles = files(roots: dataRoots(env: env))
+            // Parse files CONCURRENTLY (IO + per-line JSON is the bottleneck — tens of MB). Dedup is
+            // global, so it runs serially afterwards over the file-ordered per-file results.
+            var perFile = [[LoadedEntry]](repeating: [], count: allFiles.count)
+            let lock = NSLock()
+            DispatchQueue.concurrentPerform(iterations: allFiles.count) { i in
+                let file = allFiles[i]
+                guard let text = try? String(contentsOf: file, encoding: .utf8) else { return }
                 let (sid, proj) = sessionParts(file)
+                var out: [LoadedEntry] = []
                 for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-                    guard let e = parseLine(String(line), sessionId: sid, projectPath: proj,
-                                            mode: mode, pricing: pricing, tz: timeZone) else { continue }
-                    deduper.push(e)
+                    if let e = parseLine(String(line), sessionId: sid, projectPath: proj,
+                                         mode: mode, pricing: pricing, tz: timeZone) { out.append(e) }
                 }
+                lock.lock(); perFile[i] = out; lock.unlock()
             }
+            var deduper = ClaudeDeduper()
+            for entries in perFile { for e in entries { deduper.push(e) } }
             return deduper.result
         }
 
