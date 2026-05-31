@@ -3,6 +3,14 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
+## [0.4.1] — 2026-05-31
+
+### 新增
+- **环境变量「保存并重启 shell」**：环境变量编辑器新增该按钮 —— 在写入 session 环境的同时
+  **重启当前 shell**，让正在用的这个 shell 立即带上新变量（`set-environment` 单独只对新开窗口生效）。
+  比手动 `export` 干净（不污染历史、不依赖 shell 类型）；代价是会结束该 pane 里正在跑的东西，所以
+  与普通「保存」分成两个独立按钮。
+
 ## [0.4.0] — 2026-05-31
 
 ### 新增
@@ -64,6 +72,7 @@
   跨终端搜索（⌘F）、可拖拽分组。
 - 原生设计系统、色盲友好的状态指示、设置窗口（⌘,，含快捷键速查）、app 图标。
 
+[0.4.1]: https://github.com/wstart/TFA/releases/tag/v0.4.1
 [0.4.0]: https://github.com/wstart/TFA/releases/tag/v0.4.0
 [0.3.0]: https://github.com/wstart/TFA/releases/tag/v0.3.0
 [0.2.1]: https://github.com/wstart/TFA/releases/tag/v0.2.1
