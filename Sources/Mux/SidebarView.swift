@@ -28,6 +28,12 @@ struct SidebarView: View {
     /// Persisted set of collapsed group ids (comma-joined uuid strings). Groups default to expanded.
     @AppStorage("collapsedGroups") private var collapsedRaw: String = ""
 
+    /// Drag-and-drop hover targets — drive a highlight so you can SEE where a dragged terminal will
+    /// land. `dropTargetGroup` = the group folder currently hovered; `ungroupedDropTargeted` = the
+    /// loose (ungrouped) drop area.
+    @State private var dropTargetGroup: UUID?
+    @State private var ungroupedDropTargeted = false
+
     var body: some View {
         @Bindable var model = appModel
         VStack(spacing: 0) {
@@ -55,6 +61,12 @@ struct SidebarView: View {
                 // so the drop target spans the loose rows rather than a single row.
                 Section {
                     ForEach(ungrouped) { row($0) }
+                } header: {
+                    if ungroupedDropTargeted {
+                        Text("松手 → 移出分组")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.brand)
+                    }
                 }
                 .dropDestination(for: String.self) { keys, _ in
                     for key in keys {
@@ -62,9 +74,17 @@ struct SidebarView: View {
                             appModel.removeFromGroups(conn)
                         }
                     }
+                    ungroupedDropTargeted = false
                     return true
-                }
-                if ungrouped.isEmpty && appModel.currentGroups.isEmpty {
+                } isTargeted: { ungroupedDropTargeted = $0 }
+                if appModel.isDiscoveringSessions {
+                    HStack(spacing: Theme.Space.sm) {
+                        ProgressView().controlSize(.small)
+                        Text("正在发现 \(appModel.currentHost.label) 的会话…")
+                            .font(Theme.Font.rowSubtitle)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if ungrouped.isEmpty && appModel.currentGroups.isEmpty {
                     Text(filter.isEmpty
                          ? "No terminals on \(appModel.currentHost.label) yet — press +"
                          : "No terminals match “\(filter)”")
@@ -140,7 +160,11 @@ struct SidebarView: View {
                             appModel.assign(conn, toGroup: group.id)
                         }
                     }
+                    dropTargetGroup = nil
                     return true
+                } isTargeted: { hovering in
+                    dropTargetGroup = hovering ? group.id
+                        : (dropTargetGroup == group.id ? nil : dropTargetGroup)
                 }
             if groupExpanded(group.id) {
                 ForEach(members) { row($0).padding(.leading, Theme.Space.lg) } // indent under the folder
@@ -196,6 +220,12 @@ struct SidebarView: View {
                 sectionHeaderLabel(group.name, icon: "folder.fill",
                                    count: appModel.visibleTerminals(in: group).count)
             }
+            .padding(.vertical, 2)
+            .background(
+                // Highlight the folder while a terminal is dragged over it (#8 drop feedback).
+                RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                    .fill(dropTargetGroup == group.id ? Theme.brand.opacity(0.18) : .clear)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -412,7 +442,12 @@ private struct TerminalRow: View {
                 Text(conn.title)
                     .font(Theme.Font.rowTitle)
                     .lineLimit(1)
-                if !conn.subtitle.isEmpty {
+                if status == .dormant {
+                    Text("未连接 · 点击打开")
+                        .font(Theme.Font.rowSubtitle)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                } else if !conn.subtitle.isEmpty {
                     Text(conn.subtitle)
                         .font(Theme.Font.rowSubtitle)
                         .foregroundStyle(.secondary)

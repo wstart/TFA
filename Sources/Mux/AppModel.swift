@@ -354,6 +354,10 @@ final class AppModel {
     /// The active host. The sidebar shows ONLY this host's terminals, and `newTerminal()` opens here.
     var currentHost: HostTarget = .local
 
+    /// True while `selectHost` is discovering a host's sessions in the background — drives a brief
+    /// "finding sessions…" hint so switching to a remote host doesn't look like an empty void.
+    private(set) var isDiscoveringSessions = false
+
     private static let knownHostsKey = "knownHosts.v1"
 
     /// Restore persisted ssh hosts + their Keychain passwords (called at launch).
@@ -398,7 +402,9 @@ final class AppModel {
         // Immediately show an already-open terminal of this host (or clear until discovery loads one).
         selectedConnectionID = connections.first { matchesCurrentHost($0) }?.id
         Task { @MainActor in
+            isDiscoveringSessions = true
             await loadSessions(for: host)
+            isDiscoveringSessions = false
             if selectedConnection == nil || !matchesCurrentHost(selectedConnection!) {
                 selectedConnectionID = connections.first { matchesCurrentHost($0) }?.id
             }
