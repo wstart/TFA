@@ -11,3 +11,6 @@ docs/.tmp/
 *.swp
 *.swo
 *~
+# Local-only tests — kept out of the public repo by request. Package.swift adds the test
+# targets ONLY when Tests/ exists (FileManager check), so a fresh clone still builds fine.
+/Tests/
