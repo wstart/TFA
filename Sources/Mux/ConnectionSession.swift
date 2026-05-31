@@ -51,6 +51,19 @@ final class ConnectionSession: Identifiable {
     /// Set by AppModel for the currently-shown terminal: its output is "seen", so don't flag it.
     @ObservationIgnored private var isViewing = false
 
+    /// Output activity phase driving the sidebar effect: idle → streaming (output flowing) →
+    /// justFinished (a burst just ended) → idle. A burst is "finished" after `outputIdleGap` seconds
+    /// with no new %output, so a continuous stream (`tail -f`) never false-finishes.
+    enum OutputPhase: Equatable { case idle, streaming, justFinished }
+    private(set) var outputPhase: OutputPhase = .idle
+    /// Invoked on the main actor when an output burst finishes, with whether the terminal was being
+    /// VIEWED at the time (so AppModel can post a system notification only for background terminals).
+    @ObservationIgnored var onOutputFinished: ((_ wasViewing: Bool) -> Void)?
+    @ObservationIgnored private var outputIdleTask: Task<Void, Never>?
+    @ObservationIgnored private var finishedResetTask: Task<Void, Never>?
+    /// Seconds of no %output after which an output burst counts as finished.
+    static let outputIdleGap: Double = 1.2
+
     /// Invoked on the main actor ONLY when the connection is finalized as gone (set by AppModel) —
     /// i.e. after reconnect was either impossible or exhausted. Drives sidebar removal + the toast.
     @ObservationIgnored var onClosed: (() -> Void)?
@@ -132,6 +145,7 @@ final class ConnectionSession: Identifiable {
             self.terminals[paneID]?.feed(data)
             // Flag background activity (idempotent — only mutate on a real change to avoid churn).
             if !self.isViewing, !self.hasUnseenOutput { self.hasUnseenOutput = true }
+            self.noteOutputActivity()
         }
         controller.onPaneRemoved = { [weak self] paneID in
             self?.terminals.removeValue(forKey: paneID)
@@ -154,6 +168,30 @@ final class ConnectionSession: Identifiable {
 
     /// This terminal is no longer on screen — future output flags activity.
     func resignViewing() { isViewing = false }
+
+    /// Called for every %output batch: enter the streaming phase and (re)arm the idle timer. When the
+    /// timer fires (no output for `outputIdleGap`), the burst is finished → effect + notification hook.
+    private func noteOutputActivity() {
+        if outputPhase != .streaming { outputPhase = .streaming }
+        finishedResetTask?.cancel(); finishedResetTask = nil
+        outputIdleTask?.cancel()
+        outputIdleTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(Self.outputIdleGap * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self.outputFinished()
+        }
+    }
+
+    private func outputFinished() {
+        guard outputPhase == .streaming, !intentionalClose else { return }
+        outputPhase = .justFinished
+        onOutputFinished?(isViewing)              // AppModel decides whether to post a system notification
+        finishedResetTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_500_000_000) // let the finish effect play, then settle
+            guard !Task.isCancelled else { return }
+            if self.outputPhase == .justFinished { self.outputPhase = .idle }
+        }
+    }
 
     /// Flip out of the dormant (placeholder) state — synchronous, so the sidebar/header switch to a
     /// "connecting" state the instant the user selects the terminal, before the async `connect` runs.
@@ -317,6 +355,8 @@ final class ConnectionSession: Identifiable {
     func disconnect() {
         intentionalClose = true
         reconnectTask?.cancel(); reconnectTask = nil
+        outputIdleTask?.cancel(); finishedResetTask?.cancel()
+        outputPhase = .idle
         isReconnecting = false
         controller.disconnect()
         terminals.removeAll()

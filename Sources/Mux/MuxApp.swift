@@ -15,6 +15,7 @@ struct MuxApp: App {
                     delegate.appModel = appModel
                     NSApplication.shared.setActivationPolicy(.regular)
                     NSApplication.shared.activate(ignoringOtherApps: true)
+                    NotificationManager.requestAuthorization()
                     appModel.start()
                 }
         }

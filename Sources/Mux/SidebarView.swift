@@ -455,12 +455,9 @@ private struct TerminalRow: View {
                 }
             }
             Spacer(minLength: Theme.Space.xs)
-            if showDot {
-                Circle()
-                    .fill(Theme.brand)
-                    .frame(width: 7, height: 7)
-                    .transition(.scale.combined(with: .opacity))
-            }
+            // Output activity: pulse while streaming, a checkmark flash when a burst finishes,
+            // otherwise the static unseen-output dot.
+            OutputActivityIndicator(phase: conn.outputPhase, showUnseen: showDot)
             // Only surface a status glyph when it needs attention — a healthy connected row stays
             // quiet (its brand-tinted icon is signal enough), keeping a long list calm.
             if status != .connected {
@@ -478,6 +475,47 @@ private struct TerminalRow: View {
         if !conn.subtitle.isEmpty { parts.append("running \(conn.subtitle)") }
         if showDot { parts.append("new output") }
         return parts.joined(separator: ", ")
+    }
+}
+
+/// Sidebar output-activity effect: a brand dot that PULSES while output streams, a green checkmark
+/// FLASH when a burst finishes, otherwise the static unseen-output dot (or nothing).
+private struct OutputActivityIndicator: View {
+    let phase: ConnectionSession.OutputPhase
+    let showUnseen: Bool
+    @State private var pulse = false
+
+    var body: some View {
+        Group {
+            switch phase {
+            case .streaming:
+                Circle()
+                    .fill(Theme.brand)
+                    .frame(width: 7, height: 7)
+                    .scaleEffect(pulse ? 1.0 : 0.55)
+                    .opacity(pulse ? 1 : 0.4)
+                    .onAppear {
+                        withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) {
+                            pulse = true
+                        }
+                    }
+                    .onDisappear { pulse = false }
+            case .justFinished:
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Status.connected)
+                    .transition(.scale.combined(with: .opacity))
+            case .idle:
+                if showUnseen {
+                    Circle()
+                        .fill(Theme.brand)
+                        .frame(width: 7, height: 7)
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: phase)
+        .accessibilityHidden(true)
     }
 }
 

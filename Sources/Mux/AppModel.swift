@@ -165,6 +165,12 @@ final class AppModel {
                 guard let self, let conn else { return }
                 self.handleConnectionClosed(conn)
             }
+            // Output-finished system notification — BACKGROUND terminals only (if you're viewing it,
+            // you're already watching, so we don't interrupt). The in-app row effect fires for all.
+            conn.onOutputFinished = { [weak conn] wasViewing in
+                guard let conn, !wasViewing else { return }
+                NotificationManager.outputFinished(terminal: conn.title)
+            }
             connections.append(conn)
             if connect { selectedConnectionID = conn.id } // didSet → ensureConnected spawns it
             return conn
