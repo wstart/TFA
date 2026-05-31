@@ -29,6 +29,11 @@ public final class TmuxController {
     private var refreshTask: Task<Void, Never>?
     private var didClose = false
 
+    /// Panes tmux has paused for flow control. Cleared on `%continue`; a per-pause fallback continue
+    /// is scheduled so a missed `%continue` can't freeze a pane's output forever.
+    private var pausedPanes: Set<TmuxPaneID> = []
+    private var pauseFallbackTasks: [TmuxPaneID: Task<Void, Never>] = [:]
+
     public init(connection: TmuxConnection) throws {
         self.connection = connection
         self.state = TmuxState(connectionName: connection.displayName)
@@ -53,6 +58,9 @@ public final class TmuxController {
         await client.waitForControlMode()
         state.authenticating = false
         try await refreshAll()
+        // Enable flow control so a flooding pane (e.g. `yes`) can't grow an unbounded backlog or
+        // swamp the main actor — tmux pauses + buffers instead. Best-effort: old tmux ignores it.
+        client.setFlowControl(pauseAfter: 1)
         state.connected = true
     }
 
@@ -60,6 +68,7 @@ public final class TmuxController {
     public func sendLoginInput(_ data: Data) { client.writeRaw(data) }
 
     public func disconnect() {
+        cancelPauseTasks()
         eventLoop?.cancel(); eventLoop = nil
         refreshTask?.cancel(); refreshTask = nil
         // Release our manual size hold so a concurrently-attached terminal regains its own size.
@@ -84,17 +93,39 @@ public final class TmuxController {
         guard !didClose else { return }
         didClose = true
         state.connected = false
+        cancelPauseTasks()
         eventLoop?.cancel(); eventLoop = nil
         refreshTask?.cancel(); refreshTask = nil
         onConnectionClosed?()
+    }
+
+    /// Flow-control safety net: if `%continue` never arrives for a paused pane, force a continue after
+    /// a short delay so its output can't freeze. Cancelled on `%continue` / teardown.
+    private func scheduleContinueFallback(_ pane: TmuxPaneID) {
+        pauseFallbackTasks[pane]?.cancel()
+        pauseFallbackTasks[pane] = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled, self.pausedPanes.contains(pane) else { return }
+            self.client.continuePane(pane)
+        }
+    }
+
+    private func cancelPauseTasks() {
+        for t in pauseFallbackTasks.values { t.cancel() }
+        pauseFallbackTasks.removeAll()
+        pausedPanes.removeAll()
     }
 
     // MARK: - event application
 
     private func handle(_ event: TmuxEvent) {
         switch event {
-        case .output(let pane, let data), .extendedOutput(let pane, _, let data):
+        case .output(let pane, let data):
             onPaneOutput?(pane, data)
+        case .extendedOutput(let pane, _, let data):
+            onPaneOutput?(pane, data)
+            // Rendered this buffered (paused) batch → ack so tmux resumes live %output for the pane.
+            if pausedPanes.contains(pane) { client.continuePane(pane) }
 
         case .reply:
             break // replies are awaited via send(_:)
@@ -130,8 +161,15 @@ public final class TmuxController {
             scheduleRefresh()
         case .exit:
             handleClosed()
+        case .paused(let pane):
+            pausedPanes.insert(pane)
+            scheduleContinueFallback(pane)
+        case .continued(let pane):
+            pausedPanes.remove(pane)
+            pauseFallbackTasks[pane]?.cancel()
+            pauseFallbackTasks.removeValue(forKey: pane)
         case .paneModeChanged, .clientSessionChanged, .clientDetached,
-             .continued, .paused, .subscriptionChanged,
+             .subscriptionChanged,
              .configError, .message, .pasteBufferChanged, .pasteBufferDeleted, .unknown:
             break
         }

@@ -102,6 +102,18 @@ public final class TmuxControlClient: @unchecked Sendable {
         transport.resize(cols: cols, rows: rows)
     }
 
+    /// Enable tmux flow control: when the client falls behind, tmux buffers a flooding pane and emits
+    /// `%pause` instead of flooding us with `%output`, delivering the backlog as `%extended-output`.
+    /// Fire-and-forget; on a tmux too old for the flag the `%error` is ignored silently (see dispatch).
+    public func setFlowControl(pauseAfter seconds: Int) {
+        sendFireAndForget("refresh-client -f pause-after=\(seconds)")
+    }
+
+    /// Tell tmux we've caught up on a paused pane's backlog so it resumes live `%output` (`%continue`).
+    public func continuePane(_ pane: String) {
+        sendFireAndForget("refresh-client -A '\(pane):continue'")
+    }
+
     public func terminate() {
         transport.terminate()
     }
@@ -209,8 +221,14 @@ public final class TmuxControlClient: @unchecked Sendable {
                 let awaiter = pending.removeFirst()
                 if reply.isError {
                     let msg = reply.lines.joined(separator: "\n")
-                    lastErrorText = msg.isEmpty ? nil : msg
-                    awaiter?.resume(throwing: TmuxError.commandFailed(msg.isEmpty ? "unknown tmux error" : msg))
+                    if let awaiter {
+                        // A real awaited command failed → record the reason and propagate it.
+                        lastErrorText = msg.isEmpty ? nil : msg
+                        awaiter.resume(throwing: TmuxError.commandFailed(msg.isEmpty ? "unknown tmux error" : msg))
+                    }
+                    // else: a fire-and-forget command errored (e.g. `refresh-client -f pause-after`
+                    // on a tmux too old for flow control) — ignore SILENTLY and do NOT poison
+                    // lastErrorText, or an optional command's failure would mislabel the close reason.
                 } else {
                     awaiter?.resume(returning: reply)
                 }
