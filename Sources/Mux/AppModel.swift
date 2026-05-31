@@ -22,6 +22,7 @@ final class AppModel {
             for c in connections {
                 if c.id == selectedConnectionID { c.markViewed() } else { c.resignViewing() }
             }
+            if let id = selectedConnectionID { ensureConnected(id) } // lazy attach on first view
         }
     }
 
@@ -87,12 +88,13 @@ final class AppModel {
         guard connections.isEmpty else { return }
         let existing = TmuxServer.listLocalSessions()
         if existing.isEmpty {
-            openLocal(sessionName: "main")              // create-or-attach a fresh default
+            openLocal(sessionName: "main")              // create-or-attach a fresh default (connects)
         } else {
             for name in existing {
-                openLocal(sessionName: name, attachOnly: true) // attach-session -t NAME (resume)
+                // Register a dormant placeholder; the actual attach happens when it's selected (lazy).
+                openLocal(sessionName: name, attachOnly: true, connect: false)
             }
-            selectedConnectionID = connections.first?.id
+            selectedConnectionID = connections.first?.id // selecting the first triggers its attach
         }
     }
 
@@ -146,11 +148,17 @@ final class AppModel {
         return taken.contains("main") ? Self.lowestUnusedName(taken: taken) : "main"
     }
 
-    private func openLocal(sessionName: String, attachOnly: Bool = false) {
-        open(TmuxConnection(endpoint: .local, sessionName: sessionName, attachOnly: attachOnly))
+    private func openLocal(sessionName: String, attachOnly: Bool = false, connect: Bool = true) {
+        open(TmuxConnection(endpoint: .local, sessionName: sessionName, attachOnly: attachOnly),
+             connect: connect)
     }
 
-    private func open(_ connection: TmuxConnection) {
+    /// Register a terminal. When `connect` is true (new terminal / explicit open) it is selected,
+    /// which lazily triggers its attach via `selectedConnectionID`'s didSet → `ensureConnected`.
+    /// When false (a session discovered at launch / host-switch) it stays a dormant placeholder
+    /// until the user selects it — so no `tmux -CC` is spawned for sessions you never open.
+    @discardableResult
+    private func open(_ connection: TmuxConnection, connect: Bool = true) -> ConnectionSession? {
         do {
             let conn = try ConnectionSession(connection: connection)
             conn.onClosed = { [weak self, weak conn] in
@@ -158,13 +166,23 @@ final class AppModel {
                 self.handleConnectionClosed(conn)
             }
             connections.append(conn)
-            selectedConnectionID = conn.id
-            Task { @MainActor in
-                await conn.connect()
-                if let err = conn.connectError { self.lastError = "\(conn.title): \(err)" }
-            }
+            if connect { selectedConnectionID = conn.id } // didSet → ensureConnected spawns it
+            return conn
         } catch {
             lastError = ConnectionSession.describe(error)
+            return nil
+        }
+    }
+
+    /// LAZY ATTACH: if the given terminal is still a dormant placeholder, spawn its connection now.
+    /// Called whenever a terminal becomes selected (sidebar / ⌘K / ⌘1–9 / reveal all funnel through
+    /// `selectedConnectionID`). Idempotent — already connecting/connected terminals are skipped.
+    func ensureConnected(_ id: UUID) {
+        guard let conn = connection(id), conn.isDormant else { return }
+        conn.beginConnecting() // synchronous → the UI shows a connecting state immediately
+        Task { @MainActor in
+            await conn.connect()
+            if let err = conn.connectError { self.lastError = "\(conn.title): \(err)" }
         }
     }
 
@@ -279,7 +297,17 @@ final class AppModel {
 
     /// Destructive: kill the terminal's tmux session and remove it from the app.
     func closeTerminal(_ conn: ConnectionSession) {
-        conn.close()
+        if conn.isDormant {
+            // A never-connected placeholder has no live -CC client to send `kill-session` on, so
+            // briefly connect, then kill. The sidebar row is removed immediately regardless.
+            conn.beginConnecting()
+            Task { @MainActor in
+                await conn.connect()
+                conn.close()
+            }
+        } else {
+            conn.close()
+        }
         removeConnection(conn)
     }
 
@@ -393,12 +421,13 @@ final class AppModel {
         for name in names where !existing.contains(name) {
             switch host {
             case .local:
-                openLocal(sessionName: name, attachOnly: true)
+                openLocal(sessionName: name, attachOnly: true, connect: false) // dormant placeholder
             case .ssh(let h, let args):
                 open(TmuxConnection(endpoint: .ssh(host: h, sshArgs: args),
                                     sessionName: name,
                                     attachOnly: true,
-                                    password: hostPasswords[h]))
+                                    password: hostPasswords[h]),
+                     connect: false) // dormant placeholder — attaches when selected
             }
         }
     }

@@ -40,6 +40,11 @@ final class ConnectionSession: Identifiable {
     /// the freshly-attached pane (pane ids survive on the server, but the engine must re-snapshot).
     private(set) var generation = 0
 
+    /// LAZY ATTACH: true until this terminal is first asked to connect. A discovered session shows as
+    /// a sidebar placeholder (status = Idle) and only spawns its `tmux -CC` when the user selects it —
+    /// so launching / switching host with many sessions stays instant and cheap.
+    private(set) var isDormant = true
+
     /// True when a NON-foreground terminal has produced output the user hasn't seen yet — drives the
     /// sidebar activity dot. Cleared when the terminal becomes the one being viewed.
     var hasUnseenOutput = false
@@ -150,7 +155,12 @@ final class ConnectionSession: Identifiable {
     /// This terminal is no longer on screen — future output flags activity.
     func resignViewing() { isViewing = false }
 
+    /// Flip out of the dormant (placeholder) state — synchronous, so the sidebar/header switch to a
+    /// "connecting" state the instant the user selects the terminal, before the async `connect` runs.
+    func beginConnecting() { isDormant = false }
+
     func connect() async {
+        isDormant = false
         do {
             try await controller.connect()
             connectError = nil

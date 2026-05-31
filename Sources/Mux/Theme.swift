@@ -72,6 +72,7 @@ enum Theme {
 /// header render it identically — symbol + tint + label (never color alone). This is the single
 /// place the error > reconnecting > connected > connecting priority lives.
 enum TerminalStatus: Equatable {
+    case dormant             // lazy-attach placeholder: discovered but not yet connected
     case connecting          // first attach in progress
     case reconnecting        // dropped; auto-retrying
     case connected
@@ -79,6 +80,7 @@ enum TerminalStatus: Equatable {
 
     @MainActor
     static func of(_ conn: ConnectionSession) -> TerminalStatus {
+        if conn.isDormant { return .dormant }                    // not attached yet (lazy)
         if conn.isReconnecting { return .reconnecting }          // actively recovering wins
         if conn.connectError != nil, !conn.state.connected { return .failed }
         if conn.state.connected { return .connected }
@@ -96,6 +98,7 @@ enum TerminalStatus: Equatable {
         case .failed: return "exclamationmark.triangle.fill"
         case .reconnecting: return "arrow.triangle.2.circlepath"
         case .connecting: return "circle.dotted"
+        case .dormant: return "moon.zzz"
         }
     }
 
@@ -105,6 +108,7 @@ enum TerminalStatus: Equatable {
         case .failed: return Theme.Status.failed
         case .reconnecting: return Theme.Status.reconnecting
         case .connecting: return Theme.Status.connecting
+        case .dormant: return Theme.Status.connecting // muted/secondary, like connecting
         }
     }
 
@@ -115,6 +119,7 @@ enum TerminalStatus: Equatable {
         case .failed: return "Connection failed"
         case .reconnecting: return "Reconnecting"
         case .connecting: return "Connecting"
+        case .dormant: return "Idle — select to connect"
         }
     }
 }
