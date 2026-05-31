@@ -8,7 +8,7 @@ import Foundation
 @MainActor
 public final class TmuxController {
     public let state: TmuxState
-    public let connection: TmuxConnection
+    public private(set) var connection: TmuxConnection
     private let client: TmuxControlClient
 
     /// The session this control client is currently attached to (tracked from `%session-changed`).
@@ -210,7 +210,9 @@ public final class TmuxController {
 
     private static let fmtSession = "#{session_id}|#{session_attached}|#{session_name}"
     private static let fmtWindow = "#{session_id}|#{window_id}|#{window_active}|#{window_layout}|#{window_name}"
-    private static let fmtPane = "#{session_id}|#{window_id}|#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_left}|#{pane_top}|#{pane_current_command}|#{pane_title}"
+    // `pane_current_path` is LAST so any `|` it might contain stays in the final field (splitFields
+    // caps the split count) rather than corrupting earlier fields.
+    private static let fmtPane = "#{session_id}|#{window_id}|#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_left}|#{pane_top}|#{pane_current_command}|#{pane_title}|#{pane_current_path}"
 
     /// Re-query THIS connection's session and reconcile it into `state`, preserving existing objects
     /// by id.
@@ -233,14 +235,14 @@ public final class TmuxController {
             guard f.count == 5 else { continue }
             windowsBySession[f[0], default: []].append((f[1], f[2] == "1", f[3], f[4]))
         }
-        var panesByWindow: [TmuxWindowID: [(id: TmuxPaneID, active: Bool, w: Int, h: Int, x: Int, y: Int, cmd: String, title: String)]] = [:]
+        var panesByWindow: [TmuxWindowID: [(id: TmuxPaneID, active: Bool, w: Int, h: Int, x: Int, y: Int, cmd: String, title: String, path: String)]] = [:]
         for line in panesReply.lines {
-            let f = splitFields(line, 9)
-            guard f.count == 10 else { continue }
+            let f = splitFields(line, 10)
+            guard f.count == 11 else { continue }
             panesByWindow[f[1], default: []].append((
                 f[2], f[3] == "1",
                 Int(f[4]) ?? 0, Int(f[5]) ?? 0, Int(f[6]) ?? 0, Int(f[7]) ?? 0,
-                f[8], f[9]))
+                f[8], f[9], f[10]))
         }
 
         let oldPaneIDs = Set(allPaneIDs())
@@ -269,6 +271,7 @@ public final class TmuxController {
                     pane.left = pmeta.x; pane.top = pmeta.y
                     pane.currentCommand = pmeta.cmd
                     pane.title = pmeta.title
+                    pane.currentPath = pmeta.path
                     if pmeta.active { window.activePaneID = pmeta.id }
                     newPanes.append(pane)
                 }
@@ -306,6 +309,10 @@ public final class TmuxController {
     public func renameAttachedSession(to name: String) {
         guard let sid = attachedSessionID ?? attachedSession?.id else { return }
         client.sendFireAndForget("rename-session -t \(sid) \(Self.quote(name))")
+        // Keep our identity in sync IMMEDIATELY so anything keyed by the session name (per-session
+        // env, group membership) tracks the rename — and matches how the session is restored by its
+        // (new) name on the next launch. tmux's own %session-renamed refresh will agree shortly.
+        connection.sessionName = name
     }
 
     public func killAttachedSession() {

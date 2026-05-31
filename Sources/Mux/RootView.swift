@@ -139,9 +139,12 @@ private struct ActiveTerminalHeader: View {
                 Text(conn.title)
                     .font(Theme.Font.headerTitle)
                     .lineLimit(1)
+                    .layoutPriority(1)
 
                 if let host = conn.host { metaChip("network", host) }
                 if let g = conn.grid { metaChip("squareshape.split.2x2", "\(g.cols)×\(g.rows)") }
+
+                if let path = conn.currentPath { pathChip(displayPath(path, remote: conn.host != nil)) }
 
                 Spacer(minLength: Theme.Space.md)
 
@@ -166,6 +169,34 @@ private struct ActiveTerminalHeader: View {
         .padding(.vertical, Theme.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    /// The active pane's working directory, rendered as a flexible middle-truncating chip — the
+    /// header's main "where am I" cue. Takes the slack between the title and the trailing controls.
+    private func pathChip(_ text: String) -> some View {
+        HStack(spacing: Theme.Space.xxs) {
+            Image(systemName: "folder").font(.system(size: 10))
+            Text(text)
+                .font(Theme.Font.headerMeta)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, Theme.Space.sm)
+        .padding(.vertical, Theme.Space.xxs)
+        .background(.quaternary, in: Capsule())
+        .help(text)
+        .accessibilityLabel("当前路径 \(text)")
+    }
+
+    /// Abbreviate a LOCAL path's home prefix to `~`. Remote paths are left as-is (the home that
+    /// matters is the remote machine's, which we can't assume matches this Mac's).
+    private func displayPath(_ path: String, remote: Bool) -> String {
+        guard !remote else { return path }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if path == home { return "~" }
+        if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }
+        return path
     }
 
     private func metaChip(_ symbol: String, _ text: String) -> some View {

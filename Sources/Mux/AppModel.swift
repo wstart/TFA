@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import AppKit
 import TmuxKit
 
 /// Top-level app state.
@@ -145,6 +146,25 @@ final class AppModel {
         addHost(host: host, args: args)
     }
 
+    /// Clone a terminal's CONFIG into a brand-new tmux session: same endpoint (local / ssh host +
+    /// args), socket, tmux path, password, and saved per-session environment — only the session name
+    /// is fresh. Always created (never attach-only), so it behaves identically from the first shell.
+    func cloneTerminal(_ conn: ConnectionSession) {
+        var clone = conn.controller.connection
+        clone.attachOnly = false
+        switch clone.endpoint {
+        case .local:           clone.sessionName = nextLocalSessionName()
+        case .ssh(let host, _): clone.sessionName = nextSSHName(host: host)
+        }
+        // Carry the source's saved environment over to the clone's (new) key before opening, so
+        // `open` injects it just like the original.
+        if let srcEnv = sessionEnvironments[conn.groupKey], !srcEnv.isEmpty {
+            sessionEnvironments[envLookupKey(clone)] = srcEnv
+            persistEnvironments()
+        }
+        open(clone)
+    }
+
     /// A session name unused among this host's live connections (we can't list remote sessions, so
     /// this is best-effort: "main", then "mux-N").
     private func nextSSHName(host: String) -> String {
@@ -213,19 +233,29 @@ final class AppModel {
     /// to a terminal restores the last one — this just flips the detail area over to the Lab.
     func openLab() {
         labSelected = true; skillsSelected = false; claudeMdSelected = false
-        for c in connections { c.resignViewing() } // no terminal is on screen while the Lab shows
+        leaveTerminals() // no terminal is on screen while the Lab shows
     }
 
     /// Show the Skills manager in the detail area. Mutually exclusive with the other tool panes / a terminal.
     func openSkills() {
         skillsSelected = true; labSelected = false; claudeMdSelected = false
-        for c in connections { c.resignViewing() } // no terminal is on screen while Skills shows
+        leaveTerminals()
     }
 
     /// Show the global CLAUDE.md rules editor. Mutually exclusive with the other tool panes / a terminal.
     func openClaudeMd() {
         claudeMdSelected = true; labSelected = false; skillsSelected = false
+        leaveTerminals()
+    }
+
+    /// Switching to a tool pane (Lab / Skills / CLAUDE.md): no terminal is on screen, so stop flagging
+    /// their output as "seen" AND surrender the keyboard focus the SwiftTerm view grabbed — otherwise
+    /// the hidden session keeps a focused (blinking) cursor and could still swallow keystrokes.
+    private func leaveTerminals() {
         for c in connections { c.resignViewing() }
+        DispatchQueue.main.async {
+            if let window = NSApp.keyWindow ?? NSApp.mainWindow { window.makeFirstResponder(nil) }
+        }
     }
 
     /// The terminals the sidebar actually shows for the current host, in sidebar order (each group in
@@ -298,7 +328,24 @@ final class AppModel {
     func renameTerminal(_ conn: ConnectionSession, to name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        conn.controller.renameAttachedSession(to: trimmed)
+        let oldKey = conn.groupKey
+        conn.controller.renameAttachedSession(to: trimmed) // updates connection.sessionName synchronously
+        migrateSessionKey(from: oldKey, to: conn.groupKey)  // so env + groups survive the rename / restart
+    }
+
+    /// Re-key a session's persisted state (per-session env, group membership) when its name changes.
+    /// Without this, renaming a session orphans its env/group under the old name — invisible after the
+    /// next launch, which restores the session under its NEW name.
+    private func migrateSessionKey(from old: String, to new: String) {
+        guard old != new else { return }
+        if let env = sessionEnvironments.removeValue(forKey: old) {
+            sessionEnvironments[new] = env
+            persistEnvironments()
+        }
+        for i in groups.indices where groups[i].memberKeys.contains(old) {
+            groups[i].memberKeys.remove(old)
+            groups[i].memberKeys.insert(new) // groups' didSet persists
+        }
     }
 
     /// Non-destructive close: detach from the tmux session (it SURVIVES and resumes on next

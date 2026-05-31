@@ -102,6 +102,12 @@ final class ConnectionSession: Identifiable {
     /// The current command running in the terminal's pane (for a subtitle).
     var subtitle: String { controller.primaryPane?.currentCommand ?? "" }
 
+    /// The active pane's current working directory (nil until known) — shown in the header.
+    var currentPath: String? {
+        let p = controller.primaryPane?.currentPath ?? ""
+        return p.isEmpty ? nil : p
+    }
+
     /// The ssh host for remote terminals (nil for local) — header context.
     var host: String? {
         if case .ssh(let h, _) = controller.connection.endpoint { return h }

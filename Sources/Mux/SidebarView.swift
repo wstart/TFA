@@ -306,6 +306,7 @@ struct SidebarView: View {
             }
         }
         Button("环境变量…") { envTarget = conn }
+        Button("克隆 session") { appModel.cloneTerminal(conn) }
         Divider()
         // Non-destructive: detach (session survives, resumes next launch).
         Button("Close") { appModel.detachTerminal(conn) }

@@ -19,6 +19,8 @@ public final class TmuxPane: Identifiable {
     public let id: TmuxPaneID
     public var title: String
     public var currentCommand: String
+    /// The pane's current working directory (`#{pane_current_path}`), empty until known.
+    public var currentPath: String
     public var active: Bool
 
     // 在窗口内的几何（单位：字符格）。来自 layout 解析或 list-panes。
@@ -31,6 +33,7 @@ public final class TmuxPane: Identifiable {
         id: TmuxPaneID,
         title: String = "",
         currentCommand: String = "",
+        currentPath: String = "",
         active: Bool = false,
         width: Int = 0,
         height: Int = 0,
@@ -40,6 +43,7 @@ public final class TmuxPane: Identifiable {
         self.id = id
         self.title = title
         self.currentCommand = currentCommand
+        self.currentPath = currentPath
         self.active = active
         self.width = width
         self.height = height
