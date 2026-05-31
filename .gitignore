@@ -1,0 +1,13 @@
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+.DS_Store
+docs/.tmp/
+/tmp-research/
+*.app
+# Editor swap / backup files
+*.swp
+*.swo
+*~
