@@ -122,45 +122,50 @@ struct SidebarView: View {
     /// A group folder in the tree: an expandable DisclosureGroup whose children are its sessions
     /// (indented). Kept visible as a drop target even when empty (unless filtering). Collapse state
     /// persists; filtering force-expands so matches are never hidden inside a folded group.
+    /// A group folder rendered WITHOUT the system `DisclosureGroup`: a tappable header row with a
+    /// SELF-DRAWN chevron, then (when expanded) its indented session rows. We draw our own chevron
+    /// because the system DisclosureGroup triangle in a `List(.sidebar)` mixed with `Section` rendered
+    /// inconsistently across macOS versions — the first group's triangle could go missing. Self-drawn
+    /// is identical on every version and fully styleable. Collapse state persists; filtering
+    /// force-expands so matches are never hidden inside a folded group.
     @ViewBuilder
     private func groupTree(_ group: AppModel.TerminalGroup) -> some View {
         let members = filtered(appModel.visibleTerminals(in: group))
         if filter.isEmpty || !members.isEmpty {
-            DisclosureGroup(isExpanded: groupExpanded(group.id)) {
-                ForEach(members) { row($0) }
+            groupHeaderRow(group)
+                // Drop a terminal onto the folder header to file it into this group (#8).
+                .dropDestination(for: String.self) { keys, _ in
+                    for key in keys {
+                        if let conn = appModel.connections.first(where: { $0.groupKey == key }) {
+                            appModel.assign(conn, toGroup: group.id)
+                        }
+                    }
+                    return true
+                }
+            if groupExpanded(group.id) {
+                ForEach(members) { row($0).padding(.leading, Theme.Space.lg) } // indent under the folder
                 if members.isEmpty {
                     Text("Empty — right-click a terminal to add")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                        .padding(.leading, Theme.Space.lg)
                 }
-            } label: { groupHeader(group) }
-            // Drop terminals onto the whole folder to file them into this group (#8). Attached to the
-            // entire DisclosureGroup (not just the label) so the larger target also catches drops over
-            // the folder's expanded children area.
-            .dropDestination(for: String.self) { keys, _ in
-                for key in keys {
-                    if let conn = appModel.connections.first(where: { $0.groupKey == key }) {
-                        appModel.assign(conn, toGroup: group.id)
-                    }
-                }
-                return true
             }
         }
     }
 
-    /// Two-way binding for a group's expanded state, backed by the persisted `collapsedRaw` set.
-    private func groupExpanded(_ id: UUID) -> Binding<Bool> {
-        Binding(
-            get: {
-                if !filter.trimmingCharacters(in: .whitespaces).isEmpty { return true }
-                return !collapsedRaw.split(separator: ",").contains(Substring(id.uuidString))
-            },
-            set: { expanded in
-                var ids = Set(collapsedRaw.split(separator: ",").map(String.init))
-                if expanded { ids.remove(id.uuidString) } else { ids.insert(id.uuidString) }
-                collapsedRaw = ids.sorted().joined(separator: ",")
-            }
-        )
+    /// Whether a group is expanded, backed by the persisted `collapsedRaw` set. Filtering
+    /// force-expands so matches are never hidden inside a folded group.
+    private func groupExpanded(_ id: UUID) -> Bool {
+        if !filter.trimmingCharacters(in: .whitespaces).isEmpty { return true }
+        return !collapsedRaw.split(separator: ",").contains(Substring(id.uuidString))
+    }
+
+    /// Toggle (and persist) a group's collapsed state — driven by tapping the folder header.
+    private func toggleGroup(_ id: UUID) {
+        var ids = Set(collapsedRaw.split(separator: ",").map(String.init))
+        if ids.contains(id.uuidString) { ids.remove(id.uuidString) } else { ids.insert(id.uuidString) }
+        collapsedRaw = ids.sorted().joined(separator: ",")
     }
 
     // MARK: - Rows / headers
@@ -175,13 +180,33 @@ struct SidebarView: View {
             .contextMenu { rowMenu(conn) }
     }
 
-    private func groupHeader(_ group: AppModel.TerminalGroup) -> some View {
-        sectionHeaderLabel(group.name, icon: "folder.fill",
-                           count: appModel.visibleTerminals(in: group).count)
-            .contextMenu {
-                Button("Rename Group…") { startRenameGroup(group) }
-                Button("Delete Group", role: .destructive) { appModel.deleteGroup(group.id) }
+    /// A tappable folder header with a self-drawn chevron (rotates 90° on expand). Tapping anywhere on
+    /// the row toggles collapse — no reliance on the system DisclosureGroup triangle (see groupTree).
+    private func groupHeaderRow(_ group: AppModel.TerminalGroup) -> some View {
+        let expanded = groupExpanded(group.id)
+        return Button {
+            toggleGroup(group.id)
+        } label: {
+            HStack(spacing: Theme.Space.xs) {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .frame(width: 10)
+                sectionHeaderLabel(group.name, icon: "folder.fill",
+                                   count: appModel.visibleTerminals(in: group).count)
             }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .animation(.easeInOut(duration: 0.15), value: expanded)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(group.name) group, \(expanded ? "expanded" : "collapsed")")
+        .accessibilityHint(expanded ? "Collapse group" : "Expand group")
+        .contextMenu {
+            Button("Rename Group…") { startRenameGroup(group) }
+            Button("Delete Group", role: .destructive) { appModel.deleteGroup(group.id) }
+        }
     }
 
     /// Shared prominent section header: a brand-tinted icon, a LARGE full-strength title (so a group
