@@ -385,6 +385,23 @@ public final class TmuxController {
     public func newSession(name: String) { client.sendFireAndForget("new-session -d -s \(Self.quote(name))") }
     public func killSession(_ session: TmuxSessionID) { client.sendFireAndForget("kill-session -t \(session)") }
 
+    /// Set per-session environment variables (`set-environment -t session`). New windows/panes in the
+    /// session inherit them; the already-running initial shell does not, unless respawned.
+    public func applySessionEnvironment(_ env: [String: String]) {
+        guard !env.isEmpty, let sid = attachedSessionID ?? attachedSession?.id else { return }
+        for (k, v) in env {
+            client.sendFireAndForget("set-environment -t \(sid) \(Self.quote(k)) \(Self.quote(v))")
+        }
+    }
+
+    /// Restart the primary pane's command (`respawn-pane -k`) so a freshly-created session's initial
+    /// shell picks up the just-set environment. DESTRUCTIVE to whatever runs in that pane — use only
+    /// right after a fresh create, or on an explicit user request.
+    public func respawnPrimaryPane() {
+        guard let pane = primaryPane?.id else { return }
+        client.sendFireAndForget("respawn-pane -k -t \(pane)")
+    }
+
     /// Tell tmux this GUI client's grid size and try to OWN it (so the pane fills our view). Pins
     /// this session to manual window sizing and resizes its active window to our grid; if another
     /// client/option defeats this, hydration still pins the engine to tmux's actual pane size, so

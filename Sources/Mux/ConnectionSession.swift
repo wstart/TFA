@@ -199,14 +199,26 @@ final class ConnectionSession: Identifiable {
 
     func connect() async {
         isDormant = false
+        let freshCreate = !hasEverConnected && !baseConnection.attachOnly
         do {
             try await controller.connect()
             connectError = nil
             isClosed = false
+            applyEnvironment(freshCreate: freshCreate)
             hasEverConnected = true
         } catch {
             connectError = Self.describe(error)
         }
+    }
+
+    /// Inject this connection's per-session environment after attach. On a fresh create (first
+    /// connect of a non-attach-only session) also respawn the initial shell so it picks them up; on
+    /// reconnect / launch-resume we never respawn — that would kill whatever the user is running.
+    private func applyEnvironment(freshCreate: Bool) {
+        let env = baseConnection.environment
+        guard !env.isEmpty else { return }
+        controller.applySessionEnvironment(env)
+        if freshCreate { controller.respawnPrimaryPane() }
     }
 
     // MARK: - Reconnection

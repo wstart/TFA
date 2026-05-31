@@ -89,6 +89,7 @@ final class AppModel {
     func start() {
         loadGroups()
         loadHosts()
+        loadEnvironments()
         guard connections.isEmpty else { return }
         let existing = TmuxServer.listLocalSessions()
         if existing.isEmpty {
@@ -163,6 +164,8 @@ final class AppModel {
     /// until the user selects it — so no `tmux -CC` is spawned for sessions you never open.
     @discardableResult
     private func open(_ connection: TmuxConnection, connect: Bool = true) -> ConnectionSession? {
+        var connection = connection
+        connection.environment = sessionEnvironments[envLookupKey(connection)] ?? [:] // inject saved env
         do {
             let conn = try ConnectionSession(connection: connection)
             conn.onClosed = { [weak self, weak conn] in
@@ -585,6 +588,47 @@ final class AppModel {
     }
     var visibleUngroupedTerminals: [ConnectionSession] {
         ungroupedTerminals.filter { matchesCurrentHost($0) }
+    }
+
+    // MARK: - Per-session environment variables (方案 A: tmux set-environment)
+
+    private static let envStoreKey = "sessionEnvironments.v1"
+    /// Per-session env vars keyed by launch-stable groupKey (sessionName, or sessionName@host).
+    /// Persisted; injected on (re)connect via `set-environment`.
+    private(set) var sessionEnvironments: [String: [String: String]] = [:]
+
+    private func loadEnvironments() {
+        guard let data = UserDefaults.standard.data(forKey: Self.envStoreKey),
+              let decoded = try? JSONDecoder().decode([String: [String: String]].self, from: data) else { return }
+        sessionEnvironments = decoded
+    }
+    private func persistEnvironments() {
+        if let data = try? JSONEncoder().encode(sessionEnvironments) {
+            UserDefaults.standard.set(data, forKey: Self.envStoreKey)
+        }
+    }
+
+    /// The groupKey a (not-yet-opened) connection will have — for looking up its saved environment.
+    private func envLookupKey(_ c: TmuxConnection) -> String {
+        switch c.endpoint {
+        case .local: return c.sessionName
+        case .ssh(let h, _): return "\(c.sessionName)@\(h)"
+        }
+    }
+
+    /// The saved environment for a terminal (for the editor's initial values).
+    func environment(for conn: ConnectionSession) -> [String: String] {
+        sessionEnvironments[conn.groupKey] ?? [:]
+    }
+
+    /// Persist a terminal's per-session environment and apply it live to the running session. Note:
+    /// already-running shells keep their old environment until a new window opens (or the shell is
+    /// respawned); new windows pick it up immediately.
+    func setEnvironment(_ env: [String: String], for conn: ConnectionSession) {
+        let key = conn.groupKey
+        if env.isEmpty { sessionEnvironments.removeValue(forKey: key) } else { sessionEnvironments[key] = env }
+        persistEnvironments()
+        conn.controller.applySessionEnvironment(env)
     }
 
     // MARK: - Font size

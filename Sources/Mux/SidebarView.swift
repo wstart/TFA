@@ -11,6 +11,7 @@ struct SidebarView: View {
     @State private var renameTarget: ConnectionSession?
     @State private var renameText: String = ""
     @State private var killTarget: ConnectionSession?
+    @State private var envTarget: ConnectionSession?
 
     @State private var showHostSheet = false
     @State private var showServerSheet = false
@@ -138,6 +139,12 @@ struct SidebarView: View {
             }
         }
         .sheet(isPresented: $showServerSheet) { ServerListView() }
+        .sheet(item: $envTarget) { conn in
+            EnvironmentSheet(initial: appModel.environment(for: conn), sessionName: conn.title) { env in
+                appModel.setEnvironment(env, for: conn)
+                envTarget = nil
+            } onCancel: { envTarget = nil }
+        }
     }
 
     // MARK: - Sections
@@ -292,6 +299,7 @@ struct SidebarView: View {
                 Button("Remove from Group") { appModel.removeFromGroups(conn) }
             }
         }
+        Button("环境变量…") { envTarget = conn }
         Divider()
         // Non-destructive: detach (session survives, resumes next launch).
         Button("Close") { appModel.detachTerminal(conn) }
@@ -593,6 +601,85 @@ struct ServerListView: View {
         }
         .padding(Theme.Space.xl)
         .frame(width: 400)
+    }
+}
+
+/// Editor for a session's per-session environment variables (tmux `set-environment`). A key/value
+/// list with add/remove. Saving applies them live (new windows pick them up immediately; existing
+/// shells keep their old environment until reopened/respawned).
+struct EnvironmentSheet: View {
+    let initial: [String: String]
+    let sessionName: String
+    let onSave: ([String: String]) -> Void
+    let onCancel: () -> Void
+
+    private struct EnvRow: Identifiable { let id = UUID(); var key: String; var value: String }
+    @State private var rows: [EnvRow] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.lg) {
+            Text("环境变量 · \(sessionName)").font(.headline)
+            Text("保存后对该会话**新开的窗口 / 重启的 shell**生效；已经在跑的 shell 不变。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ScrollView {
+                VStack(spacing: Theme.Space.sm) {
+                    ForEach($rows) { $row in
+                        HStack(spacing: Theme.Space.sm) {
+                            TextField("KEY", text: $row.key)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 150)
+                                .autocorrectionDisabled()
+                            Text("=").foregroundStyle(.secondary)
+                            TextField("value", text: $row.value)
+                                .textFieldStyle(.roundedBorder)
+                                .autocorrectionDisabled()
+                            Button { rows.removeAll { $0.id == row.id } } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("删除变量")
+                        }
+                    }
+                    if rows.isEmpty {
+                        Text("暂无变量").font(.caption).foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                }
+                .padding(.vertical, Theme.Space.xs)
+            }
+            .frame(height: 200)
+
+            Button { rows.append(EnvRow(key: "", value: "")) } label: {
+                Label("添加变量", systemImage: "plus")
+            }
+            .buttonStyle(.borderless)
+
+            HStack {
+                Spacer()
+                Button("取消", role: .cancel, action: onCancel)
+                Button("保存") { onSave(collected()) }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(Theme.Space.xl)
+        .frame(width: 480)
+        .onAppear {
+            rows = initial.sorted { $0.key < $1.key }.map { EnvRow(key: $0.key, value: $0.value) }
+        }
+    }
+
+    /// Collapse the rows into a dict, dropping blank keys; later rows win on duplicate keys.
+    private func collected() -> [String: String] {
+        var out: [String: String] = [:]
+        for r in rows {
+            let k = r.key.trimmingCharacters(in: .whitespaces)
+            if !k.isEmpty { out[k] = r.value }
+        }
+        return out
     }
 }
 

@@ -24,6 +24,10 @@ public struct TmuxConnection: Sendable {
     /// struct and never part of `displayName`/logs. NOTE: the app layer separately persists saved-host
     /// passwords to the macOS Keychain (see `AppModel.addHost` / `Keychain`), keyed by `user@host`.
     public var password: String?
+    /// Per-session environment variables, injected after attach via `set-environment -t session`.
+    /// New windows/panes in the session inherit them; the initial shell only picks them up on a
+    /// fresh create (when we respawn it). Empty by default.
+    public var environment: [String: String]
 
     public init(endpoint: Endpoint = .local,
                 sessionName: String = "GUI",
@@ -32,7 +36,8 @@ public struct TmuxConnection: Sendable {
                 tmuxPath: String? = nil,
                 cols: Int = 80,
                 rows: Int = 24,
-                password: String? = nil) {
+                password: String? = nil,
+                environment: [String: String] = [:]) {
         self.endpoint = endpoint
         self.sessionName = sessionName
         self.attachOnly = attachOnly
@@ -41,6 +46,7 @@ public struct TmuxConnection: Sendable {
         self.cols = cols
         self.rows = rows
         self.password = password
+        self.environment = environment
     }
 
     /// A short, human-readable label for this connection.
