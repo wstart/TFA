@@ -3,6 +3,19 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
+## [0.2.1] — 2026-05-31
+
+### 修复
+- **分组折叠三角**：侧边栏第一个分组在部分 macOS 版本上不显示可折叠的小三角（系统
+  `DisclosureGroup` 在 `List` 中与 `Section` 混用时渲染不一致）。改为**自绘 chevron**，跨版本
+  一致、整行可点折叠。
+
+### 新增 / 变更
+- **拖拽分组反馈**：拖一个终端经过分组文件夹时，文件夹**高亮**提示“松手放这”；拖到顶部松手则
+  显示“松手 → 移出分组”。
+- **切换 host 提示**：切到远程 host、后台发现会话期间显示“正在发现 … 的会话…”，不再是空窗。
+- **休眠行引导**：懒加载的休眠终端行显示“未连接 · 点击打开”。
+
 ## [0.2.0] — 2026-05-31
 
 ### 新增
@@ -31,5 +44,6 @@
   跨终端搜索（⌘F）、可拖拽分组。
 - 原生设计系统、色盲友好的状态指示、设置窗口（⌘,，含快捷键速查）、app 图标。
 
+[0.2.1]: https://github.com/wstart/TFA/releases/tag/v0.2.1
 [0.2.0]: https://github.com/wstart/TFA/releases/tag/v0.2.0
 [0.1.0]: https://github.com/wstart/TFA/releases/tag/v0.1.0
