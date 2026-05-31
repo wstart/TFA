@@ -3,6 +3,16 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
+## [0.3.0] — 2026-05-31
+
+### 新增
+- **输出活动特效 + 完成通知**：
+  - **输出中**：侧边栏的活动点**脉冲**（呼吸式），一眼看出哪个终端正在产生输出。
+  - **输出结束**（~1.2s 无新输出）：行内闪一个绿色 **checkmark**；持续输出（如 `tail -f`）不会
+    误判为结束。
+  - **后台终端**输出结束时弹 macOS 系统通知「〈终端名〉· 输出完成」；你正在查看的前台终端**不弹**
+    （不打扰）。首次运行会请求通知授权。
+
 ## [0.2.1] — 2026-05-31
 
 ### 修复
@@ -44,6 +54,7 @@
   跨终端搜索（⌘F）、可拖拽分组。
 - 原生设计系统、色盲友好的状态指示、设置窗口（⌘,，含快捷键速查）、app 图标。
 
+[0.3.0]: https://github.com/wstart/TFA/releases/tag/v0.3.0
 [0.2.1]: https://github.com/wstart/TFA/releases/tag/v0.2.1
 [0.2.0]: https://github.com/wstart/TFA/releases/tag/v0.2.0
 [0.1.0]: https://github.com/wstart/TFA/releases/tag/v0.1.0
