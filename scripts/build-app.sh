@@ -20,7 +20,7 @@ cd "$ROOT"
 BIN_NAME="Mux"        # SwiftPM executable target (built binary name) — keep as "Mux"
 APP_NAME="TFA"        # user-facing app/bundle name
 BUNDLE_ID="com.tfa.app"
-VERSION="0.4.1"
+VERSION="0.5.0"
 
 echo "==> swift build -c $CONFIG"
 swift build -c "$CONFIG"

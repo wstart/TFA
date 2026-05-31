@@ -3,6 +3,16 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
+## [0.5.0] — 2026-05-31
+
+### 新增
+- **实验室 ·「Token 用量」**：把 [ccusage](https://github.com/ryoppippi/ccusage) 的核心用 Swift
+  重写并**内置**（覆盖 **Claude Code + Codex** 两个源），读本机 `~/.claude` / `~/.codex` 的使用
+  记录，算出 token 消耗与**估算成本** —— 日 / 周 / 月 / 会话视图、按模型分解、总计；后台加载不卡界面。
+  - 定价：内置表 + 模糊模型匹配 + 分层（200k 阈值）；Claude 与 Codex 各自的成本公式与去重逻辑。
+  - 说明：成本为**本地估算**（内置定价快照，可能与实际账单有出入）；本版仅覆盖 claude + codex
+    两个源（ccusage 另 14 个源不在范围）。
+
 ## [0.4.1] — 2026-05-31
 
 ### 新增
@@ -72,6 +82,7 @@
   跨终端搜索（⌘F）、可拖拽分组。
 - 原生设计系统、色盲友好的状态指示、设置窗口（⌘,，含快捷键速查）、app 图标。
 
+[0.5.0]: https://github.com/wstart/TFA/releases/tag/v0.5.0
 [0.4.1]: https://github.com/wstart/TFA/releases/tag/v0.4.1
 [0.4.0]: https://github.com/wstart/TFA/releases/tag/v0.4.0
 [0.3.0]: https://github.com/wstart/TFA/releases/tag/v0.3.0
