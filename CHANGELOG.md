@@ -3,6 +3,16 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
+## [0.4.0] — 2026-05-31
+
+### 新增
+- **实验室（Lab）**：侧边栏左下角新增「实验室」入口，详情区切换为实验功能面板。首个实验：
+  **系统监控** —— 实时 CPU 占用、内存用量、负载均值（1/5/15）、运行时间、GPU 型号（macOS 无公开
+  GPU 利用率 API，仅显示型号）。
+- **每会话环境变量**：右键终端 →「环境变量…」编辑该会话专属的环境变量（tmux `set-environment`），
+  持久化保存、(重)连接时自动注入。新建会话时会重启初始 shell 让变量即时生效；续跑/重连不重启
+  （避免杀掉正在运行的东西）。会话内新开的窗口都会继承这些变量。
+
 ## [0.3.0] — 2026-05-31
 
 ### 新增
@@ -54,6 +64,7 @@
   跨终端搜索（⌘F）、可拖拽分组。
 - 原生设计系统、色盲友好的状态指示、设置窗口（⌘,，含快捷键速查）、app 图标。
 
+[0.4.0]: https://github.com/wstart/TFA/releases/tag/v0.4.0
 [0.3.0]: https://github.com/wstart/TFA/releases/tag/v0.3.0
 [0.2.1]: https://github.com/wstart/TFA/releases/tag/v0.2.1
 [0.2.0]: https://github.com/wstart/TFA/releases/tag/v0.2.0
