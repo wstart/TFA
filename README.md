@@ -5,6 +5,8 @@
 
 ![TFA — 在一个原生窗口里管理大量本地 / 远程 tmux 终端](docs/screenshot.png)
 
+> 📦 [**下载最新版 TFA.app**](https://github.com/wstart/TFA/releases/latest) · macOS 14+ · 需本机已安装 `tmux`
+
 TFA **不是**另写一个多路复用器，而是**封装真实的 tmux**：通过 tmux 的**控制模式**
 （`tmux -CC`）和一个真正的 tmux server 通信。于是你白白获得 tmux 的全部能力——会话持久、
 脚本化、远程安全——同时拥有一个原生、安静、可访问的图形界面。
@@ -26,13 +28,17 @@ TFA **不是**另写一个多路复用器，而是**封装真实的 tmux**：通
 **终端管理**
 - 扁平的终端侧边栏（一个会话一行），点选切换，右键 **重命名 / Close(detach，保活) / Kill(确认后销毁)**。
 - `+` 新建本地终端（防撞命名 `mux-N`），网络图标新建 **SSH** 远程终端。
-- **启动续跑**：打开 app 时发现并 attach 本机已存在的 tmux 会话。
+- **启动续跑 + 懒加载**：打开 app 时发现本机已存在的 tmux 会话；发现的会话先作**休眠占位**，
+  **选中时才真正连接**，会话再多也秒开、不浪费资源。
 - **退出保活**：退出 app 只 detach、不杀会话，下次启动恢复。
+- **每会话环境变量**：右键终端 →「环境变量…」给该会话单独设环境变量（tmux `set-environment`），
+  持久化、(重)连接自动注入；可「保存并重启 shell」让当前 shell 立即生效。
 
 **管理“很多”终端**
 - **侧边栏过滤框**：按名字 / 当前命令实时过滤 + 计数。
 - **⌘K 快速切换**：键盘优先的模糊命令面板（子序列匹配名字+命令，↑↓/↵/esc）。
-- **活动指示点**：后台终端有新输出时行内亮一个品牌色圆点，切过去即清除；**⌘]** 跳到下一个有新输出的终端。
+- **活动指示点 + 输出特效**：后台有新输出时行内亮品牌色圆点；**输出中**圆点脉冲、**输出结束**闪绿 ✓；
+  **后台**终端输出结束还会发 macOS 系统通知。**⌘]** 跳到下一个有新输出的终端。
 - **跨终端搜索（⌘F）**：并发 `capture-pane` 抓取所有终端文本，分组高亮，一键跳转。
 - **分组**：把会话拖进/移入可折叠分组；侧边栏与分组按 host 作用域隔离。
 
@@ -42,6 +48,8 @@ TFA **不是**另写一个多路复用器，而是**封装真实的 tmux**：通
 - **失败态 + Retry**：连接失败显示**真实错误文本**与「Retry Connection」按钮（不再永久转圈）；
   重连中显示「Reconnecting… (attempt N)」。
 - **断线 toast**：终端不再“莫名消失”，会告诉你原因。
+- **输出流控**：连接启用 tmux `pause-after` 背压——某终端疯狂输出（`yes`、大日志）不会撑爆内存或
+  拖垮界面（旧 tmux 静默降级）。
 
 **外观 / 可访问性（见 [DESIGN.md](DESIGN.md)）**
 - **设计系统**：统一的间距 / 圆角 / 字体 / 状态色 token + 品牌 teal（`Theme.swift`）。
@@ -49,6 +57,10 @@ TFA **不是**另写一个多路复用器，而是**封装真实的 tmux**：通
 - **终端主题**：固定深色终端皮肤 + 品牌色光标 + **大号浅色会话名水印**（一眼认出当前终端）。
 - **可访问性**：图标按钮 / 行 / 状态均有 VoiceOver 标签；装饰元素对辅助技术隐藏。
 - **设置（⌘,）**：键入特效开关、字号；附带快捷键速查表。
+
+**🧪 实验室（Lab）**
+- 侧边栏左下角「实验室」入口，详情区切换为实验功能面板。首个实验：**系统监控**——实时 CPU / 内存 /
+  负载 / 运行时间 + GPU 型号（全公开 API；GPU 利用率 macOS 无公开 API，故仅显示型号）。
 
 ---
 
@@ -115,6 +127,7 @@ Sources/
     MuxApp.swift / RootView.swift / SidebarView.swift / TerminalAreaView.swift
     AppModel.swift / ConnectionSession.swift / PaneTerminal.swift / TerminalPaneView.swift
     SearchView.swift / QuickSwitchView.swift / SettingsView.swift / Theme.swift
+    Lab.swift（实验室 + 系统监控）/ Notifications.swift（输出完成通知）
 docs/
   tmux-control-protocol.md     # tmux 控制协议规格（编码依据）
   swiftterm-integration.md     # SwiftTerm 集成规格
@@ -174,12 +187,17 @@ open TFA.app
 - [x] **界面 / 可访问性** — 设计系统 + 统一状态 + 活动点 + 过滤 + ⌘K + 增强标题栏 + 终端主题
 - [x] **远程 SSH** — `ssh -tt … tmux -CC` + 交互式登录（密码 / 主机指纹 / 2FA），检测控制模式开场符后交接
 - [x] **交互打磨** — 跨 host 跳转跟随、活动导航、detach 撤销、拖拽分组、字号 HUD、设置窗口
-- [ ] **下一步** — 懒加载 attach（性能）、AsyncStream 流控、app 图标
+- [x] **性能** — 懒加载 attach（按需连接）、tmux 流控（`pause-after` 背压）
+- [x] **输出特效 + 通知** — 输出中脉冲 / 结束闪 ✓ / 后台完成系统通知
+- [x] **实验室** — 容器 + 系统监控（CPU / 内存 / 负载 / GPU 型号）
+- [x] **每会话环境变量** — `set-environment` + 「保存并重启 shell」立即生效
+- [ ] **下一步** — 实验室更多实验（进程 / 端口 / 布局可视化）、输出合并 feed 优化
 
 ---
 
 ## 📚 延伸阅读
 
+- [`CHANGELOG.md`](CHANGELOG.md) — 版本变更记录
 - [`DESIGN.md`](DESIGN.md) — 设计系统（token、状态模型、组件、终端主题）
 - [`docs/tmux-control-protocol.md`](docs/tmux-control-protocol.md) — tmux 控制协议规格
 - [`docs/swiftterm-integration.md`](docs/swiftterm-integration.md) — SwiftTerm 集成规格
