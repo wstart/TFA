@@ -22,10 +22,11 @@ extension CCUsage {
         var agent: String                // "claude" | "codex"
     }
 
-    struct ModelBreakdown { var model: String; var counts = TokenCounts(); var cost = 0.0 }
+    struct ModelBreakdown: Sendable { var model: String; var counts = TokenCounts(); var cost = 0.0 }
 
     /// One aggregated bucket (a day / week / month / session).
-    struct Summary {
+    struct Summary: Sendable, Identifiable {
+        var id: String { key }
         var key: String                  // the group key (date / week / month / sessionId)
         var counts = TokenCounts()
         var cost = 0.0

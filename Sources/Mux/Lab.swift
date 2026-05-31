@@ -99,8 +99,29 @@ final class SystemMonitor {
 
 // MARK: - Lab view (detail area)
 
-/// The Lab detail pane. Owns a `SystemMonitor`, polling only while visible.
+/// The Lab detail pane: a tab switcher between experiments (system monitor · token usage).
 struct LabView: View {
+    @State private var tab = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $tab) {
+                Text("系统监控").tag(0)
+                Text("Token 用量").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, Theme.Space.xxl)
+            .padding(.top, Theme.Space.md)
+            Divider().padding(.top, Theme.Space.sm)
+            if tab == 0 { SystemMonitorPane() } else { TokenUsageView() }
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+}
+
+/// System-monitor experiment. Owns a `SystemMonitor`, polling only while visible.
+private struct SystemMonitorPane: View {
     @State private var monitor = SystemMonitor()
 
     var body: some View {

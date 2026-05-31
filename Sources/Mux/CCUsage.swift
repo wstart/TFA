@@ -8,7 +8,7 @@ enum CCUsage {
     // MARK: - Time (spec §4)
 
     /// Epoch milliseconds wrapper.
-    struct TimestampMs: Comparable, Hashable {
+    struct TimestampMs: Comparable, Hashable, Sendable {
         var ms: Int64
         static func < (a: TimestampMs, b: TimestampMs) -> Bool { a.ms < b.ms }
         /// Floor to the start of the hour.
@@ -96,7 +96,7 @@ enum CCUsage {
     }
 
     /// Aggregation token counts (spec §3.2). `extraTotal` is non-Claude (e.g. codex reasoning).
-    struct TokenCounts {
+    struct TokenCounts: Sendable {
         var input: UInt64 = 0, output: UInt64 = 0, cacheCreation: UInt64 = 0, cacheRead: UInt64 = 0
         var extraTotal: UInt64 = 0
         var total: UInt64 { input + output + cacheCreation + cacheRead + extraTotal }
