@@ -94,6 +94,9 @@ struct SidebarView: View {
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
+
+            // Bottom-left entry into the Lab (experiments).
+            LabEntry(selected: appModel.labSelected) { appModel.openLab() }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -393,6 +396,30 @@ private struct HeaderButton: View {
         .buttonStyle(.borderless)
         .help(help)
         .accessibilityLabel(help)
+    }
+}
+
+/// Bottom-of-sidebar entry into the Lab (experiments). Selected → the detail area shows the Lab.
+private struct LabEntry: View {
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: Theme.Space.sm) {
+                Image(systemName: "flask")
+                    .foregroundStyle(selected ? Theme.brand : Color.secondary)
+                Text("实验室").font(Theme.Font.rowTitle)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, Theme.Space.md)
+            .padding(.vertical, Theme.Space.sm)
+        }
+        .buttonStyle(.plain)
+        .background(selected ? Theme.brand.opacity(0.12) : Color.clear)
+        .overlay(alignment: .top) { Divider() }
+        .accessibilityLabel("实验室")
     }
 }
 

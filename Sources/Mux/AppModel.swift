@@ -16,9 +16,13 @@ final class AppModel {
     /// The on-screen terminal. Single choke point for "which terminal is being viewed" — the
     /// sidebar `List` binding, ⌘1–9, ⌘K, and next/prev all funnel through here, so updating the
     /// per-terminal viewing/activity state in `didSet` covers every selection path.
+    /// True when the Lab (experiments) pane is shown in the detail area instead of a terminal.
+    var labSelected = false
+
     var selectedConnectionID: UUID? {
         didSet {
             guard oldValue != selectedConnectionID else { return }
+            labSelected = false // selecting a terminal leaves the Lab
             for c in connections {
                 if c.id == selectedConnectionID { c.markViewed() } else { c.resignViewing() }
             }
@@ -196,6 +200,13 @@ final class AppModel {
 
     func select(_ conn: ConnectionSession) {
         selectedConnectionID = conn.id
+    }
+
+    /// Show the Lab (experiments) pane in the detail area. Keeps `selectedConnectionID` so returning
+    /// to a terminal restores the last one — this just flips the detail area over to the Lab.
+    func openLab() {
+        labSelected = true
+        for c in connections { c.resignViewing() } // no terminal is on screen while the Lab shows
     }
 
     /// The terminals the sidebar actually shows for the current host, in sidebar order (each group in
