@@ -84,6 +84,27 @@ struct MuxApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var appModel: AppModel?
+    private var signalSources: [DispatchSourceSignal] = []
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // A raw SIGTERM (`pkill TFA`, a crash-reporter kill) or SIGINT does NOT run
+        // applicationWillTerminate — so our spawned `tmux -CC` children (each a setsid session
+        // leader holding a pty) would orphan to launchd and accumulate across restarts until the
+        // system pty limit is hit and no terminal can open. Trap those signals and run the same
+        // clean shutdown (which SIGTERMs every child) before exiting. SIGKILL is uncatchable —
+        // the Lab's PTY monitor cleans up any that still slip through.
+        for sig in [SIGTERM, SIGINT] {
+            signal(sig, SIG_IGN) // ignore default disposition; the dispatch source handles it instead
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            src.setEventHandler { [weak self] in
+                MainActor.assumeIsolated { self?.appModel?.shutdown() }
+                exit(0)
+            }
+            src.resume()
+            signalSources.append(src)
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated { appModel?.shutdown() }
     }

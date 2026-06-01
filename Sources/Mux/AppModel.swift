@@ -325,6 +325,15 @@ final class AppModel {
         }
     }
 
+    /// Restart a session's shell so it reloads the latest saved environment. Re-pushes the stored
+    /// per-session env via `set-environment`, then respawns the primary pane (the new shell inherits
+    /// it). DESTRUCTIVE to whatever is running in that pane — invoked only on explicit user request.
+    func restartSession(_ conn: ConnectionSession) {
+        let env = sessionEnvironments[conn.groupKey] ?? [:]
+        if !env.isEmpty { conn.controller.applySessionEnvironment(env) }
+        conn.restartShell()
+    }
+
     func renameTerminal(_ conn: ConnectionSession, to name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
@@ -692,6 +701,53 @@ final class AppModel {
         if env.isEmpty { sessionEnvironments.removeValue(forKey: key) } else { sessionEnvironments[key] = env }
         persistEnvironments()
         conn.controller.applySessionEnvironment(env)
+    }
+
+    /// Copy a session's saved environment to the system clipboard as `KEY=VALUE` lines (sorted),
+    /// so it can be pasted into another session — or anywhere (a `.env` file, the shell, etc.).
+    func copyEnvironment(_ conn: ConnectionSession) {
+        let env = sessionEnvironments[conn.groupKey] ?? [:]
+        let text = env.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+    }
+
+    /// Merge `KEY=VALUE` lines from the system clipboard into a session's env (same-named keys are
+    /// overwritten, others kept), persist, and apply. Returns how many vars were merged (0 if the
+    /// clipboard had nothing parseable). The new env takes effect in new shells / after restart.
+    @discardableResult
+    func pasteEnvironment(into conn: ConnectionSession) -> Int {
+        guard let text = NSPasteboard.general.string(forType: .string) else { return 0 }
+        let parsed = Self.parseEnvLines(text)
+        guard !parsed.isEmpty else { return 0 }
+        var env = sessionEnvironments[conn.groupKey] ?? [:]
+        for (k, v) in parsed { env[k] = v }
+        setEnvironment(env, for: conn) // persists + applies
+        return parsed.count
+    }
+
+    /// Parse `KEY=VALUE` lines (one per line) into an env dict. Tolerates `export ` prefixes, blank
+    /// lines, `#` comments, surrounding single/double quotes, and `=` in the value. Pure → testable.
+    static func parseEnvLines(_ text: String) -> [String: String] {
+        var out: [String: String] = [:]
+        for raw in text.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            var line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            if line.hasPrefix("export ") { line = String(line.dropFirst("export ".count)).trimmingCharacters(in: .whitespaces) }
+            guard let eq = line.firstIndex(of: "=") else { continue }
+            let key = String(line[..<eq]).trimmingCharacters(in: .whitespaces)
+            var val = String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+            if val.count >= 2,
+               (val.hasPrefix("\"") && val.hasSuffix("\"")) || (val.hasPrefix("'") && val.hasSuffix("'")) {
+                val = String(val.dropFirst().dropLast())
+            }
+            // Valid POSIX-ish env name: starts with a letter/underscore, then letters/digits/underscores.
+            let valid = !key.isEmpty && (key.first!.isLetter || key.first! == "_")
+                && key.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+            if valid { out[key] = val }
+        }
+        return out
     }
 
     // MARK: - Font size

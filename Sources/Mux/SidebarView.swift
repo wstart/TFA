@@ -11,7 +11,10 @@ struct SidebarView: View {
     @State private var renameTarget: ConnectionSession?
     @State private var renameText: String = ""
     @State private var killTarget: ConnectionSession?
+    @State private var restartTarget: ConnectionSession?
     @State private var envTarget: ConnectionSession?
+    @State private var pasteResultConn: ConnectionSession?
+    @State private var pasteResultCount = 0
 
     @State private var showHostSheet = false
     @State private var showServerSheet = false
@@ -125,6 +128,38 @@ struct SidebarView: View {
             Button("Cancel", role: .cancel) { killTarget = nil }
         } message: {
             Text("This permanently ends the tmux session and it will not resume on next launch.")
+        }
+        .alert("重启 session?", isPresented: Binding(
+            get: { restartTarget != nil },
+            set: { if !$0 { restartTarget = nil } })
+        ) {
+            Button("重启", role: .destructive) {
+                if let conn = restartTarget { appModel.restartSession(conn) }
+                restartTarget = nil
+            }
+            Button("取消", role: .cancel) { restartTarget = nil }
+        } message: {
+            Text("重启该会话的 shell 以重新加载环境变量。会话本身保留，但当前窗格里正在运行的程序会被中断。")
+        }
+        .alert(pasteResultCount > 0 ? "已粘贴环境变量" : "没有可粘贴的内容", isPresented: Binding(
+            get: { pasteResultConn != nil },
+            set: { if !$0 { pasteResultConn = nil } })
+        ) {
+            if pasteResultCount > 0 {
+                Button("重启 session 生效") {
+                    if let conn = pasteResultConn { appModel.restartSession(conn) }
+                    pasteResultConn = nil
+                }
+                Button("稍后", role: .cancel) { pasteResultConn = nil }
+            } else {
+                Button("好", role: .cancel) { pasteResultConn = nil }
+            }
+        } message: {
+            if pasteResultCount > 0 {
+                Text("已合并 \(pasteResultCount) 个环境变量到「\(pasteResultConn?.title ?? "")」。新窗口或重启 session 后生效。")
+            } else {
+                Text("剪贴板里没有可识别的 KEY=VALUE 环境变量。先在另一个会话「拷贝环境变量」，或复制 .env 格式的文本。")
+            }
         }
         .alert(groupRenameID == nil ? "New Group" : "Rename Group", isPresented: $groupAlertShown) {
             TextField("Group name", text: $groupAlertName)
@@ -306,6 +341,12 @@ struct SidebarView: View {
             }
         }
         Button("环境变量…") { envTarget = conn }
+        Button("拷贝环境变量") { appModel.copyEnvironment(conn) }
+        Button("粘贴环境变量") {
+            pasteResultCount = appModel.pasteEnvironment(into: conn)
+            pasteResultConn = conn
+        }
+        Button("重启 session（重载环境变量）") { restartTarget = conn }
         Button("克隆 session") { appModel.cloneTerminal(conn) }
         Divider()
         // Non-destructive: detach (session survives, resumes next launch).

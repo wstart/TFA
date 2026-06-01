@@ -108,13 +108,18 @@ struct LabView: View {
             Picker("", selection: $tab) {
                 Text("系统监控").tag(0)
                 Text("Token 用量").tag(1)
+                Text("PTY / 进程").tag(2)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .padding(.horizontal, Theme.Space.xxl)
             .padding(.top, Theme.Space.md)
             Divider().padding(.top, Theme.Space.sm)
-            if tab == 0 { SystemMonitorPane() } else { TokenUsageView() }
+            switch tab {
+            case 0: SystemMonitorPane()
+            case 1: TokenUsageView()
+            default: PtyMonitorPane()
+            }
         }
         .background(Color(nsColor: .textBackgroundColor))
     }
@@ -167,6 +172,140 @@ private struct SystemMonitorPane: View {
         if d > 0 { return "\(d)d \(h)h \(m)m" }
         if h > 0 { return "\(h)h \(m)m" }
         return "\(m)m"
+    }
+}
+
+// MARK: - PTY / process monitor
+
+/// Watches pseudo-terminal pressure and TFA's own `tmux -CC` control clients. Each terminal TFA
+/// shows is backed by a spawned `tmux -CC` child holding ONE pty. If TFA dies by signal/crash
+/// (not a clean Quit), those setsid children orphan to launchd (PPID 1) and keep their ptys,
+/// piling up across restarts until the system pty limit is hit and no new terminal can open.
+@MainActor @Observable
+final class PtyMonitor {
+    private(set) var ptyCount = 0
+    private(set) var ptyMax = 0
+    private(set) var ccTotal = 0       // live `tmux -CC` clients (TFA's terminals)
+    private(set) var ccOrphans = 0     // of those, PPID==1 (leaked)
+    private(set) var probeSockets = 0  // leftover `mux*-<pid>-<rand>` probe sockets (other tools)
+    private(set) var loading = false
+    @ObservationIgnored private var orphanPids: [pid_t] = []
+
+    struct Snapshot { var ptyCount = 0; var ptyMax = 0; var ccTotal = 0; var ccOrphans = 0; var probeSockets = 0; var orphanPids: [pid_t] = [] }
+
+    func refresh() {
+        guard !loading else { return }
+        loading = true
+        Task.detached(priority: .utility) {
+            let s = PtyMonitor.sample()
+            await MainActor.run {
+                self.ptyCount = s.ptyCount; self.ptyMax = s.ptyMax
+                self.ccTotal = s.ccTotal; self.ccOrphans = s.ccOrphans
+                self.probeSockets = s.probeSockets; self.orphanPids = s.orphanPids
+                self.loading = false
+            }
+        }
+    }
+
+    /// SIGTERM every orphaned (PPID 1) `tmux -CC` client. This only DETACHES them — the tmux
+    /// sessions survive on the server and can be reopened — but frees the ptys they were holding.
+    func cleanupOrphans() {
+        for pid in orphanPids { _ = Darwin.kill(pid, SIGTERM) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.refresh() }
+    }
+
+    nonisolated static func sample() -> Snapshot {
+        var s = Snapshot()
+        let devs = (try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? []
+        s.ptyCount = devs.filter { $0.hasPrefix("ttys") }.count
+        var maxv: Int32 = 0; var sz = MemoryLayout<Int32>.size
+        if sysctlbyname("kern.tty.ptmx_max", &maxv, &sz, nil, 0) == 0 { s.ptyMax = Int(maxv) }
+        for line in runPS().split(separator: "\n") {
+            guard line.contains("tmux -u -CC "),
+                  line.contains("attach-session") || line.contains("new-session") else { continue }
+            let f = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard f.count >= 2, let pid = pid_t(f[0]), let ppid = pid_t(f[1]) else { continue }
+            s.ccTotal += 1
+            if ppid == 1 { s.ccOrphans += 1; s.orphanPids.append(pid) }
+        }
+        let dir = "/private/tmp/tmux-\(getuid())"
+        let socks = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        s.probeSockets = socks.filter { $0.hasPrefix("mux") && $0.contains("-") }.count
+        return s
+    }
+
+    nonisolated private static func runPS() -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/ps")
+        p.arguments = ["-axo", "pid=,ppid=,command="]
+        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+        do { try p.run() } catch { return "" }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+    }
+}
+
+/// PTY / process monitor experiment. Surfaces pty pressure + leaked `tmux -CC` clients, with a
+/// one-click cleanup for orphans.
+private struct PtyMonitorPane: View {
+    @State private var monitor = PtyMonitor()
+    @State private var confirmCleanup = false
+
+    private var ptyFraction: Double {
+        monitor.ptyMax > 0 ? Double(monitor.ptyCount) / Double(monitor.ptyMax) : 0
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.Space.xl) {
+                HStack {
+                    Text("PTY / 进程监控").font(Theme.Font.emptyTitle)
+                    Spacer()
+                    Button { monitor.refresh() } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.borderless).disabled(monitor.loading).help("刷新")
+                }
+
+                MetricBar(title: "PTY 使用 / pseudo-terminals", value: ptyFraction,
+                          detail: "\(monitor.ptyCount) / \(monitor.ptyMax)")
+                if ptyFraction > 0.8 {
+                    Text("⚠️ pty 使用率接近上限，新终端可能打不开。")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+
+                statRow("TFA 的 tmux -CC 客户端", "\(monitor.ccTotal)")
+                statRow("其中孤儿 (PPID=1·未回收)", "\(monitor.ccOrphans)")
+                statRow("残留 tmux 探针 socket (其它工具)", "\(monitor.probeSockets)")
+
+                if monitor.ccOrphans > 0 {
+                    Button(role: .destructive) { confirmCleanup = true } label: {
+                        Label("清理 \(monitor.ccOrphans) 个孤儿客户端", systemImage: "trash")
+                    }
+                    Text("孤儿 = TFA 被强杀后没回收的 tmux -CC 进程，各占一个 pty。清理只是分离它们，tmux 会话本身保留、可重新打开。")
+                        .font(.caption).foregroundStyle(.tertiary)
+                } else {
+                    Text("没有孤儿客户端 👍").font(.caption).foregroundStyle(.tertiary)
+                }
+            }
+            .padding(Theme.Space.xxl)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+        .onAppear { monitor.refresh() }
+        .alert("清理孤儿 tmux -CC 客户端?", isPresented: $confirmCleanup) {
+            Button("清理", role: .destructive) { monitor.cleanupOrphans() }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("向 \(monitor.ccOrphans) 个无父进程的 tmux -CC 客户端发送 SIGTERM，释放其占用的 pty。tmux 会话只是被分离，不会结束。")
+        }
+    }
+
+    private func statRow(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title).font(Theme.Font.rowTitle)
+            Spacer()
+            Text(value).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary)
+        }
     }
 }
 
