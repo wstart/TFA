@@ -74,6 +74,12 @@ struct MuxApp: App {
             }
         }
 
+        // File-manager windows, opened from a session's right-click menu via `openWindow(value:)`.
+        // Each distinct root path gets its own window (same path re-focuses the existing one).
+        WindowGroup("文件管理器", for: URL.self) { $url in
+            if let url { FileExplorerView(root: url) }
+        }
+
         // Standard macOS Settings window (⌘,). Shares the app model so toggles/font apply live.
         Settings {
             SettingsView()

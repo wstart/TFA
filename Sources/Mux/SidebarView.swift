@@ -6,6 +6,7 @@ import TmuxKit
 /// rename / move to a group / close / kill.
 struct SidebarView: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.openWindow) private var openWindow
 
     @State private var filter: String = ""
     @State private var renameTarget: ConnectionSession?
@@ -346,6 +347,11 @@ struct SidebarView: View {
             pasteResultCount = appModel.pasteEnvironment(into: conn)
             pasteResultConn = conn
         }
+        Button("文件管理器…") {
+            if let p = conn.currentPath { openWindow(value: URL(fileURLWithPath: p)) }
+        }
+        .disabled(conn.host != nil || conn.currentPath == nil)
+        .help(conn.host != nil ? "暂不支持远程会话" : "")
         Button("重启 session（重载环境变量）") { restartTarget = conn }
         Button("克隆 session") { appModel.cloneTerminal(conn) }
         Divider()
