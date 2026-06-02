@@ -76,6 +76,12 @@ struct RootView: View {
         .sheet(isPresented: $model.isShowingQuickSwitch) {
             QuickSwitchView()
         }
+        .alert("从备份恢复 SSH 密码?", isPresented: $model.keychainRecoveryNeeded) {
+            Button("恢复") { appModel.recoverPasswordsFromBackup() }
+            Button("以后再说", role: .cancel) { appModel.dismissKeychainRecovery() }
+        } message: {
+            Text("钥匙串读取失败（通常是 App 重新签名 / 重装导致）。检测到本地加密备份中有 \(appModel.backupPasswordCount) 个已保存的 SSH 密码，是否恢复？恢复后会重新写入钥匙串。")
+        }
     }
 
     private var clampedSidebarWidth: CGFloat {

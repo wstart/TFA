@@ -3,31 +3,47 @@ import AppKit
 
 // MARK: - Model
 
-/// A node in the file-explorer tree. Directories carry lazily-built `children`; files have `nil`.
+/// A node in the file-explorer tree. `isDirectory` marks it as expandable; children are loaded
+/// LAZILY (per directory, on expand) — never pre-recursed — so a deep tree or a symlink cycle
+/// can't blow the stack, and opening a large root doesn't scan the whole filesystem up front.
 struct FileNode: Identifiable, Hashable {
     var url: URL
     var isDirectory: Bool
     var name: String
-    var children: [FileNode]?
     var id: String { url.path }
 }
 
 /// Scans / loads / saves files under a root directory (a session's current working directory).
-/// Reuses the same conventions as the Skills tree: resolve symlinks, dirs-first sorting, hide
-/// dotfiles & `.bak`. Text editing only — binaries are detected and shown read-only.
+/// Directory listings are lazy + cached per path. Text editing only — binaries are detected.
 @MainActor @Observable
 final class FileExplorerStore {
     let root: URL
-    private(set) var tree: [FileNode] = []
+    /// The root's direct children (top level of the tree).
+    private(set) var topLevel: [FileNode] = []
+    /// path → that directory's DIRECT children. Populated on demand (on expand), never recursively.
+    @ObservationIgnored private var cache: [String: [FileNode]] = [:]
 
     /// Files larger than this aren't loaded into the editor (treated like a binary blob).
     static let maxEditBytes = 4 << 20 // 4 MB
 
     init(root: URL) { self.root = root }
 
-    func reload() { tree = Self.children(of: root) }
+    func reload() {
+        cache.removeAll()
+        topLevel = Self.directChildren(of: root)
+    }
 
-    static func children(of dir: URL) -> [FileNode] {
+    /// A directory's direct children, cached. NEVER recurses — this is the fix for the recursion
+    /// blow-up: the tree is materialised one expanded level at a time, bounded by what the user opens.
+    func children(at path: String) -> [FileNode] {
+        if let c = cache[path] { return c }
+        let c = Self.directChildren(of: URL(fileURLWithPath: path))
+        cache[path] = c
+        return c
+    }
+
+    /// List one directory level: folders first, then files, alpha; hide dotfiles & `.bak`.
+    static func directChildren(of dir: URL) -> [FileNode] {
         let fm = FileManager.default
         let real = dir.resolvingSymlinksInPath()
         guard let items = try? fm.contentsOfDirectory(at: real, includingPropertiesForKeys: [.isDirectoryKey]) else { return [] }
@@ -35,24 +51,13 @@ final class FileExplorerStore {
         for item in items {
             let leaf = item.lastPathComponent
             if leaf.hasPrefix(".") || leaf.hasSuffix(".bak") { continue }
-            var isDir: ObjCBool = false
-            fm.fileExists(atPath: item.path, isDirectory: &isDir)
-            nodes.append(FileNode(url: item, isDirectory: isDir.boolValue, name: leaf,
-                                  children: isDir.boolValue ? children(of: item) : nil))
+            let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            nodes.append(FileNode(url: item, isDirectory: isDir, name: leaf))
         }
         return nodes.sorted {
             if $0.isDirectory != $1.isDirectory { return $0.isDirectory && !$1.isDirectory }
             return $0.name.lowercased() < $1.name.lowercased()
         }
-    }
-
-    func node(id: String) -> FileNode? { Self.find(id, in: tree) }
-    private static func find(_ id: String, in nodes: [FileNode]) -> FileNode? {
-        for n in nodes {
-            if n.id == id { return n }
-            if let kids = n.children, let hit = find(id, in: kids) { return hit }
-        }
-        return nil
     }
 
     /// Load a file as text, or nil if it's too big / not valid UTF-8 (i.e. binary).
@@ -62,7 +67,7 @@ final class FileExplorerStore {
         return try? String(contentsOf: url, encoding: .utf8)
     }
 
-    /// Save text, keeping a one-time `.bak` of the original. Reloads the tree.
+    /// Save text, keeping a one-time `.bak` of the original. Reloads.
     func save(_ content: String, to url: URL) throws {
         let bak = url.appendingPathExtension("bak")
         if !FileManager.default.fileExists(atPath: bak.path),
@@ -110,6 +115,7 @@ struct FileExplorerView: View {
     @State private var isBinary = false
     @State private var showNewFile = false
     @State private var newFileName = ""
+    @State private var newFileTarget: URL?
     @State private var deleteTarget: FileNode?
 
     init(root: URL) {
@@ -124,7 +130,7 @@ struct FileExplorerView: View {
         HSplitView {
             // Left: directory tree
             VStack(spacing: 0) {
-                if store.tree.isEmpty {
+                if store.topLevel.isEmpty {
                     ContentUnavailableView("空目录", systemImage: "folder",
                         description: Text(displayRoot)).frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -214,19 +220,23 @@ struct FileExplorerView: View {
 
     private var displayRoot: String { root.path.replacingOccurrences(of: home, with: "~") }
 
-    // MARK: tree rendering (self-drawn — avoids macOS List disclosure quirks)
+    // MARK: tree rendering (lazy, self-drawn — only expanded directories are listed)
 
     private struct VisibleRow: Identifiable { let node: FileNode; let depth: Int; var id: String { node.id } }
 
+    /// Flatten only the expanded paths. Recursion here is bounded by how deep the user has expanded
+    /// (not by the filesystem), and each level is the cached direct listing — no blow-up possible.
     private func visibleRows() -> [VisibleRow] {
         var out: [VisibleRow] = []
         func walk(_ nodes: [FileNode], _ depth: Int) {
             for n in nodes {
                 out.append(VisibleRow(node: n, depth: depth))
-                if n.isDirectory, expanded.contains(n.id), let kids = n.children { walk(kids, depth + 1) }
+                if n.isDirectory, expanded.contains(n.id) {
+                    walk(store.children(at: n.url.path), depth + 1)
+                }
             }
         }
-        walk(store.tree, 0)
+        walk(store.topLevel, 0)
         return out
     }
 
@@ -265,9 +275,6 @@ struct FileExplorerView: View {
         }
     }
 
-    // a directory chosen via a folder's context menu to create a file inside (nil = root)
-    @State private var newFileTarget: URL?
-
     private static func icon(for url: URL) -> String {
         switch url.pathExtension.lowercased() {
         case "md", "markdown": return "doc.richtext"
@@ -280,11 +287,12 @@ struct FileExplorerView: View {
     }
 
     private func loadSelected() {
-        guard let id = selectedID, let node = store.node(id: id), !node.isDirectory else {
+        guard let id = selectedID else {
             fileURL = nil; text = ""; savedText = ""; isBinary = false; savedFlash = false; return
         }
-        fileURL = node.url
-        if let content = store.textContent(of: node.url) {
+        let url = URL(fileURLWithPath: id)
+        fileURL = url
+        if let content = store.textContent(of: url) {
             text = content; savedText = content; isBinary = false
         } else {
             text = ""; savedText = ""; isBinary = true

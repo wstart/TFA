@@ -47,8 +47,11 @@ final class SkillsStore {
     /// Recursively list a directory: folders first, then files, alpha; hide dotfiles and `.bak` backups.
     /// Resolves symlinks first — many gstack skills are symlinks, and `contentsOfDirectory` returns
     /// nothing for an unresolved symlink URL (which made those folders look un-expandable).
-    private static func children(of dir: URL) -> [SkillNode] {
+    private static func children(of dir: URL, depth: Int = 0) -> [SkillNode] {
         let fm = FileManager.default
+        // Depth cap: a skill is a small folder; bounding recursion guards against symlink cycles
+        // inside a (resolved) skill dir blowing the stack — same failure mode the file manager hit.
+        guard depth < 12 else { return [] }
         let real = dir.resolvingSymlinksInPath()
         guard let items = try? fm.contentsOfDirectory(at: real, includingPropertiesForKeys: [.isDirectoryKey]) else { return [] }
         var nodes: [SkillNode] = []
@@ -59,7 +62,7 @@ final class SkillsStore {
             fm.fileExists(atPath: item.path, isDirectory: &isDir)
             if isDir.boolValue {
                 nodes.append(SkillNode(url: item, isDirectory: true, name: leaf, subtitle: nil,
-                                       isRoot: false, children: children(of: item)))
+                                       isRoot: false, children: children(of: item, depth: depth + 1)))
             } else {
                 nodes.append(SkillNode(url: item, isDirectory: false, name: leaf, subtitle: nil,
                                        isRoot: false, children: nil))

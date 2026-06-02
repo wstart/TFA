@@ -457,9 +457,46 @@ final class AppModel {
         guard let data = UserDefaults.standard.data(forKey: Self.knownHostsKey),
               let ssh = try? JSONDecoder().decode([HostTarget].self, from: data) else { return }
         knownHosts = [.local] + ssh
-        for case .ssh(let h, _) in ssh {
-            if let pw = Keychain.readPassword(account: h) { hostPasswords[h] = pw }
+        // Load ALL ssh passwords from one Keychain item (A). If the Keychain read FAILS (e.g. the app
+        // was re-signed / reinstalled and the OS prompt was denied) and an encrypted local backup (C)
+        // exists, offer to restore from it instead of silently losing the saved passwords.
+        let kc = SSHPasswordStore.loadKeychain()
+        if let map = kc, !map.isEmpty {
+            hostPasswords = map
+        } else if kc != nil {
+            // Keychain readable but empty → maybe first run after upgrading from the old per-host
+            // layout: pull any legacy entries into the new combined item (+ backup).
+            let hosts = ssh.compactMap { (t: HostTarget) -> String? in
+                if case .ssh(let h, _) = t { return h }; return nil
+            }
+            let legacy = SSHPasswordStore.migrateLegacy(hosts: hosts)
+            if !legacy.isEmpty { hostPasswords = legacy; SSHPasswordStore.persist(legacy) }
+        } else if let backup = SSHPasswordStore.loadBackup(), !backup.isEmpty {
+            // Keychain read FAILED (e.g. re-signed/reinstalled, prompt denied) → offer the backup.
+            pendingBackup = backup
+            keychainRecoveryNeeded = true
         }
+    }
+
+    /// Set when the Keychain read failed but an encrypted local backup is available — drives a
+    /// one-shot recovery prompt (RootView) offering to restore saved ssh passwords from the backup.
+    var keychainRecoveryNeeded = false
+    @ObservationIgnored private var pendingBackup: [String: String]?
+
+    /// Number of passwords the backup would restore (for the prompt message).
+    var backupPasswordCount: Int { pendingBackup?.count ?? 0 }
+
+    /// Restore ssh passwords from the encrypted backup and write them back to BOTH stores (so the
+    /// Keychain item is re-created under the current signature and next launch reads cleanly).
+    func recoverPasswordsFromBackup() {
+        if let b = pendingBackup { hostPasswords = b; SSHPasswordStore.persist(hostPasswords) }
+        pendingBackup = nil
+        keychainRecoveryNeeded = false
+    }
+
+    func dismissKeychainRecovery() {
+        pendingBackup = nil
+        keychainRecoveryNeeded = false
     }
     private func persistHosts() {
         let ssh = knownHosts.filter { if case .ssh = $0 { return true }; return false }
@@ -474,7 +511,7 @@ final class AppModel {
         guard case .ssh(let h, _) = host else { return }
         knownHosts.removeAll { $0 == host }
         hostPasswords[h] = nil
-        Keychain.deletePassword(account: h)
+        SSHPasswordStore.persist(hostPasswords) // keep A + C in sync
         if currentHost == host { selectHost(.local) }
     }
 
@@ -562,7 +599,7 @@ final class AppModel {
         currentHost = target
         if !password.isEmpty {
             hostPasswords[dest] = password            // remembered for "+" / reconnect
-            Keychain.savePassword(password, account: dest) // persisted across launches (securely)
+            SSHPasswordStore.persist(hostPasswords)   // persisted to Keychain (A) + encrypted backup (C)
         }
         open(TmuxConnection(endpoint: .ssh(host: dest, sshArgs: args),
                             sessionName: nextSSHName(host: dest),
