@@ -23,11 +23,13 @@ final class AppModel {
     var skillsSelected = false
     /// True when the global CLAUDE.md rules editor is shown in the detail area instead of a terminal.
     var claudeMdSelected = false
+    /// True when the「办公室」visualization is shown in the detail area instead of a terminal.
+    var officeSelected = false
 
     var selectedConnectionID: UUID? {
         didSet {
             guard oldValue != selectedConnectionID else { return }
-            labSelected = false; skillsSelected = false; claudeMdSelected = false // a terminal leaves the tool panes
+            labSelected = false; skillsSelected = false; claudeMdSelected = false; officeSelected = false // a terminal leaves the tool panes
             for c in connections {
                 if c.id == selectedConnectionID { c.markViewed() } else { c.resignViewing() }
             }
@@ -232,19 +234,25 @@ final class AppModel {
     /// Show the Lab (experiments) pane in the detail area. Keeps `selectedConnectionID` so returning
     /// to a terminal restores the last one — this just flips the detail area over to the Lab.
     func openLab() {
-        labSelected = true; skillsSelected = false; claudeMdSelected = false
+        labSelected = true; skillsSelected = false; claudeMdSelected = false; officeSelected = false
         leaveTerminals() // no terminal is on screen while the Lab shows
     }
 
     /// Show the Skills manager in the detail area. Mutually exclusive with the other tool panes / a terminal.
     func openSkills() {
-        skillsSelected = true; labSelected = false; claudeMdSelected = false
+        skillsSelected = true; labSelected = false; claudeMdSelected = false; officeSelected = false
         leaveTerminals()
     }
 
     /// Show the global CLAUDE.md rules editor. Mutually exclusive with the other tool panes / a terminal.
     func openClaudeMd() {
-        claudeMdSelected = true; labSelected = false; skillsSelected = false
+        claudeMdSelected = true; labSelected = false; skillsSelected = false; officeSelected = false
+        leaveTerminals()
+    }
+
+    /// Show the「办公室」visualization. Mutually exclusive with the other tool panes / a terminal.
+    func openOffice() {
+        officeSelected = true; labSelected = false; skillsSelected = false; claudeMdSelected = false
         leaveTerminals()
     }
 

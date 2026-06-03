@@ -25,6 +25,62 @@ public enum TmuxServer {
     ///
     /// Returns `[]` if tmux is missing, no server is running, or the command fails — an empty
     /// result always means "nothing to resume", never an error to surface.
+    /// Per-session last OUTPUT-activity time (epoch seconds), as `[sessionName: epoch]`, taken from
+    /// `#{window_activity}` (max across a session's windows). Unlike `session_activity`,
+    /// `window_activity` updates on pane output even for DETACHED sessions — so this reflects "is
+    /// this session producing output" for EVERY session, not just the ones TFA has attached.
+    /// Best-effort: returns `[:]` on any failure.
+    public static func localWindowActivity(tmuxPath: String? = nil, socketName: String? = nil) -> [String: Int] {
+        guard let tmux = tmuxPath ?? TmuxLocator.find() else { return [:] }
+        var args: [String] = []
+        if let socket = socketName { args += ["-L", socket] }
+        args += ["-u", "list-windows", "-a", "-F", "#{session_name}\u{1f}#{window_activity}"] // US separator
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tmux)
+        process.arguments = args
+        process.environment = utf8Environment()
+        let stdout = Pipe(); process.standardOutput = stdout; process.standardError = Pipe()
+        do { try process.run() } catch { return [:] }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return [:] }
+
+        var out: [String: Int] = [:]
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+            let parts = line.split(separator: "\u{1f}", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, let t = Int(parts[1]) else { continue }
+            let name = String(parts[0])
+            out[name] = max(out[name] ?? 0, t)
+        }
+        return out
+    }
+
+    /// The latest non-empty visible line of a session's active pane (`capture-pane -p`), cleaned of
+    /// control chars and clamped. Works for ANY session (no attach needed). nil on failure / blank.
+    public static func lastOutputLine(session: String, tmuxPath: String? = nil, socketName: String? = nil) -> String? {
+        guard let tmux = tmuxPath ?? TmuxLocator.find() else { return nil }
+        var args: [String] = []
+        if let socket = socketName { args += ["-L", socket] }
+        args += ["-u", "capture-pane", "-p", "-t", session]
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tmux)
+        process.arguments = args
+        process.environment = utf8Environment()
+        let stdout = Pipe(); process.standardOutput = stdout; process.standardError = Pipe()
+        do { try process.run() } catch { return nil }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false).reversed() {
+            let cleaned = String(line.unicodeScalars.filter { $0.value >= 0x20 }).trimmingCharacters(in: .whitespaces)
+            if !cleaned.isEmpty { return cleaned.count > 60 ? String(cleaned.prefix(60)) + "…" : cleaned }
+        }
+        return nil
+    }
+
     public static func listLocalSessions(tmuxPath: String? = nil,
                                          socketName: String? = nil) -> [String] {
         guard let tmux = tmuxPath ?? TmuxLocator.find() else { return [] }

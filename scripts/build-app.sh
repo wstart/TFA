@@ -20,7 +20,7 @@ cd "$ROOT"
 BIN_NAME="Mux"        # SwiftPM executable target (built binary name) — keep as "Mux"
 APP_NAME="TFA"        # user-facing app/bundle name
 BUNDLE_ID="com.tfa.app"
-VERSION="0.10.1"
+VERSION="0.11.0"
 
 echo "==> swift build -c $CONFIG"
 swift build -c "$CONFIG"
@@ -39,6 +39,13 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 # Bundle executable is named after the app (CFBundleExecutable=TFA), copied from the Mux binary.
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
+
+# Office pixel assets (the「办公室」visualization) → Contents/Resources/office, loaded via Bundle.main.
+if [[ -d "$ROOT/Resources/office" ]]; then
+  echo "==> copying office assets"
+  rm -rf "$APP/Contents/Resources/office"
+  cp -R "$ROOT/Resources/office" "$APP/Contents/Resources/office"
+fi
 
 # App icon: build AppIcon.icns from Icon.png (repo root) into Resources, if present. The standard
 # macOS iconset needs 16/32/128/256/512 at @1x and @2x; sips downscales the single source PNG to
