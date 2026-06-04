@@ -59,7 +59,15 @@ public enum TmuxServer {
     /// The latest non-empty visible line of a session's active pane (`capture-pane -p`), cleaned of
     /// control chars and clamped. Works for ANY session (no attach needed). nil on failure / blank.
     public static func lastOutputLine(session: String, tmuxPath: String? = nil, socketName: String? = nil) -> String? {
-        guard let tmux = tmuxPath ?? TmuxLocator.find() else { return nil }
+        lastOutputLines(session: session, max: 1, tmuxPath: tmuxPath, socketName: socketName).last
+    }
+
+    /// The last `max` non-empty visible lines of a session's active pane (`capture-pane -p`), cleaned
+    /// of control chars and clamped per line, oldest→newest. Works for ANY session (no attach needed).
+    /// Returns `[]` on failure / blank. Used by the office mini-terminal to show what a session is
+    /// currently printing.
+    public static func lastOutputLines(session: String, max: Int = 3, tmuxPath: String? = nil, socketName: String? = nil) -> [String] {
+        guard let tmux = tmuxPath ?? TmuxLocator.find() else { return [] }
         var args: [String] = []
         if let socket = socketName { args += ["-L", socket] }
         args += ["-u", "capture-pane", "-p", "-t", session]
@@ -69,16 +77,19 @@ public enum TmuxServer {
         process.arguments = args
         process.environment = utf8Environment()
         let stdout = Pipe(); process.standardOutput = stdout; process.standardError = Pipe()
-        do { try process.run() } catch { return nil }
+        do { try process.run() } catch { return [] }
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
+        guard process.terminationStatus == 0 else { return [] }
 
+        var picked: [String] = []
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false).reversed() {
             let cleaned = String(line.unicodeScalars.filter { $0.value >= 0x20 }).trimmingCharacters(in: .whitespaces)
-            if !cleaned.isEmpty { return cleaned.count > 60 ? String(cleaned.prefix(60)) + "…" : cleaned }
+            if cleaned.isEmpty { continue }
+            picked.append(cleaned.count > 60 ? String(cleaned.prefix(60)) + "…" : cleaned)
+            if picked.count >= max { break }
         }
-        return nil
+        return picked.reversed() // oldest → newest
     }
 
     public static func listLocalSessions(tmuxPath: String? = nil,

@@ -100,8 +100,7 @@ struct SidebarView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
 
-            // Bottom-left entries: Office (sessions visualized) + CLAUDE.md rules + Skills + Lab.
-            OfficeEntry(selected: appModel.officeSelected) { appModel.openOffice() }
+            // Bottom-left entries: CLAUDE.md rules + Skills + Lab.
             ClaudeMdEntry(selected: appModel.claudeMdSelected) { appModel.openClaudeMd() }
             SkillsEntry(selected: appModel.skillsSelected) { appModel.openSkills() }
             LabEntry(selected: appModel.labSelected) { appModel.openLab() }
@@ -435,9 +434,19 @@ private struct SidebarHeader: View {
 
             Spacer(minLength: Theme.Space.xs)
 
-            HeaderButton(system: "plus", help: "New terminal on \(appModel.currentHost.label) (⌘T)") {
+            // Click = new terminal (⌘T). Click-and-hold = pick a start folder (local).
+            Menu {
+                Button { appModel.newTerminal() } label: { Label("新建终端", systemImage: "plus") }
+                Button { appModel.newTerminalPickingFolder() } label: { Label("选择文件夹新建…", systemImage: "folder.badge.plus") }
+            } label: {
+                Image(systemName: "plus").font(.system(size: 13, weight: .medium))
+            } primaryAction: {
                 appModel.newTerminal()
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("New terminal on \(appModel.currentHost.label) (⌘T) · 长按可选起始文件夹")
             HeaderButton(system: "magnifyingglass", help: "Search across all panes (⌘F)", action: onSearch)
             HeaderButton(system: "folder.badge.plus", help: "New group", action: onNewGroup)
         }
@@ -459,30 +468,6 @@ private struct HeaderButton: View {
         .buttonStyle(.borderless)
         .help(help)
         .accessibilityLabel(help)
-    }
-}
-
-/// Bottom-of-sidebar entry into the「办公室」visualization (sessions as pixel characters).
-private struct OfficeEntry: View {
-    let selected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: Theme.Space.sm) {
-                Image(systemName: "building.2")
-                    .foregroundStyle(selected ? Theme.brand : Color.secondary)
-                Text("办公室").font(Theme.Font.rowTitle)
-                Spacer()
-            }
-            .contentShape(Rectangle())
-            .padding(.horizontal, Theme.Space.md)
-            .padding(.vertical, Theme.Space.sm)
-        }
-        .buttonStyle(.plain)
-        .background(selected ? Theme.brand.opacity(0.12) : Color.clear)
-        .overlay(alignment: .top) { Divider() }
-        .accessibilityLabel("办公室")
     }
 }
 
@@ -591,35 +576,47 @@ private struct FilterField: View {
 }
 
 private struct TerminalRow: View {
+    @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let conn: ConnectionSession
     let isSelected: Bool
+
+    /// "Working" = producing output right now. For local sessions this fuses the live tmux poll
+    /// (`window_activity`, which catches activity even on sessions this app hasn't attached) with the
+    /// attached controller's streaming phase. Remote sessions fall back to the streaming phase only.
+    private var working: Bool {
+        if conn.host == nil { return appModel.activity.isWorking(name: conn.groupKey) || conn.outputPhase == .streaming }
+        return conn.outputPhase == .streaming
+    }
+    /// The latest output line for a working local session — "what it's doing right now".
+    private var liveLine: String? { conn.host == nil ? appModel.activity.line(conn.groupKey) : nil }
 
     var body: some View {
         let status = TerminalStatus.of(conn)
         let showDot = conn.hasUnseenOutput && !isSelected
         HStack(spacing: Theme.Space.md) {
+            // Reserve a thin left "rail" on every row (clear when idle) so the brand accent on a
+            // working row appears without shifting the layout.
+            Capsule().fill(working ? Theme.brand : Color.clear)
+                .frame(width: 2.5)
+                .frame(maxHeight: .infinity)
+
             Image(systemName: "terminal.fill")
-                .foregroundStyle(status == .connected ? Theme.brand : Color.secondary)
+                .foregroundStyle(working || status == .connected ? Theme.brand : Color.secondary)
             VStack(alignment: .leading, spacing: Theme.Space.xxs) {
                 Text(conn.title)
                     .font(Theme.Font.rowTitle)
                     .lineLimit(1)
-                if status == .dormant {
-                    Text("未连接 · 点击打开")
-                        .font(Theme.Font.rowSubtitle)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                } else if !conn.subtitle.isEmpty {
-                    Text(conn.subtitle)
-                        .font(Theme.Font.rowSubtitle)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                subtitle(status)
             }
             Spacer(minLength: Theme.Space.xs)
-            // Output activity: pulse while streaming, a checkmark flash when a burst finishes,
-            // otherwise the static unseen-output dot.
-            OutputActivityIndicator(phase: conn.outputPhase, showUnseen: showDot)
+            if working {
+                // Lively "equalizer" bars = this terminal is actively producing output.
+                EqualizerBars(animated: !reduceMotion)
+            } else {
+                // Idle: a checkmark flash when a burst just finished, else the unseen-output dot.
+                OutputActivityIndicator(phase: conn.outputPhase, showUnseen: showDot)
+            }
             // Only surface a status glyph when it needs attention — a healthy connected row stays
             // quiet (its brand-tinted icon is signal enough), keeping a long list calm.
             if status != .connected {
@@ -627,16 +624,70 @@ private struct TerminalRow: View {
             }
         }
         .padding(.vertical, Theme.Space.xxs)
+        .background(working && !isSelected ? Theme.brand.opacity(0.06) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 6))
         .animation(.easeInOut(duration: 0.15), value: showDot)
+        .animation(.easeInOut(duration: 0.28), value: working)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityText(status, showDot: showDot))
     }
 
+    /// Subtitle: while working, show the live latest output line (mono, brand-tinted) — otherwise the
+    /// running command, or the dormant hint.
+    @ViewBuilder private func subtitle(_ status: TerminalStatus) -> some View {
+        if working, let line = liveLine, !line.isEmpty {
+            Text(line)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Theme.brand.opacity(0.9))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        } else if status == .dormant {
+            Text("未连接 · 点击打开")
+                .font(Theme.Font.rowSubtitle)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+        } else if !conn.subtitle.isEmpty {
+            Text(conn.subtitle)
+                .font(Theme.Font.rowSubtitle)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
     private func accessibilityText(_ status: TerminalStatus, showDot: Bool) -> String {
-        var parts = [conn.title, status.label]
+        var parts = [conn.title, working ? "活动中" : status.label]
         if !conn.subtitle.isEmpty { parts.append("running \(conn.subtitle)") }
         if showDot { parts.append("new output") }
         return parts.joined(separator: ", ")
+    }
+}
+
+/// Three little bars that bounce while a terminal is actively producing output — an "equalizer"
+/// activity effect. Honors Reduce Motion (static bars). Pure visual, no layout impact.
+private struct EqualizerBars: View {
+    let animated: Bool
+    @State private var up = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 1.5) {
+            ForEach(0..<3, id: \.self) { i in
+                Capsule().fill(Theme.brand).frame(width: 2.5, height: height(i))
+            }
+        }
+        .frame(width: 12, height: 12, alignment: .center)
+        .onAppear {
+            guard animated else { return }
+            withAnimation(.easeInOut(duration: 0.42).repeatForever(autoreverses: true)) { up = true }
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// Each bar swings between two heights; staggering the pairs makes them bounce out of phase.
+    private func height(_ i: Int) -> CGFloat {
+        guard animated else { return [8, 8, 8][i] }
+        let low: [CGFloat] = [4, 10, 6]
+        let high: [CGFloat] = [10, 5, 11]
+        return up ? high[i] : low[i]
     }
 }
 

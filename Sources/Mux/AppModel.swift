@@ -23,13 +23,11 @@ final class AppModel {
     var skillsSelected = false
     /// True when the global CLAUDE.md rules editor is shown in the detail area instead of a terminal.
     var claudeMdSelected = false
-    /// True when the「办公室」visualization is shown in the detail area instead of a terminal.
-    var officeSelected = false
 
     var selectedConnectionID: UUID? {
         didSet {
             guard oldValue != selectedConnectionID else { return }
-            labSelected = false; skillsSelected = false; claudeMdSelected = false; officeSelected = false // a terminal leaves the tool panes
+            labSelected = false; skillsSelected = false; claudeMdSelected = false // a terminal leaves the tool panes
             for c in connections {
                 if c.id == selectedConnectionID { c.markViewed() } else { c.resignViewing() }
             }
@@ -39,6 +37,10 @@ final class AppModel {
 
     /// Last surfaced error (e.g. tmux not found, ssh failed). Shown as a banner in the UI.
     var lastError: String?
+
+    /// Live per-session output activity (working? + latest line), polled from the tmux server even for
+    /// sessions this app hasn't attached. Drives the sidebar's real-time activity effects.
+    let activity = TerminalActivityMonitor()
 
     // Search state lives here so the sheet and results survive view churn.
     var searchQuery: String = ""
@@ -97,6 +99,7 @@ final class AppModel {
         loadGroups()
         loadHosts()
         loadEnvironments()
+        activity.start() // begin polling per-session output activity for the sidebar effects
         guard connections.isEmpty else { return }
         let existing = TmuxServer.listLocalSessions()
         if existing.isEmpty {
@@ -118,14 +121,31 @@ final class AppModel {
 
     /// New terminal on the CURRENTLY-SELECTED host (rebuild.md #2): local → a fresh local session;
     /// ssh → a fresh session on that host (reusing the host's authenticated ssh master).
-    func newTerminal() {
+    func newTerminal(startDirectory: String? = nil) {
         switch currentHost {
         case .local:
-            openLocal(sessionName: nextLocalSessionName())
+            openLocal(sessionName: nextLocalSessionName(), startDirectory: startDirectory)
         case .ssh(let host, let args):
+            // startDirectory is a LOCAL path → meaningless on a remote host, so it's ignored for ssh.
             open(TmuxConnection(endpoint: .ssh(host: host, sshArgs: args),
                                 sessionName: nextSSHName(host: host),
                                 password: hostPasswords[host]))
+        }
+    }
+
+    /// New local terminal whose shell starts in a folder the user picks (`new-session -c <dir>`).
+    /// Local hosts only — for a remote host the panel would pick a path that doesn't exist there.
+    func newTerminalPickingFolder() {
+        guard case .local = currentHost else { newTerminal(); return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "在此新建"
+        panel.message = "选择新终端的起始目录"
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        if panel.runModal() == .OK, let url = panel.url {
+            newTerminal(startDirectory: url.path)
         }
     }
 
@@ -179,8 +199,10 @@ final class AppModel {
         return taken.contains("main") ? Self.lowestUnusedName(taken: taken) : "main"
     }
 
-    private func openLocal(sessionName: String, attachOnly: Bool = false, connect: Bool = true) {
-        open(TmuxConnection(endpoint: .local, sessionName: sessionName, attachOnly: attachOnly),
+    private func openLocal(sessionName: String, attachOnly: Bool = false, connect: Bool = true,
+                           startDirectory: String? = nil) {
+        open(TmuxConnection(endpoint: .local, sessionName: sessionName, attachOnly: attachOnly,
+                            startDirectory: startDirectory),
              connect: connect)
     }
 
@@ -234,25 +256,19 @@ final class AppModel {
     /// Show the Lab (experiments) pane in the detail area. Keeps `selectedConnectionID` so returning
     /// to a terminal restores the last one — this just flips the detail area over to the Lab.
     func openLab() {
-        labSelected = true; skillsSelected = false; claudeMdSelected = false; officeSelected = false
+        labSelected = true; skillsSelected = false; claudeMdSelected = false
         leaveTerminals() // no terminal is on screen while the Lab shows
     }
 
     /// Show the Skills manager in the detail area. Mutually exclusive with the other tool panes / a terminal.
     func openSkills() {
-        skillsSelected = true; labSelected = false; claudeMdSelected = false; officeSelected = false
+        skillsSelected = true; labSelected = false; claudeMdSelected = false
         leaveTerminals()
     }
 
     /// Show the global CLAUDE.md rules editor. Mutually exclusive with the other tool panes / a terminal.
     func openClaudeMd() {
-        claudeMdSelected = true; labSelected = false; skillsSelected = false; officeSelected = false
-        leaveTerminals()
-    }
-
-    /// Show the「办公室」visualization. Mutually exclusive with the other tool panes / a terminal.
-    func openOffice() {
-        officeSelected = true; labSelected = false; skillsSelected = false; claudeMdSelected = false
+        claudeMdSelected = true; labSelected = false; skillsSelected = false
         leaveTerminals()
     }
 

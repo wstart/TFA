@@ -158,24 +158,33 @@ struct SkillsView: View {
     @State private var showNew = false
     @State private var newName = ""
     @State private var deleteTarget: SkillNode?
+    @State private var search = ""
 
     private var home: String { FileManager.default.homeDirectoryForCurrentUser.path }
 
     var body: some View {
         HSplitView {
-            // Left: skill directory tree
+            // Left: search + skill directory tree
             VStack(spacing: 0) {
+                if !store.isEmpty { searchField; Divider() }
                 if store.isEmpty {
                     ContentUnavailableView("没有 Skill", systemImage: "wand.and.stars",
                         description: Text("~/.claude/skills 下没有带 SKILL.md 的目录。点下方「新建」创建一个。"))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 1) {
-                            ForEach(visibleRows()) { vr in rowView(vr) }
+                    let rows = visibleRows()
+                    if rows.isEmpty {
+                        ContentUnavailableView("没有匹配的 Skill", systemImage: "magnifyingglass",
+                            description: Text("没有名称或描述包含「\(search)」的 skill。"))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 1) {
+                                ForEach(rows) { vr in rowView(vr) }
+                            }
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 6)
                         }
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 6)
                     }
                 }
                 Divider()
@@ -250,8 +259,27 @@ struct SkillsView: View {
     /// A flattened tree row: a node plus its indentation depth.
     private struct VisibleRow: Identifiable { let node: SkillNode; let depth: Int; var id: String { node.id } }
 
-    /// Walk the tree, emitting only rows whose ancestors are all expanded.
+    /// Search box: filters the top-level skills by name / description (live).
+    private var searchField: some View {
+        HStack(spacing: Theme.Space.sm) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary).font(.system(size: 12))
+            TextField("搜索 skill（名称 / 描述）", text: $search)
+                .textFieldStyle(.plain).font(Theme.Font.rowSubtitle)
+            if !search.isEmpty {
+                Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.plain).foregroundStyle(.tertiary).accessibilityLabel("清除搜索")
+            }
+        }
+        .padding(.horizontal, Theme.Space.md).padding(.vertical, Theme.Space.sm)
+    }
+
+    /// Walk the tree, emitting only rows whose ancestors are all expanded. When searching, only
+    /// top-level skills whose name or description matches are shown.
     private func visibleRows() -> [VisibleRow] {
+        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
+        let roots = q.isEmpty ? store.tree : store.tree.filter {
+            ($0.name + " " + ($0.subtitle ?? "")).lowercased().contains(q)
+        }
         var out: [VisibleRow] = []
         func walk(_ nodes: [SkillNode], _ depth: Int) {
             for n in nodes {
@@ -259,7 +287,7 @@ struct SkillsView: View {
                 if n.isDirectory, expanded.contains(n.id), let kids = n.children { walk(kids, depth + 1) }
             }
         }
-        walk(store.tree, 0)
+        walk(roots, 0)
         return out
     }
 

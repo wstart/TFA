@@ -28,6 +28,9 @@ public struct TmuxConnection: Sendable {
     /// New windows/panes in the session inherit them; the initial shell only picks them up on a
     /// fresh create (when we respawn it). Empty by default.
     public var environment: [String: String]
+    /// Optional start directory for a freshly-CREATED session (`new-session -c <dir>`). Ignored when
+    /// attaching to an existing session. Local only (a remote path would have to exist on the host).
+    public var startDirectory: String?
 
     public init(endpoint: Endpoint = .local,
                 sessionName: String = "GUI",
@@ -37,7 +40,8 @@ public struct TmuxConnection: Sendable {
                 cols: Int = 80,
                 rows: Int = 24,
                 password: String? = nil,
-                environment: [String: String] = [:]) {
+                environment: [String: String] = [:],
+                startDirectory: String? = nil) {
         self.endpoint = endpoint
         self.sessionName = sessionName
         self.attachOnly = attachOnly
@@ -47,6 +51,7 @@ public struct TmuxConnection: Sendable {
         self.rows = rows
         self.password = password
         self.environment = environment
+        self.startDirectory = startDirectory
     }
 
     /// A short, human-readable label for this connection.
@@ -65,9 +70,13 @@ public struct TmuxConnection: Sendable {
     }
 
     private var tmuxSubcommand: [String] {
-        attachOnly
-            ? ["attach-session", "-t", sessionName]
-            : ["new-session", "-A", "-s", sessionName]
+        if attachOnly { return ["attach-session", "-t", sessionName] }
+        var args = ["new-session", "-A", "-s", sessionName]
+        // `-c` sets the start directory only when new-session actually CREATES the session (we always
+        // use a fresh name for new local terminals, so it creates). Passed as its own argv token, so
+        // paths with spaces need no quoting.
+        if let dir = startDirectory, !dir.isEmpty { args += ["-c", dir] }
+        return args
     }
 
     /// PATH used for remote tmux invocations. ssh's one-shot remote command runs under `shell -c`,
