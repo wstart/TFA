@@ -51,6 +51,21 @@ final class ConnectionSession: Identifiable {
     /// Set by AppModel for the currently-shown terminal: its output is "seen", so don't flag it.
     @ObservationIgnored private var isViewing = false
 
+    /// True when a background terminal EXPLICITLY asked for the user's attention — an agent finished its
+    /// turn and is waiting (terminal bell or an OSC 9/777/99 notification). Stronger than `hasUnseenOutput`
+    /// (which is any output): this is "it stopped and wants you". Cleared when the terminal is viewed.
+    var needsAttention = false
+    /// The text of the last attention ping (OSC notification body), shown in the sidebar / notification.
+    var attentionMessage: String?
+    /// Invoked on the main actor when a background terminal first raises attention, with the message.
+    @ObservationIgnored var onNeedsAttention: ((_ message: String?) -> Void)?
+    /// True when the previous output chunk ended INSIDE an OSC sequence whose terminator (BEL / ST)
+    /// hadn't arrived yet — so the next chunk swallows the remainder instead of mistaking that
+    /// terminating BEL for a standalone bell.
+    @ObservationIgnored private var attnPendingOSC = false
+    /// Up to one trailing ESC carried over, so an `ESC ]` introducer split across two chunks still parses.
+    @ObservationIgnored private var attnCarry: [UInt8] = []
+
     /// Output activity phase driving the sidebar effect: idle → streaming (output flowing) →
     /// justFinished (a burst just ended) → idle. A burst is "finished" after `outputIdleGap` seconds
     /// with no new %output, so a continuous stream (`tail -f`) never false-finishes.
@@ -108,6 +123,33 @@ final class ConnectionSession: Identifiable {
         return p.isEmpty ? nil : p
     }
 
+    /// The primary pane's shell pid (nil until known) — used to find this terminal's listening ports.
+    var panePID: Int? {
+        let pid = controller.primaryPane?.pid ?? 0
+        return pid > 0 ? pid : nil
+    }
+
+    /// Re-read the pane's REAL working directory (and pid / command / title) from tmux now. tmux emits
+    /// no event when a shell `cd`s, so the cached `currentPath` can lag — this forces a refresh so the
+    /// header, sidebar git/port chips, and file manager all snap to where the terminal actually is.
+    func syncCurrentFolder() {
+        guard state.connected else { return }
+        Task { @MainActor in try? await controller.refreshAll() }
+    }
+
+    /// Type a line into the active pane and SUBMIT it — used to dispatch a task into an agent's
+    /// session. The Enter is sent SEPARATELY a beat later: agent TUIs (Claude Code / Codex) treat a
+    /// single "text + CR" blob as a multiline paste (inserting a newline instead of submitting), so a
+    /// distinct, slightly-delayed Enter keystroke is what reliably submits.
+    func sendLine(_ s: String) {
+        guard state.connected, let pane = controller.primaryPane?.id else { return }
+        controller.sendKeys(to: pane, text: s)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            controller.sendEnter(to: pane)
+        }
+    }
+
     /// The ssh host for remote terminals (nil for local) — header context.
     var host: String? {
         if case .ssh(let h, _) = controller.connection.endpoint { return h }
@@ -151,6 +193,7 @@ final class ConnectionSession: Identifiable {
             self.terminals[paneID]?.feed(data)
             // Flag background activity (idempotent — only mutate on a real change to avoid churn).
             if !self.isViewing, !self.hasUnseenOutput { self.hasUnseenOutput = true }
+            self.scanForAttention(data) // bell / OSC 9·777·99 → "needs you" (background only)
             self.noteOutputActivity()
         }
         controller.onPaneRemoved = { [weak self] paneID in
@@ -170,6 +213,101 @@ final class ConnectionSession: Identifiable {
     func markViewed() {
         isViewing = true
         if hasUnseenOutput { hasUnseenOutput = false }
+        if needsAttention { needsAttention = false; attentionMessage = nil } // looking at it = handled
+    }
+
+    /// Scan a chunk of raw pane output for an attention signal: a terminal BELL (0x07) or an
+    /// OSC 9 / OSC 777 / OSC 99 notification (`ESC ] <code> ; … (BEL|ST)`). Agents (Claude Code, Codex,
+    /// …) emit these when they finish a turn and want you. Only flags BACKGROUND terminals (if you're
+    /// already viewing it, you can see it) and only RAISES the flag (cleared on view), so a chatty pane
+    /// can't toggle it.
+    ///
+    /// Crucially, ANY `ESC ]` OSC is consumed up to its BEL/ST terminator — including window-title
+    /// sequences (OSC 0/1/2), which shells/agents emit constantly and which are ALSO BEL-terminated.
+    /// Without that, the title's terminating BEL would be miscounted as a bell and falsely raise
+    /// attention. OSC `9;4` (ConEmu/Windows-Terminal PROGRESS) is likewise recognized and ignored.
+    private func scanForAttention(_ data: Data) {
+        guard !isViewing else { attnPendingOSC = false; attnCarry = []; return }
+        if needsAttention { return } // already raised — nothing to do until it's viewed/cleared
+        var bytes = attnCarry; attnCarry = []
+        bytes.append(contentsOf: data)
+        guard !bytes.isEmpty else { return }
+        let n = bytes.count
+        var i = 0
+        var hit = false
+        var message: String?
+
+        // Continuation: previous chunk ended mid-OSC → swallow up to (and including) its terminator.
+        if attnPendingOSC {
+            while i < n {
+                if bytes[i] == 0x07 { i += 1; attnPendingOSC = false; break }
+                if bytes[i] == 0x1B, i + 1 < n, bytes[i + 1] == 0x5C { i += 2; attnPendingOSC = false; break }
+                i += 1
+            }
+            if attnPendingOSC { return } // still no terminator — wait for more
+        }
+
+        while i < n {
+            let b = bytes[i]
+            if b == 0x1B {
+                guard i + 1 < n else { attnCarry = [0x1B]; break }   // lone trailing ESC → carry it
+                if bytes[i + 1] == 0x5D {                            // ESC ] → an OSC (any code)
+                    var j = i + 2, code = 0, digits = 0
+                    while j < n, bytes[j] >= 0x30, bytes[j] <= 0x39 { code = code * 10 + Int(bytes[j] - 0x30); j += 1; digits += 1 }
+                    guard j < n, bytes[j] == 0x3B else { i += 1; continue } // not a `code;` OSC → skip ESC
+                    // Read params up to BEL or ST (or end-of-buffer).
+                    var k = j + 1
+                    var params: [UInt8] = []
+                    var terminated = false
+                    while k < n {
+                        if bytes[k] == 0x07 { terminated = true; break }
+                        if bytes[k] == 0x1B, k + 1 < n, bytes[k + 1] == 0x5C { terminated = true; break }
+                        if params.count < 256 { params.append(bytes[k]) }
+                        k += 1
+                    }
+                    // Only the notification codes raise — and OSC 9;4 (progress) does not.
+                    if (code == 9 || code == 99 || code == 777),
+                       !(code == 9 && Self.isProgressOSC9(params)), digits > 0 {
+                        hit = true
+                        if let m = Self.attentionMessage(code: code, params: params) { message = m }
+                    }
+                    if terminated { i = (bytes[k] == 0x07) ? k + 1 : k + 2 }
+                    else { attnPendingOSC = true; break } // swallow remainder next chunk
+                    continue
+                }
+                i += 1; continue
+            }
+            if b == 0x07 { hit = true; i += 1; continue } // a real bell, NOT an OSC terminator
+            i += 1
+        }
+
+        if hit {
+            attnPendingOSC = false; attnCarry = []
+            needsAttention = true
+            attentionMessage = message
+            onNeedsAttention?(message)
+        }
+    }
+
+    /// OSC `9` is overloaded: `ESC ] 9 ; <text> BEL` is an iTerm2 notification, but
+    /// `ESC ] 9 ; 4 ; <state> ; <pct> BEL` is a ConEmu/Windows-Terminal PROGRESS update. The progress
+    /// form's first `;`-segment is exactly "4" — recognize it so a build/download progress bar in a
+    /// background pane doesn't masquerade as "needs you".
+    private static func isProgressOSC9(_ params: [UInt8]) -> Bool {
+        let s = String(decoding: params, as: UTF8.self)
+        return s.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) == "4"
+    }
+
+    /// Pull a human-readable message out of an OSC notification's parameters. OSC 777 is
+    /// `notify;<title>;<body>`, OSC 9 is `<text>`, OSC 99 is `<metadata>;<text>` — in all cases the
+    /// last non-empty `;`-segment is the human part. nil when there's nothing meaningful.
+    private static func attentionMessage(code: Int, params: [UInt8]) -> String? {
+        let s = String(decoding: params, as: UTF8.self)
+        let segs = s.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+        let text = segs.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })?
+            .trimmingCharacters(in: .whitespaces)
+        guard let text, !text.isEmpty, text.lowercased() != "notify" else { return nil }
+        return text.count > 120 ? String(text.prefix(120)) + "…" : text
     }
 
     /// This terminal is no longer on screen — future output flags activity.

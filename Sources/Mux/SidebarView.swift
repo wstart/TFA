@@ -1,6 +1,19 @@
 import SwiftUI
 import TmuxKit
 
+/// Sidebar drag payloads share one `String` channel. A TERMINAL-assign drag carries a row's
+/// `groupKey` (a tmux session name / `name@host` — never contains a control char). A FOLDER-reorder
+/// drag carries a control-char-sentinel'd group id, so a single `dropDestination(for: String.self)`
+/// can tell the two apart with zero collision risk.
+private enum SidebarDrag {
+    private static let groupPrefix = "\u{1}tfa-group:"
+    static func groupPayload(_ id: UUID) -> String { groupPrefix + id.uuidString }
+    static func groupID(from payload: String) -> UUID? {
+        guard payload.hasPrefix(groupPrefix) else { return nil }
+        return UUID(uuidString: String(payload.dropFirst(groupPrefix.count)))
+    }
+}
+
 /// The left panel: a host switcher + action buttons up top (rebuild.md #1/#2), a filter field, and
 /// the terminal list organized into collapsible groups (#6). Click to switch; right-click a row to
 /// rename / move to a group / close / kill.
@@ -75,11 +88,13 @@ struct SidebarView: View {
                 }
                 .dropDestination(for: String.self) { keys, _ in
                     for key in keys {
-                        if let conn = appModel.connections.first(where: { $0.groupKey == key }) {
+                        if let gid = SidebarDrag.groupID(from: key) {
+                            appModel.moveGroup(gid, before: nil) // folder dropped below all → move to end
+                        } else if let conn = appModel.connections.first(where: { $0.groupKey == key }) {
                             appModel.removeFromGroups(conn)
                         }
                     }
-                    ungroupedDropTargeted = false
+                    ungroupedDropTargeted = false; dropTargetGroup = nil
                     return true
                 } isTargeted: { ungroupedDropTargeted = $0 }
                 if appModel.isDiscoveringSessions {
@@ -100,7 +115,8 @@ struct SidebarView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
 
-            // Bottom-left entries: CLAUDE.md rules + Skills + Lab.
+            // Bottom-left entries: Tasks + CLAUDE.md rules + Skills + Lab.
+            ToolEntry(title: "任务", icon: "checklist", selected: appModel.tasksSelected) { appModel.openTasks() }
             ClaudeMdEntry(selected: appModel.claudeMdSelected) { appModel.openClaudeMd() }
             SkillsEntry(selected: appModel.skillsSelected) { appModel.openSkills() }
             LabEntry(selected: appModel.labSelected) { appModel.openLab() }
@@ -205,14 +221,18 @@ struct SidebarView: View {
         let members = filtered(appModel.visibleTerminals(in: group))
         if filter.isEmpty || !members.isEmpty {
             groupHeaderRow(group)
-                // Drop a terminal onto the folder header to file it into this group (#8).
+                // One drop target, two payloads: a folder token → reorder before this folder; a
+                // terminal's groupKey → file that terminal into this group (#8). (The folder's OWN
+                // drag lives on its grip handle inside groupHeaderRow, not here.)
                 .dropDestination(for: String.self) { keys, _ in
                     for key in keys {
-                        if let conn = appModel.connections.first(where: { $0.groupKey == key }) {
+                        if let gid = SidebarDrag.groupID(from: key) {
+                            appModel.moveGroup(gid, before: group.id)
+                        } else if let conn = appModel.connections.first(where: { $0.groupKey == key }) {
                             appModel.assign(conn, toGroup: group.id)
                         }
                     }
-                    dropTargetGroup = nil
+                    dropTargetGroup = nil; ungroupedDropTargeted = false
                     return true
                 } isTargeted: { hovering in
                     dropTargetGroup = hovering ? group.id
@@ -260,34 +280,73 @@ struct SidebarView: View {
     /// the row toggles collapse — no reliance on the system DisclosureGroup triangle (see groupTree).
     private func groupHeaderRow(_ group: AppModel.TerminalGroup) -> some View {
         let expanded = groupExpanded(group.id)
-        return Button {
-            toggleGroup(group.id)
-        } label: {
-            HStack(spacing: Theme.Space.xs) {
-                Image(systemName: "chevron.right")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.secondary)
-                    .rotationEffect(.degrees(expanded ? 90 : 0))
-                    .frame(width: 10)
-                sectionHeaderLabel(group.name, icon: "folder.fill",
-                                   count: appModel.visibleTerminals(in: group).count)
-            }
-            .padding(.vertical, 2)
-            .background(
-                // Highlight the folder while a terminal is dragged over it (#8 drop feedback).
-                RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                    .fill(dropTargetGroup == group.id ? Theme.brand.opacity(0.18) : .clear)
-            )
-            .contentShape(Rectangle())
+        // NOT a Button: a Button's tap recognizer competes with `.draggable` (added in groupTree), making
+        // the folder hard to pick up. A plain tappable row lets tap and drag coexist cleanly — quick
+        // click toggles, press-and-move reorders. `.isButton` keeps the VoiceOver semantics.
+        return HStack(spacing: Theme.Space.xs) {
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .rotationEffect(.degrees(expanded ? 90 : 0))
+                .frame(width: 10)
+            sectionHeaderLabel(group.name, icon: "folder.fill",
+                               count: appModel.visibleTerminals(in: group).count)
+            // Dedicated drag handle: the ONLY draggable bit, so the tap-to-toggle area never fights the
+            // drag recognizer (that conflict is why dragging the whole header didn't start a drag).
+            Image(systemName: "line.3.horizontal")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .padding(.leading, Theme.Space.xs)
+                .contentShape(Rectangle())
+                .draggable(SidebarDrag.groupPayload(group.id)) {
+                    Label(group.name, systemImage: "folder.fill")
+                        .padding(Theme.Space.sm)
+                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                }
+                .help("拖动重新排序分组")
+                .accessibilityHidden(true) // reorder is exposed via the row's accessibilityActions
         }
-        .buttonStyle(.plain)
+        .padding(.vertical, 2)
+        .background(
+            // Highlight the folder while a terminal is dragged over it (#8 drop feedback).
+            RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                .fill(dropTargetGroup == group.id ? Theme.brand.opacity(0.18) : .clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { toggleGroup(group.id) }
+        .help("点击折叠/展开 · 拖右侧手柄重新排序")
         .animation(.easeInOut(duration: 0.15), value: expanded)
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
         .accessibilityLabel("\(group.name) group, \(expanded ? "expanded" : "collapsed")")
         .accessibilityHint(expanded ? "Collapse group" : "Expand group")
+        .accessibilityAction { toggleGroup(group.id) } // VoiceOver activate → toggle
+        // Keyboard / VoiceOver alternative to drag-reorder.
+        .accessibilityAction(named: "上移分组") { moveGroupBy(group.id, -1) }
+        .accessibilityAction(named: "下移分组") { moveGroupBy(group.id, 1) }
         .contextMenu {
+            let ids = appModel.currentGroups.map(\.id)
+            let i = ids.firstIndex(of: group.id)
+            Button("上移分组") { moveGroupBy(group.id, -1) }.disabled(i == nil || i == 0)
+            Button("下移分组") { moveGroupBy(group.id, 1) }.disabled(i == nil || i == ids.count - 1)
+            Divider()
             Button("Rename Group…") { startRenameGroup(group) }
             Button("Delete Group", role: .destructive) { appModel.deleteGroup(group.id) }
+        }
+    }
+
+    /// Nudge a folder one slot up (`delta -1`) or down (`+1`) among the current host's folders.
+    private func moveGroupBy(_ id: UUID, _ delta: Int) {
+        let ids = appModel.currentGroups.map(\.id)
+        guard let i = ids.firstIndex(of: id) else { return }
+        let j = i + delta
+        guard j >= 0, j <= ids.count else { return }
+        if delta < 0 {
+            appModel.moveGroup(id, before: ids[max(0, j)])      // before the previous folder
+        } else {
+            // down: insert before the folder AFTER the next one (or end if next is last)
+            let beforeID = j + 1 < ids.count ? ids[j + 1] : nil
+            appModel.moveGroup(id, before: beforeID)
         }
     }
 
@@ -318,47 +377,56 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func rowMenu(_ conn: ConnectionSession) -> some View {
-        Button("Rename…") {
-            renameTarget = conn
-            renameText = conn.title
+        Button("重命名…") { renameTarget = conn; renameText = conn.title }
+        if appModel.isInSplit(conn.id) {
+            Button("从分屏移除") { appModel.removeFromSplit(conn.id) }
+        } else {
+            Button("加入分屏") { appModel.addToSplit(conn) }
+                .disabled(appModel.splitConnections.count >= 4)
         }
-        Menu("Move to Group") {
-            ForEach(appModel.currentGroups) { g in
-                Button {
-                    appModel.assign(conn, toGroup: g.id)
-                } label: {
-                    if appModel.group(for: conn)?.id == g.id {
-                        Label(g.name, systemImage: "checkmark")
-                    } else {
-                        Text(g.name)
-                    }
-                }
-            }
-            if !appModel.currentGroups.isEmpty { Divider() }
-            Button("New Group…") { startNewGroup(assigning: conn) }
-            if appModel.group(for: conn) != nil {
-                Divider()
-                Button("Remove from Group") { appModel.removeFromGroups(conn) }
-            }
-        }
-        Button("环境变量…") { envTarget = conn }
-        Button("拷贝环境变量") { appModel.copyEnvironment(conn) }
-        Button("粘贴环境变量") {
-            pasteResultCount = appModel.pasteEnvironment(into: conn)
-            pasteResultConn = conn
-        }
+        Divider()
+
+        Button("同步当前文件夹") { conn.syncCurrentFolder() }
+            .help("重新读取该终端真实的工作目录（cd 后刷新路径 / 分支 / 端口）")
         Button("文件管理器…") {
             if let p = conn.currentPath { openWindow(value: URL(fileURLWithPath: p)) }
         }
         .disabled(conn.host != nil || conn.currentPath == nil)
         .help(conn.host != nil ? "暂不支持远程会话" : "")
-        Button("重启 session（重载环境变量）") { restartTarget = conn }
-        Button("克隆 session") { appModel.cloneTerminal(conn) }
+
+        // Less-frequent actions collapsed into submenus to keep the top level scannable.
+        Menu("分组") {
+            ForEach(appModel.currentGroups) { g in
+                Button {
+                    appModel.assign(conn, toGroup: g.id)
+                } label: {
+                    appModel.group(for: conn)?.id == g.id ? Label(g.name, systemImage: "checkmark") : Label(g.name, systemImage: "")
+                }
+            }
+            if !appModel.currentGroups.isEmpty { Divider() }
+            Button("新建分组…") { startNewGroup(assigning: conn) }
+            if appModel.group(for: conn) != nil {
+                Button("移出分组") { appModel.removeFromGroups(conn) }
+            }
+        }
+        Menu("环境变量") {
+            Button("设置…") { envTarget = conn }
+            Button("拷贝") { appModel.copyEnvironment(conn) }
+            Button("粘贴") {
+                pasteResultCount = appModel.pasteEnvironment(into: conn)
+                pasteResultConn = conn
+            }
+        }
+        Menu("会话") {
+            Button("克隆 session") { appModel.cloneTerminal(conn) }
+            Button("重启 session（重载环境变量）") { restartTarget = conn }
+        }
         Divider()
+
         // Non-destructive: detach (session survives, resumes next launch).
-        Button("Close") { appModel.detachTerminal(conn) }
+        Button("关闭") { appModel.detachTerminal(conn) }
         // Destructive: confirm, then kill-session.
-        Button("Kill Session…", role: .destructive) { killTarget = conn }
+        Button("结束 session…", role: .destructive) { killTarget = conn }
     }
 
     // MARK: - Helpers
@@ -495,6 +563,32 @@ private struct ClaudeMdEntry: View {
     }
 }
 
+/// Generic bottom-of-sidebar tool entry (used by the Tasks board).
+private struct ToolEntry: View {
+    let title: String
+    let icon: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: Theme.Space.sm) {
+                Image(systemName: icon)
+                    .foregroundStyle(selected ? Theme.brand : Color.secondary)
+                Text(title).font(Theme.Font.rowTitle)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, Theme.Space.md)
+            .padding(.vertical, Theme.Space.sm)
+        }
+        .buttonStyle(.plain)
+        .background(selected ? Theme.brand.opacity(0.12) : Color.clear)
+        .overlay(alignment: .top) { Divider() }
+        .accessibilityLabel(title)
+    }
+}
+
 /// Bottom-of-sidebar entry into the Skills manager. Selected → the detail area shows Skills.
 private struct SkillsEntry: View {
     let selected: Bool
@@ -591,26 +685,34 @@ private struct TerminalRow: View {
     /// The latest output line for a working local session — "what it's doing right now".
     private var liveLine: String? { conn.host == nil ? appModel.activity.line(conn.groupKey) : nil }
 
+    /// An agent in the background is waiting for you (bell / OSC notification). Top-priority cue.
+    private var attention: Bool { conn.needsAttention && !isSelected }
+    private static let amber = Color(red: 0.95, green: 0.62, blue: 0.16)
+
     var body: some View {
         let status = TerminalStatus.of(conn)
         let showDot = conn.hasUnseenOutput && !isSelected
         HStack(spacing: Theme.Space.md) {
-            // Reserve a thin left "rail" on every row (clear when idle) so the brand accent on a
-            // working row appears without shifting the layout.
-            Capsule().fill(working ? Theme.brand : Color.clear)
+            // Reserve a thin left "rail" on every row (clear when idle) so an accent appears without
+            // shifting the layout: amber = needs you, brand = actively working.
+            Capsule().fill(attention ? Self.amber : (working ? Theme.brand : Color.clear))
                 .frame(width: 2.5)
                 .frame(maxHeight: .infinity)
 
             Image(systemName: "terminal.fill")
-                .foregroundStyle(working || status == .connected ? Theme.brand : Color.secondary)
+                .foregroundStyle(attention ? Self.amber : (working || status == .connected ? Theme.brand : Color.secondary))
             VStack(alignment: .leading, spacing: Theme.Space.xxs) {
                 Text(conn.title)
                     .font(Theme.Font.rowTitle)
                     .lineLimit(1)
                 subtitle(status)
+                contextChips
             }
             Spacer(minLength: Theme.Space.xs)
-            if working {
+            if attention {
+                // Highest priority: an amber bell = this terminal explicitly wants you.
+                AttentionBell(animated: !reduceMotion, tint: Self.amber)
+            } else if working {
                 // Lively "equalizer" bars = this terminal is actively producing output.
                 EqualizerBars(animated: !reduceMotion)
             } else {
@@ -624,18 +726,35 @@ private struct TerminalRow: View {
             }
         }
         .padding(.vertical, Theme.Space.xxs)
-        .background(working && !isSelected ? Theme.brand.opacity(0.06) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 6))
+        .background(rowTint, in: RoundedRectangle(cornerRadius: 6))
         .animation(.easeInOut(duration: 0.15), value: showDot)
         .animation(.easeInOut(duration: 0.28), value: working)
+        .animation(.easeInOut(duration: 0.2), value: attention)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityText(status, showDot: showDot))
     }
 
-    /// Subtitle: while working, show the live latest output line (mono, brand-tinted) — otherwise the
-    /// running command, or the dormant hint.
+    private var rowTint: Color {
+        if attention { return Self.amber.opacity(0.12) }
+        if working && !isSelected { return Theme.brand.opacity(0.06) }
+        return .clear
+    }
+
+    /// Subtitle: attention message (the agent's ping) > live output line while working > running
+    /// command > dormant hint.
     @ViewBuilder private func subtitle(_ status: TerminalStatus) -> some View {
-        if working, let line = liveLine, !line.isEmpty {
+        if attention, let msg = conn.attentionMessage, !msg.isEmpty {
+            Text(msg)
+                .font(.system(size: 11))
+                .foregroundStyle(Self.amber)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        } else if attention {
+            Text("等待你的操作")
+                .font(Theme.Font.rowSubtitle)
+                .foregroundStyle(Self.amber)
+                .lineLimit(1)
+        } else if working, let line = liveLine, !line.isEmpty {
             Text(line)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(Theme.brand.opacity(0.9))
@@ -654,11 +773,62 @@ private struct TerminalRow: View {
         }
     }
 
+    /// Git branch + listening ports of this terminal's working directory (local, connected sessions).
+    /// A quiet metadata line that only appears when there's something to show.
+    @ViewBuilder private var contextChips: some View {
+        if let ctx = appModel.sessionContext.context(conn.id), ctx.branch != nil || !ctx.ports.isEmpty {
+            HStack(spacing: Theme.Space.sm) {
+                if let branch = ctx.branch {
+                    chip("arrow.triangle.branch", branch)
+                }
+                if !ctx.ports.isEmpty {
+                    chip("network", ctx.ports.prefix(3).map { ":\($0)" }.joined(separator: " ")
+                         + (ctx.ports.count > 3 ? " +\(ctx.ports.count - 3)" : ""))
+                }
+            }
+        }
+    }
+
+    private func chip(_ symbol: String, _ text: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: symbol).font(.system(size: 8))
+            Text(text).font(.system(size: 10)).lineLimit(1).truncationMode(.middle)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 5).padding(.vertical, 1)
+        .background(.quaternary, in: Capsule())
+    }
+
     private func accessibilityText(_ status: TerminalStatus, showDot: Bool) -> String {
         var parts = [conn.title, working ? "活动中" : status.label]
         if !conn.subtitle.isEmpty { parts.append("running \(conn.subtitle)") }
         if showDot { parts.append("new output") }
+        if let ctx = appModel.sessionContext.context(conn.id) {
+            if let b = ctx.branch { parts.append("分支 \(b)") }
+            if !ctx.ports.isEmpty { parts.append("端口 " + ctx.ports.map(String.init).joined(separator: " ")) }
+        }
         return parts.joined(separator: ", ")
+    }
+}
+
+/// An amber bell that gently wobbles to draw the eye — a terminal is explicitly waiting for you.
+/// Honors Reduce Motion (static bell).
+private struct AttentionBell: View {
+    let animated: Bool
+    let tint: Color
+    @State private var ring = false
+
+    var body: some View {
+        Image(systemName: "bell.fill")
+            .font(.system(size: 12))
+            .foregroundStyle(tint)
+            .rotationEffect(.degrees(ring ? 12 : -12), anchor: .top)
+            .frame(width: 14, height: 14)
+            .onAppear {
+                guard animated else { return }
+                withAnimation(.easeInOut(duration: 0.4).repeatForever(autoreverses: true)) { ring = true }
+            }
+            .accessibilityHidden(true)
     }
 }
 

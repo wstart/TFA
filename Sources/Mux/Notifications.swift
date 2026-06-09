@@ -28,4 +28,16 @@ enum NotificationManager {
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
+
+    /// Post a "<terminal> 需要你的关注" notification — an agent rang the bell / sent an OSC notification
+    /// while in the background (it finished and is waiting). Carries the message text when present.
+    static func needsAttention(terminal: String, message: String?) {
+        guard available else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "🔔 \(terminal)"
+        content.body = (message?.isEmpty == false) ? message! : "需要你的关注"
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
 }

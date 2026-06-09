@@ -23,17 +23,106 @@ final class AppModel {
     var skillsSelected = false
     /// True when the global CLAUDE.md rules editor is shown in the detail area instead of a terminal.
     var claudeMdSelected = false
+    /// True when the task board (Kanban) is shown in the detail area instead of a terminal.
+    var tasksSelected = false
 
     var selectedConnectionID: UUID? {
         didSet {
             guard oldValue != selectedConnectionID else { return }
-            labSelected = false; skillsSelected = false; claudeMdSelected = false // a terminal leaves the tool panes
-            for c in connections {
-                if c.id == selectedConnectionID { c.markViewed() } else { c.resignViewing() }
+            labSelected = false; skillsSelected = false; claudeMdSelected = false; tasksSelected = false // a terminal leaves the tool panes
+            // Split focus rules:
+            //  • selecting a tile already in the split → move focus there (split stays);
+            //  • selecting a terminal OUTSIDE the split → full-screen single (collapse), but the split's
+            //    composition is REMEMBERED (lastSplitIDs);
+            //  • selecting a terminal that belonged to the LAST split (while currently single) → RESTORE
+            //    that split, with the clicked terminal focused.
+            if let id = selectedConnectionID {
+                if splitIDs.contains(id) {
+                    // keep — just a focus move
+                } else if splitIDs.isEmpty, lastSplitIDs.contains(id), liveSplitCount(lastSplitIDs) >= 2 {
+                    splitIDs = lastSplitIDs // click back onto a remembered tile → restore the split
+                } else {
+                    splitIDs = [] // collapse to single (memory kept in lastSplitIDs)
+                }
+            } else {
+                splitIDs = []
             }
+            syncViewing()
             if let id = selectedConnectionID { ensureConnected(id) } // lazy attach on first view
         }
     }
+
+    /// Terminals shown together in a split grid (2–4 tiles), in display order. Empty = single view of
+    /// `selectedConnection`. The focused tile (keystroke target) is `selectedConnectionID`.
+    var splitIDs: [UUID] = [] {
+        didSet {
+            guard oldValue != splitIDs else { return }
+            if splitConnections.count >= 2 { lastSplitIDs = splitIDs } // remember the latest real split
+            for id in splitIDs { ensureConnected(id) } // lazily attach every tile
+            syncViewing()
+        }
+    }
+    /// The most recent split composition (≥2 tiles), kept after a collapse so re-selecting one of its
+    /// terminals restores the split. Not observed — pure model memory.
+    @ObservationIgnored private var lastSplitIDs: [UUID] = []
+    /// How many of `ids` are still live connections (used to decide if a remembered split is restorable).
+    private func liveSplitCount(_ ids: [UUID]) -> Int {
+        ids.filter { id in connections.contains { $0.id == id } }.count
+    }
+    /// True when ≥2 tiles are shown side by side.
+    var isSplit: Bool { splitConnections.count >= 2 }
+    /// The split tiles resolved to live connections (drops any that were closed), in order.
+    var splitConnections: [ConnectionSession] {
+        splitIDs.compactMap { id in connections.first { $0.id == id } }
+    }
+    /// The connections currently ON SCREEN (split tiles, or just the selected one) — these are "viewed".
+    private var onScreenIDs: Set<UUID> {
+        let s = splitConnections
+        if s.count >= 2 { return Set(s.map(\.id)) }
+        return selectedConnectionID.map { [$0] } ?? []
+    }
+    /// Mark every on-screen terminal as viewed (its output is seen) and everything else as not.
+    private func syncViewing() {
+        let visible = onScreenIDs
+        for c in connections {
+            if visible.contains(c.id) { c.markViewed() } else { c.resignViewing() }
+        }
+    }
+
+    /// Add a terminal as another split tile alongside the current one (caps at 4). Seeds the split
+    /// from the currently-selected terminal the first time.
+    func addToSplit(_ conn: ConnectionSession) {
+        if splitIDs.isEmpty {
+            if let sel = selectedConnectionID, sel != conn.id { splitIDs = [sel, conn.id] }
+            else { splitIDs = [conn.id] }
+        } else if !splitIDs.contains(conn.id), splitIDs.count < 4 {
+            splitIDs.append(conn.id)
+        }
+        selectedConnectionID = conn.id // focus the newly added tile (stays in split — it's a member)
+    }
+    /// Remove a tile from the split. Dropping to one tile collapses back to single view OF THE
+    /// SURVIVOR (captured before the collapse empties splitIDs).
+    func removeFromSplit(_ id: UUID) {
+        let wasFocused = selectedConnectionID == id
+        splitIDs.removeAll { $0 == id }
+        let survivor = splitIDs.first
+        if splitIDs.count < 2 { splitIDs = [] }
+        if wasFocused { selectedConnectionID = survivor ?? connections.first?.id }
+    }
+    func isInSplit(_ id: UUID) -> Bool { splitIDs.contains(id) }
+    /// Quick split: show the selected terminal alongside the NEXT one in the sidebar (a 2-up). If
+    /// already split, this instead adds the next not-yet-shown terminal as another tile.
+    func splitWithNext() {
+        let vis = visibleConnections
+        guard vis.count >= 2, let sel = selectedConnectionID, let i = vis.firstIndex(where: { $0.id == sel }) else { return }
+        if splitIDs.isEmpty {
+            splitIDs = [sel, vis[(i + 1) % vis.count].id]
+        } else if splitIDs.count < 4, let next = vis.first(where: { !splitIDs.contains($0.id) }) {
+            splitIDs.append(next.id)
+        }
+    }
+    /// Leave split mode entirely (back to single view of the focused tile).
+    func clearSplit() { if !splitIDs.isEmpty { let keep = selectedConnectionID; splitIDs = []; if let keep { selectedConnectionID = keep } } }
 
     /// Last surfaced error (e.g. tmux not found, ssh failed). Shown as a banner in the UI.
     var lastError: String?
@@ -41,6 +130,13 @@ final class AppModel {
     /// Live per-session output activity (working? + latest line), polled from the tmux server even for
     /// sessions this app hasn't attached. Drives the sidebar's real-time activity effects.
     let activity = TerminalActivityMonitor()
+
+    /// Per-terminal dev context (git branch + listening ports) for connected local sessions — shown
+    /// in the sidebar row. Fed a snapshot of the current connections in `start()`.
+    let sessionContext = SessionContextMonitor()
+
+    /// The shared task board (~/.tfa/board.json) — Kanban of tasks dispatched to terminal "agents".
+    let taskBoard = TaskBoardStore()
 
     // Search state lives here so the sheet and results survive view churn.
     var searchQuery: String = ""
@@ -100,6 +196,18 @@ final class AppModel {
         loadHosts()
         loadEnvironments()
         activity.start() // begin polling per-session output activity for the sidebar effects
+        // Feed the dev-context poller a live snapshot of connected LOCAL terminals (cwd + shell pid).
+        sessionContext.snapshot = { [weak self] in
+            (self?.connections ?? []).compactMap { c in
+                guard c.host == nil, c.state.connected, let path = c.currentPath, let pid = c.panePID
+                else { return nil }
+                return (id: c.id, path: path, pid: pid)
+            }
+        }
+        sessionContext.start()
+        taskBoard.start()          // watch ~/.tfa/board.db for changes from the CLI / agents
+        syncBoardAgents()          // register current terminals as assignable agents
+        startDispatchQueue()       // auto-dispatch queued tasks once their terminal goes idle
         guard connections.isEmpty else { return }
         let existing = TmuxServer.listLocalSessions()
         if existing.isEmpty {
@@ -226,6 +334,13 @@ final class AppModel {
                 guard let conn, !wasViewing else { return }
                 NotificationManager.outputFinished(terminal: conn.title)
             }
+            // An agent explicitly pinged (bell / OSC notification) while in the background → a stronger,
+            // separate system notification carrying the message, so "it needs you" stands out from the
+            // routine "output finished".
+            conn.onNeedsAttention = { [weak conn] message in
+                guard let conn else { return }
+                NotificationManager.needsAttention(terminal: conn.title, message: message)
+            }
             connections.append(conn)
             if connect { selectedConnectionID = conn.id } // didSet → ensureConnected spawns it
             return conn
@@ -256,20 +371,140 @@ final class AppModel {
     /// Show the Lab (experiments) pane in the detail area. Keeps `selectedConnectionID` so returning
     /// to a terminal restores the last one — this just flips the detail area over to the Lab.
     func openLab() {
-        labSelected = true; skillsSelected = false; claudeMdSelected = false
+        labSelected = true; skillsSelected = false; claudeMdSelected = false; tasksSelected = false
         leaveTerminals() // no terminal is on screen while the Lab shows
     }
 
     /// Show the Skills manager in the detail area. Mutually exclusive with the other tool panes / a terminal.
     func openSkills() {
-        skillsSelected = true; labSelected = false; claudeMdSelected = false
+        skillsSelected = true; labSelected = false; claudeMdSelected = false; tasksSelected = false
         leaveTerminals()
     }
 
     /// Show the global CLAUDE.md rules editor. Mutually exclusive with the other tool panes / a terminal.
     func openClaudeMd() {
-        claudeMdSelected = true; labSelected = false; skillsSelected = false
+        claudeMdSelected = true; labSelected = false; skillsSelected = false; tasksSelected = false
         leaveTerminals()
+    }
+
+    /// Show the task board (Kanban). Mutually exclusive with the other tool panes / a terminal.
+    func openTasks() {
+        tasksSelected = true; labSelected = false; skillsSelected = false; claudeMdSelected = false
+        syncBoardAgents()
+        leaveTerminals()
+    }
+
+    /// Register every current terminal as an assignable board agent (id `tfa:<groupKey>`), preserving
+    /// any externally self-registered agents. Cheap; called when the board is opened or terminals change.
+    func syncBoardAgents() {
+        let managed = connections.map { c in
+            BoardAgent(id: "tfa:" + c.groupKey, name: c.title,
+                       kind: c.subtitle.isEmpty ? "shell" : c.subtitle,
+                       session: c.groupKey, cwd: c.currentPath ?? "", external: false)
+        }
+        taskBoard.syncManagedAgents(managed)
+    }
+
+    /// Assign a task to an agent and dispatch it: mark it 进行中, and — for a TFA-managed terminal agent
+    /// — type a one-line instruction into that tmux session so the agent picks it up. The full body /
+    /// completion handshake go through the `tfa-task` CLI referenced in the dispatched line.
+    /// taskID → agentID waiting for a BUSY terminal to go idle (so a dispatch never lands mid-command
+    /// where the running program would eat the keystrokes — that was the "派发失败"). Flushed by a poller.
+    @ObservationIgnored private var pendingDispatch: [UUID: String] = [:]
+    /// Arbitrary lines (e.g. a human's reply/補充) queued for a busy terminal, flushed when it's idle.
+    @ObservationIgnored private var pendingLines: [(key: String, line: String)] = []
+
+    /// A human reply / extra info on a task: record it on the board AND push it into the assigned
+    /// terminal so the agent actually sees it (queued if the terminal is mid-command).
+    func pushReply(_ taskID: UUID, text: String) {
+        taskBoard.addComment(taskID, by: "你", text: text, kind: "note")
+        guard let task = taskBoard.board.tasks.first(where: { $0.id == taskID }),
+              let a = task.assignee, a.hasPrefix("tfa:") else { return }
+        let key = String(a.dropFirst("tfa:".count))
+        let short = String(taskID.uuidString.lowercased().prefix(8))
+        sendOrQueueLine(key, "【任务 #\(short) 补充】\(text)（`~/.tfa/bin/tfa-task show \(short)` 看全部）")
+    }
+
+    private func sendOrQueueLine(_ key: String, _ line: String) {
+        guard let conn = connections.first(where: { $0.groupKey == key }) else { return }
+        if isConnBusy(conn) { pendingLines.append((key, line)) }
+        else { ensureConnected(conn.id); conn.sendLine(line) }
+    }
+
+    func dispatchTask(_ taskID: UUID, to agentID: String) {
+        guard taskBoard.board.tasks.contains(where: { $0.id == taskID }) else { return }
+        taskBoard.setAssignee(taskID, to: agentID)
+        taskBoard.move(taskID, to: .doing)
+        attemptDispatch(taskID, to: agentID, queueIfBusy: true)
+    }
+
+    /// Send the dispatch line into the agent's terminal — but only when it's IDLE. If it's mid-command,
+    /// queue it (and say so on the board); the poller retries once the terminal is free.
+    private func attemptDispatch(_ taskID: UUID, to agentID: String, queueIfBusy: Bool) {
+        let name = taskBoard.agent(agentID)?.name ?? agentID
+        guard agentID.hasPrefix("tfa:") else { // external agent → it claims the task itself
+            taskBoard.addComment(taskID, by: "TFA", text: "已指派给外部 agent \(name)（由其自行认领）")
+            return
+        }
+        let key = String(agentID.dropFirst("tfa:".count))
+        guard let conn = connections.first(where: { $0.groupKey == key }) else {
+            taskBoard.addComment(taskID, by: "TFA", text: "未找到终端 \(name)，未派发")
+            return
+        }
+        if isConnBusy(conn) {
+            if queueIfBusy, pendingDispatch[taskID] == nil {
+                pendingDispatch[taskID] = agentID
+                taskBoard.addComment(taskID, by: "TFA", text: "终端忙，已排队 — 空闲后自动派发给 \(name)")
+            }
+            return
+        }
+        pendingDispatch[taskID] = nil
+        ensureConnected(conn.id)
+        guard let task = taskBoard.board.tasks.first(where: { $0.id == taskID }) else { return }
+        conn.sendLine(Self.dispatchLine(task))
+        taskBoard.addComment(taskID, by: "TFA", text: "已派发给 \(name)")
+    }
+
+    /// A terminal is "busy" while a program is actively producing output — sending keystrokes then
+    /// would be swallowed. Idle (sitting at a prompt / agent awaiting input) is safe to dispatch into.
+    private func isConnBusy(_ conn: ConnectionSession) -> Bool {
+        if conn.host == nil { return activity.isWorking(name: conn.groupKey) || conn.outputPhase == .streaming }
+        return conn.outputPhase == .streaming
+    }
+
+    /// Poll the queue: as soon as a pending task's terminal goes idle, dispatch it.
+    private func startDispatchQueue() {
+        Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                for (taskID, agentID) in Array(pendingDispatch) {
+                    guard taskBoard.board.tasks.contains(where: { $0.id == taskID }) else { pendingDispatch[taskID] = nil; continue }
+                    let key = String(agentID.dropFirst("tfa:".count))
+                    guard let conn = connections.first(where: { $0.groupKey == key }) else { continue }
+                    if !isConnBusy(conn) { attemptDispatch(taskID, to: agentID, queueIfBusy: false) }
+                }
+                // Flush queued reply/补充 lines once their terminal is free.
+                for i in pendingLines.indices.reversed() {
+                    let p = pendingLines[i]
+                    if let conn = connections.first(where: { $0.groupKey == p.key }), !isConnBusy(conn) {
+                        ensureConnected(conn.id); conn.sendLine(p.line); pendingLines.remove(at: i)
+                    }
+                }
+            }
+        }
+    }
+
+    /// A SINGLE-LINE dispatch instruction (no embedded newlines — a newline would submit early in an
+    /// interactive agent CLI). The body / details are read by the agent via `tfa-task show`.
+    private static func dispatchLine(_ t: BoardTask) -> String {
+        let short = String(t.id.uuidString.lowercased().prefix(8)) // matches the CLI's lowercased ids
+        let b = "~/.tfa/bin/tfa-task"
+        return "请认领并处理 TFA 任务 #\(short)「\(t.title)」。"
+            + "步骤：① `\(b) show \(short)` 看完整需求；② `\(b) claim \(short)` 认领；"
+            + "③ 每完成一步用 `\(b) step \(short) \"做了什么/下一步\"` 实时回报；"
+            + "④ 需要我确认/补信息用 `\(b) ask \(short) \"问题\"`，卡住用 `\(b) block \(short) \"原因\"`；"
+            + "⑤ 全部做完后先 `\(b) step \(short) \"最终结果：…（改了哪些文件/验证情况）\"` 回报结果，再 `\(b) done \(short)`。"
+            + "务必边做边回报，让我在看板上看到完整过程和最终结果。"
     }
 
     /// Switching to a tool pane (Lab / Skills / CLAUDE.md): no terminal is on screen, so stop flagging
@@ -344,6 +579,21 @@ final class AppModel {
         guard !vis.isEmpty else { return }
         let start = vis.firstIndex { $0.id == selectedConnectionID } ?? -1
         for off in 1...vis.count where vis[(start + off) % vis.count].hasUnseenOutput {
+            selectedConnectionID = vis[(start + off) % vis.count].id
+            return
+        }
+    }
+
+    /// Number of terminals currently waiting for the user (agent pinged in the background).
+    var attentionCount: Int { connections.filter { $0.needsAttention }.count }
+
+    /// Jump to the next terminal that's explicitly waiting for you (bell / OSC notification). Cycles
+    /// through them; selecting clears that one's flag (markViewed).
+    func selectNextAttention() {
+        let vis = visibleConnections
+        guard !vis.isEmpty else { return }
+        let start = vis.firstIndex { $0.id == selectedConnectionID } ?? -1
+        for off in 1...vis.count where vis[(start + off) % vis.count].needsAttention {
             selectedConnectionID = vis[(start + off) % vis.count].id
             return
         }
@@ -438,9 +688,18 @@ final class AppModel {
     /// removing an already-absent connection is a no-op.
     private func removeConnection(_ conn: ConnectionSession) {
         connections.removeAll { $0.id == conn.id }
-        if selectedConnectionID == conn.id {
-            selectedConnectionID = connections.first?.id
+        lastSplitIDs.removeAll { $0 == conn.id } // forget a closed terminal so it can't revive a split
+        let wasFocused = selectedConnectionID == conn.id
+        var survivor: UUID?
+        if splitIDs.contains(conn.id) {
+            splitIDs.removeAll { $0 == conn.id }
+            survivor = splitIDs.first
+            if splitIDs.count < 2 { splitIDs = [] } // dropped below a split → single view of the survivor
         }
+        if wasFocused {
+            selectedConnectionID = survivor ?? splitIDs.first ?? connections.first?.id
+        }
+        if tasksSelected { syncBoardAgents() } // keep the board's agent list current while it's shown
     }
 
     // MARK: - Hosts (rebuild.md #2)
@@ -691,6 +950,21 @@ final class AppModel {
     /// Delete a group, releasing its terminals back to Ungrouped (sessions are NOT killed).
     func deleteGroup(_ id: UUID) {
         groups.removeAll { $0.id == id }
+    }
+    /// Reorder folders: move group `id` to sit just before `targetID` among the CURRENT host's groups
+    /// (or to the end when `targetID` is nil). Only the active host's slots are reordered — other
+    /// hosts' groups keep their positions in the backing array. Persisted via `groups`' didSet.
+    func moveGroup(_ id: UUID, before targetID: UUID?) {
+        guard id != targetID else { return }
+        var order = currentGroups.map(\.id)
+        guard let from = order.firstIndex(of: id) else { return }
+        order.remove(at: from)
+        if let t = targetID, let to = order.firstIndex(of: t) { order.insert(id, at: to) }
+        else { order.append(id) } // dropped past the last folder → move to the end
+        let hostKey = currentHost.persistKey
+        let byID = Dictionary(uniqueKeysWithValues: groups.map { ($0.id, $0) })
+        var next = order.compactMap { byID[$0] }.makeIterator()
+        groups = groups.map { $0.hostKey == hostKey ? (next.next() ?? $0) : $0 }
     }
     /// Move a terminal into a group (a terminal belongs to at most one group).
     func assign(_ conn: ConnectionSession, toGroup id: UUID) {

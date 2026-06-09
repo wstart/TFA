@@ -21,6 +21,9 @@ public final class TmuxPane: Identifiable {
     public var currentCommand: String
     /// The pane's current working directory (`#{pane_current_path}`), empty until known.
     public var currentPath: String
+    /// The pane's process id (`#{pane_pid}` — the shell), 0 until known. Used to find which listening
+    /// ports belong to this terminal (the shell's descendant processes).
+    public var pid: Int
     public var active: Bool
 
     // 在窗口内的几何（单位：字符格）。来自 layout 解析或 list-panes。
@@ -34,6 +37,7 @@ public final class TmuxPane: Identifiable {
         title: String = "",
         currentCommand: String = "",
         currentPath: String = "",
+        pid: Int = 0,
         active: Bool = false,
         width: Int = 0,
         height: Int = 0,
@@ -44,6 +48,7 @@ public final class TmuxPane: Identifiable {
         self.title = title
         self.currentCommand = currentCommand
         self.currentPath = currentPath
+        self.pid = pid
         self.active = active
         self.width = width
         self.height = height

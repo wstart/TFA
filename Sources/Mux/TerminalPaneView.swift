@@ -15,10 +15,17 @@ import TmuxKit
 struct TerminalPaneView: NSViewRepresentable {
     let connection: ConnectionSession
     let paneID: TmuxPaneID
+    /// Whether THIS pane is the keyboard target. Always true in single view; in a split only the
+    /// focused tile is true, so the other tiles never grab first responder (which would steal
+    /// keystrokes from the tile you're typing in). Clicking a tile body calls `onActivate`.
+    var isFocused: Bool = true
+    /// Called when the user clicks into this pane's body — lets a split focus this tile (selection).
+    var onActivate: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSView {
+        context.coordinator.onActivate = onActivate
         let container = NSView(frame: .zero)
         attach(to: container, context: context)
         // Reliable click-to-focus without subclassing SwiftTerm's view: a non-delaying click
@@ -33,6 +40,7 @@ struct TerminalPaneView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onActivate = onActivate
         attach(to: nsView, context: context)
         focusIfNeeded(context: context)
     }
@@ -62,6 +70,7 @@ struct TerminalPaneView: NSViewRepresentable {
     /// when our window is key — this avoids yanking focus away from the search sheet / rename
     /// alert (which live in their own key window). Retries briefly until the view is in a window.
     private func focusIfNeeded(context: Context) {
+        guard isFocused else { return } // a non-focused split tile must NOT grab keyboard focus
         let coordinator = context.coordinator
         func attempt(_ n: Int) {
             guard let tv = coordinator.terminalView else { return }
@@ -77,8 +86,10 @@ struct TerminalPaneView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject {
         weak var terminalView: TerminalView?
+        var onActivate: () -> Void = {}
 
         @objc func focusTerminal() {
+            onActivate() // make this the selected/focused tile (split highlight follows the keyboard)
             if let tv = terminalView, let window = tv.window {
                 window.makeFirstResponder(tv)
             }

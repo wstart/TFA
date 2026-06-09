@@ -212,7 +212,7 @@ public final class TmuxController {
     private static let fmtWindow = "#{session_id}|#{window_id}|#{window_active}|#{window_layout}|#{window_name}"
     // `pane_current_path` is LAST so any `|` it might contain stays in the final field (splitFields
     // caps the split count) rather than corrupting earlier fields.
-    private static let fmtPane = "#{session_id}|#{window_id}|#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_left}|#{pane_top}|#{pane_current_command}|#{pane_title}|#{pane_current_path}"
+    private static let fmtPane = "#{session_id}|#{window_id}|#{pane_id}|#{pane_active}|#{pane_width}|#{pane_height}|#{pane_left}|#{pane_top}|#{pane_pid}|#{pane_current_command}|#{pane_title}|#{pane_current_path}"
 
     /// Re-query THIS connection's session and reconcile it into `state`, preserving existing objects
     /// by id.
@@ -235,14 +235,14 @@ public final class TmuxController {
             guard f.count == 5 else { continue }
             windowsBySession[f[0], default: []].append((f[1], f[2] == "1", f[3], f[4]))
         }
-        var panesByWindow: [TmuxWindowID: [(id: TmuxPaneID, active: Bool, w: Int, h: Int, x: Int, y: Int, cmd: String, title: String, path: String)]] = [:]
+        var panesByWindow: [TmuxWindowID: [(id: TmuxPaneID, active: Bool, w: Int, h: Int, x: Int, y: Int, pid: Int, cmd: String, title: String, path: String)]] = [:]
         for line in panesReply.lines {
-            let f = splitFields(line, 10)
-            guard f.count == 11 else { continue }
+            let f = splitFields(line, 11)
+            guard f.count == 12 else { continue }
             panesByWindow[f[1], default: []].append((
                 f[2], f[3] == "1",
                 Int(f[4]) ?? 0, Int(f[5]) ?? 0, Int(f[6]) ?? 0, Int(f[7]) ?? 0,
-                f[8], f[9], f[10]))
+                Int(f[8]) ?? 0, f[9], f[10], f[11]))
         }
 
         let oldPaneIDs = Set(allPaneIDs())
@@ -269,6 +269,7 @@ public final class TmuxController {
                     pane.active = pmeta.active
                     pane.width = pmeta.w; pane.height = pmeta.h
                     pane.left = pmeta.x; pane.top = pmeta.y
+                    pane.pid = pmeta.pid
                     pane.currentCommand = pmeta.cmd
                     pane.title = pmeta.title
                     pane.currentPath = pmeta.path
@@ -373,6 +374,12 @@ public final class TmuxController {
 
     public func sendKeys(to pane: TmuxPaneID, text: String) {
         sendKeys(to: pane, bytes: ArraySlice(Array(text.utf8)))
+    }
+
+    /// Send a distinct Enter keystroke (tmux's `Enter` key name) — used to SUBMIT after typing text.
+    /// A separate Enter is needed because agent TUIs treat a single text+CR blob as a multiline paste.
+    public func sendEnter(to pane: TmuxPaneID) {
+        client.sendFireAndForget("send-keys -t \(pane) Enter")
     }
 
     public func selectWindow(_ window: TmuxWindowID) { client.sendFireAndForget("select-window -t \(window)") }

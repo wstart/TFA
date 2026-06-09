@@ -53,6 +53,18 @@ struct MuxApp: App {
                 Button("Next Active Terminal") { appModel.selectNextUnseen() }
                     .keyboardShortcut("]", modifiers: .command)
                     .disabled(appModel.connections.isEmpty)
+                Button("下一个待处理终端") { appModel.selectNextAttention() }
+                    .keyboardShortcut("]", modifiers: [.command, .shift])
+                    .disabled(appModel.attentionCount == 0)
+
+                Divider()
+
+                Button("分屏（与下一个并排）") { appModel.splitWithNext() }
+                    .keyboardShortcut("d", modifiers: .command)
+                    .disabled(appModel.connections.count < 2 || appModel.splitConnections.count >= 4)
+                Button("退出分屏") { appModel.clearSplit() }
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
+                    .disabled(!appModel.isSplit)
                 ForEach(1...9, id: \.self) { n in
                     Button("Select Terminal \(n)") { appModel.selectIndex(n) }
                         .keyboardShortcut(KeyEquivalent(Character("\(n)")))
