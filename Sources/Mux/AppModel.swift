@@ -30,99 +30,14 @@ final class AppModel {
         didSet {
             guard oldValue != selectedConnectionID else { return }
             labSelected = false; skillsSelected = false; claudeMdSelected = false; tasksSelected = false // a terminal leaves the tool panes
-            // Split focus rules:
-            //  • selecting a tile already in the split → move focus there (split stays);
-            //  • selecting a terminal OUTSIDE the split → full-screen single (collapse), but the split's
-            //    composition is REMEMBERED (lastSplitIDs);
-            //  • selecting a terminal that belonged to the LAST split (while currently single) → RESTORE
-            //    that split, with the clicked terminal focused.
-            if let id = selectedConnectionID {
-                if splitIDs.contains(id) {
-                    // keep — just a focus move
-                } else if splitIDs.isEmpty, lastSplitIDs.contains(id), liveSplitCount(lastSplitIDs) >= 2 {
-                    splitIDs = lastSplitIDs // click back onto a remembered tile → restore the split
-                } else {
-                    splitIDs = [] // collapse to single (memory kept in lastSplitIDs)
-                }
-            } else {
-                splitIDs = []
+            // Single-terminal view: the selected one is "viewed" (its output is seen); everything else
+            // resigns viewing so the sidebar can keep flagging its activity.
+            for c in connections {
+                if c.id == selectedConnectionID { c.markViewed() } else { c.resignViewing() }
             }
-            syncViewing()
             if let id = selectedConnectionID { ensureConnected(id) } // lazy attach on first view
         }
     }
-
-    /// Terminals shown together in a split grid (2–4 tiles), in display order. Empty = single view of
-    /// `selectedConnection`. The focused tile (keystroke target) is `selectedConnectionID`.
-    var splitIDs: [UUID] = [] {
-        didSet {
-            guard oldValue != splitIDs else { return }
-            if splitConnections.count >= 2 { lastSplitIDs = splitIDs } // remember the latest real split
-            for id in splitIDs { ensureConnected(id) } // lazily attach every tile
-            syncViewing()
-        }
-    }
-    /// The most recent split composition (≥2 tiles), kept after a collapse so re-selecting one of its
-    /// terminals restores the split. Not observed — pure model memory.
-    @ObservationIgnored private var lastSplitIDs: [UUID] = []
-    /// How many of `ids` are still live connections (used to decide if a remembered split is restorable).
-    private func liveSplitCount(_ ids: [UUID]) -> Int {
-        ids.filter { id in connections.contains { $0.id == id } }.count
-    }
-    /// True when ≥2 tiles are shown side by side.
-    var isSplit: Bool { splitConnections.count >= 2 }
-    /// The split tiles resolved to live connections (drops any that were closed), in order.
-    var splitConnections: [ConnectionSession] {
-        splitIDs.compactMap { id in connections.first { $0.id == id } }
-    }
-    /// The connections currently ON SCREEN (split tiles, or just the selected one) — these are "viewed".
-    private var onScreenIDs: Set<UUID> {
-        let s = splitConnections
-        if s.count >= 2 { return Set(s.map(\.id)) }
-        return selectedConnectionID.map { [$0] } ?? []
-    }
-    /// Mark every on-screen terminal as viewed (its output is seen) and everything else as not.
-    private func syncViewing() {
-        let visible = onScreenIDs
-        for c in connections {
-            if visible.contains(c.id) { c.markViewed() } else { c.resignViewing() }
-        }
-    }
-
-    /// Add a terminal as another split tile alongside the current one (caps at 4). Seeds the split
-    /// from the currently-selected terminal the first time.
-    func addToSplit(_ conn: ConnectionSession) {
-        if splitIDs.isEmpty {
-            if let sel = selectedConnectionID, sel != conn.id { splitIDs = [sel, conn.id] }
-            else { splitIDs = [conn.id] }
-        } else if !splitIDs.contains(conn.id), splitIDs.count < 4 {
-            splitIDs.append(conn.id)
-        }
-        selectedConnectionID = conn.id // focus the newly added tile (stays in split — it's a member)
-    }
-    /// Remove a tile from the split. Dropping to one tile collapses back to single view OF THE
-    /// SURVIVOR (captured before the collapse empties splitIDs).
-    func removeFromSplit(_ id: UUID) {
-        let wasFocused = selectedConnectionID == id
-        splitIDs.removeAll { $0 == id }
-        let survivor = splitIDs.first
-        if splitIDs.count < 2 { splitIDs = [] }
-        if wasFocused { selectedConnectionID = survivor ?? connections.first?.id }
-    }
-    func isInSplit(_ id: UUID) -> Bool { splitIDs.contains(id) }
-    /// Quick split: show the selected terminal alongside the NEXT one in the sidebar (a 2-up). If
-    /// already split, this instead adds the next not-yet-shown terminal as another tile.
-    func splitWithNext() {
-        let vis = visibleConnections
-        guard vis.count >= 2, let sel = selectedConnectionID, let i = vis.firstIndex(where: { $0.id == sel }) else { return }
-        if splitIDs.isEmpty {
-            splitIDs = [sel, vis[(i + 1) % vis.count].id]
-        } else if splitIDs.count < 4, let next = vis.first(where: { !splitIDs.contains($0.id) }) {
-            splitIDs.append(next.id)
-        }
-    }
-    /// Leave split mode entirely (back to single view of the focused tile).
-    func clearSplit() { if !splitIDs.isEmpty { let keep = selectedConnectionID; splitIDs = []; if let keep { selectedConnectionID = keep } } }
 
     /// Last surfaced error (e.g. tmux not found, ssh failed). Shown as a banner in the UI.
     var lastError: String?
@@ -131,12 +46,12 @@ final class AppModel {
     /// sessions this app hasn't attached. Drives the sidebar's real-time activity effects.
     let activity = TerminalActivityMonitor()
 
-    /// Per-terminal dev context (git branch + listening ports) for connected local sessions — shown
-    /// in the sidebar row. Fed a snapshot of the current connections in `start()`.
-    let sessionContext = SessionContextMonitor()
-
-    /// The shared task board (~/.tfa/board.json) — Kanban of tasks dispatched to terminal "agents".
+    /// The shared task board (~/.tfa/board.db) — Kanban of tasks dispatched to terminal "agents".
     let taskBoard = TaskBoardStore()
+
+    /// True when no `tmux` binary was found — drives a friendly "install tmux" banner instead of
+    /// letting the user hit a connection-failure page on their first New Terminal. Checked async.
+    var tmuxMissing = false
 
     // Search state lives here so the sheet and results survive view churn.
     var searchQuery: String = ""
@@ -150,13 +65,18 @@ final class AppModel {
     var isShowingQuickSwitch: Bool = false
 
     /// Whether the playful per-keystroke typing-combo effect is shown. Persisted; toggled in Settings.
-    var typingEffectsEnabled: Bool = (UserDefaults.standard.object(forKey: "typingEffectsEnabled") as? Bool) ?? true {
+    var typingEffectsEnabled: Bool = (UserDefaults.standard.object(forKey: "typingEffectsEnabled") as? Bool) ?? false {
         didSet { UserDefaults.standard.set(typingEffectsEnabled, forKey: "typingEffectsEnabled") }
     }
 
     /// Whether the left sidebar is collapsed (hidden). Toggled by the header button / ⌘\, persisted.
     var sidebarCollapsed: Bool = UserDefaults.standard.bool(forKey: "sidebarCollapsed") {
-        didSet { UserDefaults.standard.set(sidebarCollapsed, forKey: "sidebarCollapsed") }
+        didSet {
+            UserDefaults.standard.set(sidebarCollapsed, forKey: "sidebarCollapsed")
+            // Sidebar hidden → its live activity isn't shown, so skip the per-session capture-pane forks
+            // (the cheap window_activity poll still runs, keeping `isWorking` correct for dispatch).
+            activity.captureEnabled = !sidebarCollapsed
+        }
     }
     func toggleSidebar() { sidebarCollapsed.toggle() }
 
@@ -192,32 +112,34 @@ final class AppModel {
     /// On launch, DISCOVER existing local tmux sessions and open one terminal per session
     /// (attaching, so they resume live). If the server has none, create one default session.
     func start() {
+        loadIdentities()
         loadGroups()
         loadHosts()
         loadEnvironments()
-        activity.start() // begin polling per-session output activity for the sidebar effects
-        // Feed the dev-context poller a live snapshot of connected LOCAL terminals (cwd + shell pid).
-        sessionContext.snapshot = { [weak self] in
-            (self?.connections ?? []).compactMap { c in
-                guard c.host == nil, c.state.connected, let path = c.currentPath, let pid = c.panePID
-                else { return nil }
-                return (id: c.id, path: path, pid: pid)
+        migrateLegacyKeysIfNeeded() // one-time: name-keyed env/groups/assignees → UUID keys
+        startScheduler() // ONE heartbeat: activity sampling + board watch + dispatch/attention
+        activity.captureEnabled = !sidebarCollapsed
+        Task { @MainActor in self.tmuxMissing = await Task.detached(priority: .utility) { TmuxLocator.find() == nil }.value }
+        // Discover existing local tmux sessions OFF the main thread: `tmux list-sessions` is a
+        // synchronous subprocess (fork/exec + waitUntilExit) that would otherwise block the first
+        // frame. The window shows instantly; dormant placeholder rows appear a beat later (they don't
+        // spawn `-CC` until selected, so there's no functional cost to populating them async).
+        guard connections.isEmpty else { syncBoardAgents(); return }
+        Task { @MainActor in
+            let existing = await Task.detached(priority: .userInitiated) { TmuxServer.listLocalSessions() }.value
+            guard self.connections.isEmpty else { return } // user may have created one while we waited
+            if existing.isEmpty {
+                self.openLocal(sessionName: "main")         // create-or-attach a fresh default (connects)
+            } else {
+                for name in existing {
+                    self.openLocal(sessionName: name, attachOnly: true, connect: false)
+                }
+                self.selectedConnectionID = self.connections.first?.id // selecting triggers its attach
             }
-        }
-        sessionContext.start()
-        taskBoard.start()          // watch ~/.tfa/board.db for changes from the CLI / agents
-        syncBoardAgents()          // register current terminals as assignable agents
-        startDispatchQueue()       // auto-dispatch queued tasks once their terminal goes idle
-        guard connections.isEmpty else { return }
-        let existing = TmuxServer.listLocalSessions()
-        if existing.isEmpty {
-            openLocal(sessionName: "main")              // create-or-attach a fresh default (connects)
-        } else {
-            for name in existing {
-                // Register a dormant placeholder; the actual attach happens when it's selected (lazy).
-                openLocal(sessionName: name, attachOnly: true, connect: false)
-            }
-            selectedConnectionID = connections.first?.id // selecting the first triggers its attach
+            // Register the discovered terminals as assignable agents only NOW — syncing before
+            // discovery would wipe the agents table with an empty list, leaving every task's
+            // assignee dangling (the board showed cards with no 指派 until it was reopened).
+            self.syncBoardAgents()
         }
     }
 
@@ -286,10 +208,10 @@ final class AppModel {
         case .local:           clone.sessionName = nextLocalSessionName()
         case .ssh(let host, _): clone.sessionName = nextSSHName(host: host)
         }
-        // Carry the source's saved environment over to the clone's (new) key before opening, so
-        // `open` injects it just like the original.
-        if let srcEnv = sessionEnvironments[conn.groupKey], !srcEnv.isEmpty {
-            sessionEnvironments[envLookupKey(clone)] = srcEnv
+        // Carry the source's saved environment over to the clone's (new) identity before opening,
+        // so `open` injects it just like the original.
+        if let srcEnv = sessionEnvironments[conn.stableID], !srcEnv.isEmpty {
+            sessionEnvironments[identity(for: envLookupKey(clone))] = srcEnv
             persistEnvironments()
         }
         open(clone)
@@ -321,9 +243,11 @@ final class AppModel {
     @discardableResult
     private func open(_ connection: TmuxConnection, connect: Bool = true) -> ConnectionSession? {
         var connection = connection
-        connection.environment = sessionEnvironments[envLookupKey(connection)] ?? [:] // inject saved env
+        let stableID = identity(for: envLookupKey(connection)) // permanent UUID (created on first sight)
+        connection.environment = sessionEnvironments[stableID] ?? [:] // inject saved env
         do {
             let conn = try ConnectionSession(connection: connection)
+            conn.stableID = stableID
             conn.onClosed = { [weak self, weak conn] in
                 guard let self, let conn else { return }
                 self.handleConnectionClosed(conn)
@@ -359,6 +283,7 @@ final class AppModel {
         Task { @MainActor in
             await conn.connect()
             if let err = conn.connectError { self.lastError = "\(conn.title): \(err)" }
+            await self.reconcileIdentity(conn) // adopt/stamp @tfa_id in the session env
         }
     }
 
@@ -394,117 +319,80 @@ final class AppModel {
         leaveTerminals()
     }
 
-    /// Register every current terminal as an assignable board agent (id `tfa:<groupKey>`), preserving
-    /// any externally self-registered agents. Cheap; called when the board is opened or terminals change.
+    /// ⌘⇧T: flip between the task board and the terminal you were on — the board/terminal round-trip
+    /// is the heart of the dispatch loop, so it gets a single dedicated key.
+    func toggleTasks() {
+        if tasksSelected { backToTerminal() } else { openTasks() }
+    }
+
+    /// Leave whatever tool pane is open and land on a terminal (the selected one, or the first).
+    /// Selection may be UNCHANGED, so the didSet that normally clears the tool flags won't fire —
+    /// clear them explicitly and re-mark the terminal as viewed.
+    private func backToTerminal() {
+        tasksSelected = false; labSelected = false; skillsSelected = false; claudeMdSelected = false
+        if selectedConnectionID == nil { selectedConnectionID = connections.first?.id }
+        if let id = selectedConnectionID, let c = connection(id) {
+            c.markViewed()
+            ensureConnected(id)
+        }
+    }
+
+    /// Jump from a board card straight into its agent's terminal (the other half of the dispatch
+    /// loop: dispatch on the board, watch in the terminal).
+    func goToTerminal(_ id: UUID) {
+        tasksSelected = false; labSelected = false; skillsSelected = false; claudeMdSelected = false
+        reveal(id) // switches host if needed; the didSet marks viewed when the id changes
+        if let c = connection(id) { c.markViewed() } // and when it doesn't, mark it here
+        ensureConnected(id)
+    }
+
+    /// Register every LOCAL terminal as an assignable board agent (id `tfa:<stableID>`). Remote (ssh)
+    /// terminals are excluded by design — their agents can't reach the local board.db, so the
+    /// dispatch→report loop would silently break (决议 #2). Cheap; called when the board is opened
+    /// or terminals change.
     func syncBoardAgents() {
-        let managed = connections.map { c in
-            BoardAgent(id: "tfa:" + c.groupKey, name: c.title,
+        let managed = connections.filter { $0.host == nil }.map { c in
+            BoardAgent(id: "tfa:" + c.stableID, name: c.title,
                        kind: c.subtitle.isEmpty ? "shell" : c.subtitle,
-                       session: c.groupKey, cwd: c.currentPath ?? "", external: false)
+                       session: c.stableID, cwd: c.currentPath ?? "")
         }
         taskBoard.syncManagedAgents(managed)
     }
 
-    /// Assign a task to an agent and dispatch it: mark it 进行中, and — for a TFA-managed terminal agent
-    /// — type a one-line instruction into that tmux session so the agent picks it up. The full body /
-    /// completion handshake go through the `tfa-task` CLI referenced in the dispatched line.
-    /// taskID → agentID waiting for a BUSY terminal to go idle (so a dispatch never lands mid-command
-    /// where the running program would eat the keystrokes — that was the "派发失败"). Flushed by a poller.
-    @ObservationIgnored private var pendingDispatch: [UUID: String] = [:]
-    /// Arbitrary lines (e.g. a human's reply/補充) queued for a busy terminal, flushed when it's idle.
-    @ObservationIgnored private var pendingLines: [(key: String, line: String)] = []
+    /// The dispatch domain (queueing, retries, attention reconcile) — extracted so it's unit-testable
+    /// against fake terminals/boards (决议 #4). Wired with live adapters in `start()`.
+    @ObservationIgnored private(set) lazy var dispatch = DispatchCenter(board: taskBoard)
 
-    /// A human reply / extra info on a task: record it on the board AND push it into the assigned
-    /// terminal so the agent actually sees it (queued if the terminal is mid-command).
-    func pushReply(_ taskID: UUID, text: String) {
-        taskBoard.addComment(taskID, by: "你", text: text, kind: "note")
-        guard let task = taskBoard.board.tasks.first(where: { $0.id == taskID }),
-              let a = task.assignee, a.hasPrefix("tfa:") else { return }
-        let key = String(a.dropFirst("tfa:".count))
-        let short = String(taskID.uuidString.lowercased().prefix(8))
-        sendOrQueueLine(key, "【任务 #\(short) 补充】\(text)（`~/.tfa/bin/tfa-task show \(short)` 看全部）")
-    }
+    func dispatchTask(_ taskID: UUID, to agentID: String) { dispatch.dispatchTask(taskID, to: agentID) }
+    func pushReply(_ taskID: UUID, text: String) { dispatch.pushReply(taskID, text: text) }
 
-    private func sendOrQueueLine(_ key: String, _ line: String) {
-        guard let conn = connections.first(where: { $0.groupKey == key }) else { return }
-        if isConnBusy(conn) { pendingLines.append((key, line)) }
-        else { ensureConnected(conn.id); conn.sendLine(line) }
-    }
-
-    func dispatchTask(_ taskID: UUID, to agentID: String) {
-        guard taskBoard.board.tasks.contains(where: { $0.id == taskID }) else { return }
-        taskBoard.setAssignee(taskID, to: agentID)
-        taskBoard.move(taskID, to: .doing)
-        attemptDispatch(taskID, to: agentID, queueIfBusy: true)
-    }
-
-    /// Send the dispatch line into the agent's terminal — but only when it's IDLE. If it's mid-command,
-    /// queue it (and say so on the board); the poller retries once the terminal is free.
-    private func attemptDispatch(_ taskID: UUID, to agentID: String, queueIfBusy: Bool) {
-        let name = taskBoard.agent(agentID)?.name ?? agentID
-        guard agentID.hasPrefix("tfa:") else { // external agent → it claims the task itself
-            taskBoard.addComment(taskID, by: "TFA", text: "已指派给外部 agent \(name)（由其自行认领）")
-            return
-        }
-        let key = String(agentID.dropFirst("tfa:".count))
-        guard let conn = connections.first(where: { $0.groupKey == key }) else {
-            taskBoard.addComment(taskID, by: "TFA", text: "未找到终端 \(name)，未派发")
-            return
-        }
-        if isConnBusy(conn) {
-            if queueIfBusy, pendingDispatch[taskID] == nil {
-                pendingDispatch[taskID] = agentID
-                taskBoard.addComment(taskID, by: "TFA", text: "终端忙，已排队 — 空闲后自动派发给 \(name)")
-            }
-            return
-        }
-        pendingDispatch[taskID] = nil
-        ensureConnected(conn.id)
-        guard let task = taskBoard.board.tasks.first(where: { $0.id == taskID }) else { return }
-        conn.sendLine(Self.dispatchLine(task))
-        taskBoard.addComment(taskID, by: "TFA", text: "已派发给 \(name)")
-    }
-
-    /// A terminal is "busy" while a program is actively producing output — sending keystrokes then
-    /// would be swallowed. Idle (sitting at a prompt / agent awaiting input) is safe to dispatch into.
-    private func isConnBusy(_ conn: ConnectionSession) -> Bool {
+    /// True while a (local) terminal is actively producing output — sending keystrokes then would be
+    /// swallowed; idle (sitting at a prompt / agent awaiting input) is safe to dispatch into. Single
+    /// source of truth shared by the sidebar effects, the board cards, and dispatch.
+    func isWorking(_ conn: ConnectionSession) -> Bool {
         if conn.host == nil { return activity.isWorking(name: conn.groupKey) || conn.outputPhase == .streaming }
         return conn.outputPhase == .streaming
     }
 
-    /// Poll the queue: as soon as a pending task's terminal goes idle, dispatch it.
-    private func startDispatchQueue() {
+    /// THE app heartbeat (决议 #5): one loop drives all periodic work in a guaranteed order —
+    /// ① sample activity (tmux poll, skipped while occluded) → ② board change-check (fast while the
+    /// board is shown, every 3rd tick otherwise) → ③ dispatch queue + attention reconcile. One timer
+    /// instead of three: fewer wakeups, and "dispatch sees fresh activity" by construction.
+    private func startScheduler() {
+        dispatch.terminals = { [weak self] in
+            guard let self else { return [] }
+            return self.connections.map { TerminalAgentAdapter($0, model: self) }
+        }
         Task { @MainActor in
+            var n = 0
             while !Task.isCancelled {
+                await activity.tick()
+                if taskBoard.watchFast || n % 3 == 0 { taskBoard.tickIfChanged() }
+                dispatch.tick()
+                n &+= 1
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
-                for (taskID, agentID) in Array(pendingDispatch) {
-                    guard taskBoard.board.tasks.contains(where: { $0.id == taskID }) else { pendingDispatch[taskID] = nil; continue }
-                    let key = String(agentID.dropFirst("tfa:".count))
-                    guard let conn = connections.first(where: { $0.groupKey == key }) else { continue }
-                    if !isConnBusy(conn) { attemptDispatch(taskID, to: agentID, queueIfBusy: false) }
-                }
-                // Flush queued reply/补充 lines once their terminal is free.
-                for i in pendingLines.indices.reversed() {
-                    let p = pendingLines[i]
-                    if let conn = connections.first(where: { $0.groupKey == p.key }), !isConnBusy(conn) {
-                        ensureConnected(conn.id); conn.sendLine(p.line); pendingLines.remove(at: i)
-                    }
-                }
             }
         }
-    }
-
-    /// A SINGLE-LINE dispatch instruction (no embedded newlines — a newline would submit early in an
-    /// interactive agent CLI). The body / details are read by the agent via `tfa-task show`.
-    private static func dispatchLine(_ t: BoardTask) -> String {
-        let short = String(t.id.uuidString.lowercased().prefix(8)) // matches the CLI's lowercased ids
-        let b = "~/.tfa/bin/tfa-task"
-        return "请认领并处理 TFA 任务 #\(short)「\(t.title)」。"
-            + "步骤：① `\(b) show \(short)` 看完整需求；② `\(b) claim \(short)` 认领；"
-            + "③ 每完成一步用 `\(b) step \(short) \"做了什么/下一步\"` 实时回报；"
-            + "④ 需要我确认/补信息用 `\(b) ask \(short) \"问题\"`，卡住用 `\(b) block \(short) \"原因\"`；"
-            + "⑤ 全部做完后先 `\(b) step \(short) \"最终结果：…（改了哪些文件/验证情况）\"` 回报结果，再 `\(b) done \(short)`。"
-            + "务必边做边回报，让我在看板上看到完整过程和最终结果。"
     }
 
     /// Switching to a tool pane (Lab / Skills / CLAUDE.md): no terminal is on screen, so stop flagging
@@ -572,12 +460,17 @@ final class AppModel {
         selectedConnectionID = vis[((cur + delta) % n + n) % n].id
     }
 
-    /// Jump to the next visible terminal with unseen background output (⌘]), wrapping around — so you
-    /// can "patrol" busy terminals instead of hunting for lit activity dots. No-op if none have output.
+    /// Jump to the next terminal that needs eyes (⌘]), wrapping around. Priority: a terminal that's
+    /// explicitly WAITING for you (bell / agent ask) beats one that merely has unseen output — one
+    /// key patrols everything, most urgent first. No-op when nothing is pending.
     func selectNextUnseen() {
         let vis = visibleConnections
         guard !vis.isEmpty else { return }
         let start = vis.firstIndex { $0.id == selectedConnectionID } ?? -1
+        for off in 1...vis.count where vis[(start + off) % vis.count].needsAttention {
+            selectedConnectionID = vis[(start + off) % vis.count].id
+            return
+        }
         for off in 1...vis.count where vis[(start + off) % vis.count].hasUnseenOutput {
             selectedConnectionID = vis[(start + off) % vis.count].id
             return
@@ -603,7 +496,7 @@ final class AppModel {
     /// per-session env via `set-environment`, then respawns the primary pane (the new shell inherits
     /// it). DESTRUCTIVE to whatever is running in that pane — invoked only on explicit user request.
     func restartSession(_ conn: ConnectionSession) {
-        let env = sessionEnvironments[conn.groupKey] ?? [:]
+        let env = sessionEnvironments[conn.stableID] ?? [:]
         if !env.isEmpty { conn.controller.applySessionEnvironment(env) }
         conn.restartShell()
     }
@@ -613,22 +506,10 @@ final class AppModel {
         guard !trimmed.isEmpty else { return }
         let oldKey = conn.groupKey
         conn.controller.renameAttachedSession(to: trimmed) // updates connection.sessionName synchronously
-        migrateSessionKey(from: oldKey, to: conn.groupKey)  // so env + groups survive the rename / restart
-    }
-
-    /// Re-key a session's persisted state (per-session env, group membership) when its name changes.
-    /// Without this, renaming a session orphans its env/group under the old name — invisible after the
-    /// next launch, which restores the session under its NEW name.
-    private func migrateSessionKey(from old: String, to new: String) {
-        guard old != new else { return }
-        if let env = sessionEnvironments.removeValue(forKey: old) {
-            sessionEnvironments[new] = env
-            persistEnvironments()
-        }
-        for i in groups.indices where groups[i].memberKeys.contains(old) {
-            groups[i].memberKeys.remove(old)
-            groups[i].memberKeys.insert(new) // groups' didSet persists
-        }
+        // Data is keyed by the permanent @tfa_id, so NOTHING migrates — only the name→UUID
+        // bootstrap entry moves, and the board shows the new title.
+        renameIdentity(from: oldKey, to: conn.groupKey)
+        syncBoardAgents()
     }
 
     /// Non-destructive close: detach from the tmux session (it SURVIVES and resumes on next
@@ -688,16 +569,8 @@ final class AppModel {
     /// removing an already-absent connection is a no-op.
     private func removeConnection(_ conn: ConnectionSession) {
         connections.removeAll { $0.id == conn.id }
-        lastSplitIDs.removeAll { $0 == conn.id } // forget a closed terminal so it can't revive a split
-        let wasFocused = selectedConnectionID == conn.id
-        var survivor: UUID?
-        if splitIDs.contains(conn.id) {
-            splitIDs.removeAll { $0 == conn.id }
-            survivor = splitIDs.first
-            if splitIDs.count < 2 { splitIDs = [] } // dropped below a split → single view of the survivor
-        }
-        if wasFocused {
-            selectedConnectionID = survivor ?? splitIDs.first ?? connections.first?.id
+        if selectedConnectionID == conn.id {
+            selectedConnectionID = connections.first?.id
         }
         if tasksSelected { syncBoardAgents() } // keep the board's agent list current while it's shown
     }
@@ -739,25 +612,23 @@ final class AppModel {
     func loadHosts() {
         guard let data = UserDefaults.standard.data(forKey: Self.knownHostsKey),
               let ssh = try? JSONDecoder().decode([HostTarget].self, from: data) else { return }
-        knownHosts = [.local] + ssh
-        // Load ALL ssh passwords from one Keychain item (A). If the Keychain read FAILS (e.g. the app
-        // was re-signed / reinstalled and the OS prompt was denied) and an encrypted local backup (C)
-        // exists, offer to restore from it instead of silently losing the saved passwords.
-        let kc = SSHPasswordStore.loadKeychain()
-        if let map = kc, !map.isEmpty {
-            hostPasswords = map
-        } else if kc != nil {
-            // Keychain readable but empty → maybe first run after upgrading from the old per-host
-            // layout: pull any legacy entries into the new combined item (+ backup).
-            let hosts = ssh.compactMap { (t: HostTarget) -> String? in
-                if case .ssh(let h, _) = t { return h }; return nil
+        knownHosts = [.local] + ssh // host menu is ready immediately (UserDefaults only)
+        // Keychain read is OFF the main thread: on a re-signed / reinstalled app `SecItemCopyMatching`
+        // can pop a modal ACL prompt that would FREEZE the first frame. Passwords aren't needed until
+        // you actually connect to an ssh host, so load them in the background and assign back on main.
+        let sshHosts = ssh
+        Task { @MainActor in
+            let kc = await Task.detached(priority: .utility) { SSHPasswordStore.loadKeychain() }.value
+            if let map = kc, !map.isEmpty {
+                self.hostPasswords = map
+            } else if kc != nil {
+                let hosts = sshHosts.compactMap { (t: HostTarget) -> String? in if case .ssh(let h, _) = t { return h }; return nil }
+                let legacy = await Task.detached(priority: .utility) { SSHPasswordStore.migrateLegacy(hosts: hosts) }.value
+                if !legacy.isEmpty { self.hostPasswords = legacy; SSHPasswordStore.persist(legacy) }
+            } else {
+                let backup = await Task.detached(priority: .utility) { SSHPasswordStore.loadBackup() }.value
+                if let backup, !backup.isEmpty { self.pendingBackup = backup; self.keychainRecoveryNeeded = true }
             }
-            let legacy = SSHPasswordStore.migrateLegacy(hosts: hosts)
-            if !legacy.isEmpty { hostPasswords = legacy; SSHPasswordStore.persist(legacy) }
-        } else if let backup = SSHPasswordStore.loadBackup(), !backup.isEmpty {
-            // Keychain read FAILED (e.g. re-signed/reinstalled, prompt denied) → offer the backup.
-            pendingBackup = backup
-            keychainRecoveryNeeded = true
         }
     }
 
@@ -889,6 +760,101 @@ final class AppModel {
                             password: hostPasswords[dest]))
     }
 
+    // MARK: - Terminal identity (@tfa_id)
+
+    /// groupKey (name-based, host-scoped) → permanent UUID. The name side exists ONLY to bootstrap:
+    /// at discovery (and after a reboot wiped the tmux env) a session is recognised by name once and
+    /// handed its UUID back. All persisted data is keyed by the UUID, so renames never migrate data.
+    private static let identityStoreKey = "terminalIdentities.v1"
+    @ObservationIgnored private var identityMap: [String: String] = [:]
+
+    private func loadIdentities() {
+        guard let data = UserDefaults.standard.data(forKey: Self.identityStoreKey),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else { return }
+        identityMap = decoded
+    }
+    private func persistIdentities() {
+        if let data = try? JSONEncoder().encode(identityMap) {
+            UserDefaults.standard.set(data, forKey: Self.identityStoreKey)
+        }
+    }
+
+    /// The permanent UUID for a (possibly not-yet-opened) terminal, creating one on first sight.
+    private func identity(for groupKey: String) -> String {
+        if let id = identityMap[groupKey] { return id }
+        let id = UUID().uuidString.lowercased()
+        identityMap[groupKey] = id
+        persistIdentities()
+        return id
+    }
+
+    /// Rename: the UUID (and all data) stays put — only the name→UUID bootstrap entry moves.
+    private func renameIdentity(from old: String, to new: String) {
+        guard old != new, let id = identityMap.removeValue(forKey: old) else { return }
+        identityMap[new] = id // a stale entry under the new name is overwritten — the live session wins
+        persistIdentities()
+    }
+
+    /// Last-known display name for a terminal UUID (reverse bootstrap lookup) — used to label board
+    /// assignees whose terminal is gone.
+    func displayName(forIdentity id: String) -> String? {
+        identityMap.first { $0.value == id }?.key
+    }
+
+    /// A human-readable label for a board agent id ("tfa:<uuid>"), degrading gracefully:
+    /// live terminal title → last-known name (+ 终端已关闭) → legacy ext: → raw id.
+    func assigneeLabel(_ agentID: String) -> String {
+        if agentID.hasPrefix("tfa:") {
+            let key = String(agentID.dropFirst(4))
+            if let conn = connections.first(where: { $0.stableID == key }) { return conn.title }
+            if let name = displayName(forIdentity: key) { return "\(name)（终端已关闭）" }
+            return "\(String(key.prefix(8)))（终端已关闭）"
+        }
+        if agentID.hasPrefix("ext:") { return "\(String(agentID.dropFirst(4)))（外部 agent，已失联）" }
+        return agentID
+    }
+
+    /// ONE-TIME migration of name-keyed data (pre-@tfa_id) to UUID keys: env store, group members,
+    /// and board assignees. Idempotent (guarded by a defaults flag; non-UUID keys simply disappear
+    /// after conversion).
+    private func migrateLegacyKeysIfNeeded() {
+        let flag = "identityMigration.v1.done"
+        guard !UserDefaults.standard.bool(forKey: flag) else { return }
+        func isUUID(_ s: String) -> Bool { UUID(uuidString: s) != nil }
+        for (key, env) in sessionEnvironments where !isUUID(key) {
+            sessionEnvironments[identity(for: key)] = env
+            sessionEnvironments[key] = nil
+        }
+        persistEnvironments()
+        for i in groups.indices {
+            groups[i].memberKeys = Set(groups[i].memberKeys.map { isUUID($0) ? $0 : identity(for: $0) })
+        }
+        for t in taskBoard.board.tasks {
+            if let a = t.assignee, a.hasPrefix("tfa:") {
+                let suffix = String(a.dropFirst(4))
+                if !isUUID(suffix) { taskBoard.migrateAssignee(from: a, to: "tfa:" + identity(for: suffix)) }
+            }
+        }
+        UserDefaults.standard.set(true, forKey: flag)
+    }
+
+    /// After a terminal connects: reconcile its identity with the `@tfa_id` stored in the tmux
+    /// session env. tmux WINS when it has a valid id (it survives TFA reinstalls and out-of-band
+    /// renames); otherwise we stamp ours in. Cheap, runs once per connect.
+    private func reconcileIdentity(_ conn: ConnectionSession) async {
+        guard conn.state.connected else { return }
+        if let tmuxID = await conn.controller.sessionVariable("@tfa_id"),
+           UUID(uuidString: tmuxID) != nil {
+            if tmuxID.lowercased() != conn.stableID {
+                identityMap[conn.groupKey] = tmuxID.lowercased()
+                persistIdentities()
+                conn.stableID = tmuxID.lowercased()
+            }
+        } else {
+            conn.controller.setSessionVariable("@tfa_id", conn.stableID)
+        }
+    }
+
     // MARK: - Session groups (rebuild.md #6)
 
     /// A named folder of terminals. Membership is stored by a launch-stable key (session name, plus
@@ -966,27 +932,28 @@ final class AppModel {
         var next = order.compactMap { byID[$0] }.makeIterator()
         groups = groups.map { $0.hostKey == hostKey ? (next.next() ?? $0) : $0 }
     }
-    /// Move a terminal into a group (a terminal belongs to at most one group).
+    /// Move a terminal into a group (a terminal belongs to at most one group). Membership is keyed
+    /// by the permanent @tfa_id, so renames never strand it.
     func assign(_ conn: ConnectionSession, toGroup id: UUID) {
-        let key = conn.groupKey
+        let key = conn.stableID
         for i in groups.indices { groups[i].memberKeys.remove(key) }
         if let i = groups.firstIndex(where: { $0.id == id }) { groups[i].memberKeys.insert(key) }
     }
     func removeFromGroups(_ conn: ConnectionSession) {
-        let key = conn.groupKey
+        let key = conn.stableID
         for i in groups.indices { groups[i].memberKeys.remove(key) }
     }
     func group(for conn: ConnectionSession) -> TerminalGroup? {
-        groups.first { $0.memberKeys.contains(conn.groupKey) }
+        groups.first { $0.memberKeys.contains(conn.stableID) }
     }
     /// Live terminals in a group, in sidebar order.
     func terminals(in group: TerminalGroup) -> [ConnectionSession] {
-        connections.filter { group.memberKeys.contains($0.groupKey) }
+        connections.filter { group.memberKeys.contains($0.stableID) }
     }
     /// Terminals not in any group.
     var ungroupedTerminals: [ConnectionSession] {
         let grouped = Set(groups.flatMap { $0.memberKeys })
-        return connections.filter { !grouped.contains($0.groupKey) }
+        return connections.filter { !grouped.contains($0.stableID) }
     }
 
     // Host-scoped variants: the sidebar shows only the CURRENT host's terminals.
@@ -1025,14 +992,14 @@ final class AppModel {
 
     /// The saved environment for a terminal (for the editor's initial values).
     func environment(for conn: ConnectionSession) -> [String: String] {
-        sessionEnvironments[conn.groupKey] ?? [:]
+        sessionEnvironments[conn.stableID] ?? [:]
     }
 
     /// Persist a terminal's per-session environment and apply it live to the running session. Note:
     /// already-running shells keep their old environment until a new window opens (or the shell is
     /// respawned); new windows pick it up immediately.
     func setEnvironment(_ env: [String: String], for conn: ConnectionSession) {
-        let key = conn.groupKey
+        let key = conn.stableID
         if env.isEmpty { sessionEnvironments.removeValue(forKey: key) } else { sessionEnvironments[key] = env }
         persistEnvironments()
         conn.controller.applySessionEnvironment(env)
@@ -1041,7 +1008,7 @@ final class AppModel {
     /// Copy a session's saved environment to the system clipboard as `KEY=VALUE` lines (sorted),
     /// so it can be pasted into another session — or anywhere (a `.env` file, the shell, etc.).
     func copyEnvironment(_ conn: ConnectionSession) {
-        let env = sessionEnvironments[conn.groupKey] ?? [:]
+        let env = sessionEnvironments[conn.stableID] ?? [:]
         let text = env.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
         let pb = NSPasteboard.general
         pb.clearContents()
@@ -1056,7 +1023,7 @@ final class AppModel {
         guard let text = NSPasteboard.general.string(forType: .string) else { return 0 }
         let parsed = Self.parseEnvLines(text)
         guard !parsed.isEmpty else { return 0 }
-        var env = sessionEnvironments[conn.groupKey] ?? [:]
+        var env = sessionEnvironments[conn.stableID] ?? [:]
         for (k, v) in parsed { env[k] = v }
         setEnvironment(env, for: conn) // persists + applies
         return parsed.count

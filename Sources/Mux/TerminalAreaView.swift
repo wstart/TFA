@@ -1,15 +1,13 @@
 import SwiftUI
 import TmuxKit
 
-/// Shows the selected terminal's single pane, or — in split mode — a grid of 2–4 terminals at once.
+/// Shows the selected terminal's single pane (or its login / reconnecting / error state).
 struct TerminalAreaView: View {
     @Environment(AppModel.self) private var appModel
 
     var body: some View {
         Group {
-            if appModel.isSplit {
-                SplitGrid(conns: appModel.splitConnections)
-            } else if let conn = appModel.selectedConnection {
+            if let conn = appModel.selectedConnection {
                 TerminalContent(conn: conn)
             } else {
                 EmptyTerminalView { appModel.newTerminal() }
@@ -18,19 +16,17 @@ struct TerminalAreaView: View {
     }
 }
 
-/// The terminal (or its login / reconnecting / error state) for one connection. Reused by the single
-/// view and by each split tile.
+/// The terminal (or its login / reconnecting / error state) for one connection.
 private struct TerminalContent: View {
     @Environment(AppModel.self) private var appModel
     let conn: ConnectionSession
-    var isFocused: Bool = true
 
     var body: some View {
         if conn.isAuthenticating, let login = conn.loginTerminal {
             // ssh login phase — an interactive terminal so you can type the password / answer prompts.
             LoginView(connection: conn, login: login)
         } else if let pane = conn.primaryPane, !conn.isReconnecting {
-            SinglePaneView(connection: conn, pane: pane, combo: appModel.typingCombo, isFocused: isFocused)
+            SinglePaneView(connection: conn, pane: pane, combo: appModel.typingCombo)
                 // Fresh view identity per (terminal, generation, pane) so resize/focus re-runs on
                 // switch AND after a reconnect (generation bumps → re-hydrate); the underlying
                 // SwiftTerm view is still reused from the registry.
@@ -41,67 +37,11 @@ private struct TerminalContent: View {
             ConnectionFailureView(connection: conn, error: error)
         } else {
             ContentUnavailableView(
-                "Starting terminal…",
+                "正在启动终端…",
                 systemImage: "terminal",
-                description: Text("Attaching to the tmux session.")
+                description: Text("正在连接 tmux 会话。")
             )
         }
-    }
-}
-
-/// Split mode: 2–4 terminals tiled (2 → side by side, 3–4 → 2×2). Each tile has a thin header (name +
-/// status + remove) and a brand border when it's the focused tile; clicking the header focuses it.
-private struct SplitGrid: View {
-    @Environment(AppModel.self) private var appModel
-    let conns: [ConnectionSession]
-
-    var body: some View {
-        let rows = stride(from: 0, to: conns.count, by: 2).map { Array(conns[$0..<min($0 + 2, conns.count)]) }
-        VStack(spacing: 2) {
-            ForEach(rows.indices, id: \.self) { r in
-                HStack(spacing: 2) {
-                    ForEach(rows[r], id: \.id) { conn in
-                        SplitTile(conn: conn, focused: appModel.selectedConnectionID == conn.id,
-                                  onFocus: { appModel.selectedConnectionID = conn.id },
-                                  onClose: { appModel.removeFromSplit(conn.id) })
-                    }
-                }
-            }
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-    }
-}
-
-private struct SplitTile: View {
-    let conn: ConnectionSession
-    let focused: Bool
-    let onFocus: () -> Void
-    let onClose: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            TerminalContent(conn: conn, isFocused: focused)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .overlay(RoundedRectangle(cornerRadius: 6)
-            .stroke(focused ? Theme.brand : Color.black.opacity(0.12), lineWidth: focused ? 2 : 1))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-
-    private var header: some View {
-        HStack(spacing: Theme.Space.sm) {
-            StatusIndicator(status: TerminalStatus.of(conn))
-            Text(conn.title).font(Theme.Font.rowSubtitle.weight(.medium)).lineLimit(1)
-            Spacer(minLength: 0)
-            Button { onClose() } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
-                .buttonStyle(.plain).foregroundStyle(.secondary).help("从分屏移除")
-        }
-        .padding(.horizontal, Theme.Space.sm).padding(.vertical, 4)
-        .background(focused ? Theme.brand.opacity(0.10) : Color(nsColor: .windowBackgroundColor))
-        .contentShape(Rectangle())
-        .onTapGesture { onFocus() }
     }
 }
 
@@ -115,19 +55,19 @@ private struct EmptyTerminalView: View {
             Image(systemName: "terminal.fill")
                 .font(.system(size: 46))
                 .foregroundStyle(Theme.brand)
-            Text("No terminal open")
+            Text("还没有打开终端")
                 .font(Theme.Font.emptyTitle)
-            Text("Open a local shell, or connect to a remote host over ssh.\nEverything runs on real tmux, so your sessions survive.")
+            Text("新建本地终端，或通过 ssh 连接远程主机。\n每个终端都是一个真实的 tmux 会话——关掉 App 也不丢；\n在里面跑 AI agent，再用任务看板（⌘⇧T）派活、盯进度。")
                 .font(Theme.Font.emptyBody)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 420)
+                .frame(maxWidth: 460)
             Button(action: onNew) {
-                Label("New Terminal", systemImage: "plus")
+                Label("新建终端", systemImage: "plus")
             }
             .controlSize(.large)
             .keyboardShortcut("t", modifiers: .command)
-            ShortcutHints(pairs: [("⌘T", "New"), ("⌘K", "Switch"), ("⌘F", "Search")])
+            ShortcutHints(pairs: [("⌘T", "新建"), ("⌘K", "切换"), ("⌘⇧T", "任务看板"), ("⌘]", "有动静的终端")])
                 .padding(.top, Theme.Space.xs)
         }
         .padding(Theme.Space.xxxl)
@@ -168,11 +108,11 @@ private struct ReconnectingView: View {
         VStack(spacing: Theme.Space.lg) {
             ProgressView()
                 .controlSize(.large)
-            Text("Reconnecting…")
+            Text("正在重连…")
                 .font(Theme.Font.emptyTitle)
             Text(connection.reconnectAttempt > 0
-                 ? "Attempt \(connection.reconnectAttempt) of \(ConnectionSession.maxReconnectAttempts)"
-                 : "The connection dropped — restoring your session.")
+                 ? "第 \(connection.reconnectAttempt) 次尝试（共 \(ConnectionSession.maxReconnectAttempts) 次）"
+                 : "连接断开了——正在恢复你的会话。")
                 .font(Theme.Font.emptyBody)
                 .foregroundStyle(.secondary)
         }
@@ -277,7 +217,6 @@ private struct SinglePaneView: View {
     let connection: ConnectionSession
     let pane: TmuxPane
     let combo: TypingCombo
-    var isFocused: Bool = true
 
     @State private var refreshTask: Task<Void, Never>?
     @State private var sizeSyncTask: Task<Void, Never>?
@@ -296,8 +235,7 @@ private struct SinglePaneView: View {
             // explicit, geometry-anchored push whenever the on-screen area changes — on first layout
             // and on every window/app resize — debounced and de-duped in PaneTerminal so it's
             // loop-free and preserves THE CURSOR INVARIANT (engine still follows tmux's paneSize).
-            TerminalPaneView(connection: connection, paneID: pane.id, isFocused: isFocused,
-                             onActivate: { appModel.selectedConnectionID = connection.id })
+            TerminalPaneView(connection: connection, paneID: pane.id)
                 .onChange(of: geo.size) { scheduleSizeSync() }
                 // SAME fixed color as the terminal itself, so an uncovered strip during the
                 // first-layout/resize can never show as a mismatched (white/black) band.

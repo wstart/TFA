@@ -30,6 +30,9 @@ struct RootView: View {
             }
 
             VStack(spacing: 0) {
+                if appModel.tmuxMissing {
+                    TmuxMissingBanner()
+                }
                 if let error = model.lastError {
                     ErrorBanner(message: error) { model.lastError = nil }
                 }
@@ -220,6 +223,31 @@ private struct ActiveTerminalHeader: View {
         .padding(.vertical, Theme.Space.xxs)
         .background(.quaternary, in: Capsule())
         .accessibilityLabel("\(text)")
+    }
+}
+
+/// Shown when no `tmux` binary was found — turns a dependency gap from a connection-FAILURE page into
+/// an up-front, fixable hint with a one-click copy of the install command.
+private struct TmuxMissingBanner: View {
+    @State private var copied = false
+    var body: some View {
+        HStack(spacing: Theme.Space.md) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.Status.reconnecting)
+            Text("未检测到 tmux —— TFA 需要它来运行终端。").lineLimit(1)
+            Text("brew install tmux").font(.caption.monospaced())
+                .padding(.horizontal, Theme.Space.sm).padding(.vertical, 2)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+            Button(copied ? "已复制" : "复制") {
+                NSPasteboard.general.clearContents(); NSPasteboard.general.setString("brew install tmux", forType: .string)
+                copied = true
+            }
+            .controlSize(.small)
+            Spacer(minLength: 0)
+        }
+        .font(Theme.Font.headerMeta)
+        .padding(.horizontal, Theme.Space.lg).padding(.vertical, Theme.Space.md)
+        .background(Theme.Status.reconnecting.opacity(0.12))
+        .overlay(alignment: .bottom) { Divider() }
     }
 }
 

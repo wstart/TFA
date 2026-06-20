@@ -65,7 +65,10 @@ struct SidebarView: View {
             FilterField(text: $filter)
 
             List(selection: Binding(
-                get: { model.selectedConnectionID },
+                // While a tool pane (Tasks / Lab / Skills / CLAUDE.md) is showing, no terminal is on
+                // screen — so don't keep a terminal row highlighted (avoids a confusing double-selection).
+                // selectedConnectionID is preserved underneath, so returning to a terminal restores it.
+                get: { (model.tasksSelected || model.labSelected || model.skillsSelected || model.claudeMdSelected) ? nil : model.selectedConnectionID },
                 set: { if let id = $0 { model.selectedConnectionID = id } }
             )) {
                 // Tree: group folders (expandable) with their sessions indented underneath, then
@@ -378,12 +381,6 @@ struct SidebarView: View {
     @ViewBuilder
     private func rowMenu(_ conn: ConnectionSession) -> some View {
         Button("重命名…") { renameTarget = conn; renameText = conn.title }
-        if appModel.isInSplit(conn.id) {
-            Button("从分屏移除") { appModel.removeFromSplit(conn.id) }
-        } else {
-            Button("加入分屏") { appModel.addToSplit(conn) }
-                .disabled(appModel.splitConnections.count >= 4)
-        }
         Divider()
 
         Button("同步当前文件夹") { conn.syncCurrentFolder() }
@@ -409,18 +406,19 @@ struct SidebarView: View {
                 Button("移出分组") { appModel.removeFromGroups(conn) }
             }
         }
-        Menu("环境变量") {
-            Button("设置…") { envTarget = conn }
-            Button("拷贝") { appModel.copyEnvironment(conn) }
-            Button("粘贴") {
-                pasteResultCount = appModel.pasteEnvironment(into: conn)
-                pasteResultConn = conn
-            }
+        Divider()
+
+        // Env + session ops stay TOP-LEVEL: they're daily drivers, a submenu hid them too well.
+        Button("环境变量…") { envTarget = conn }
+        Button("拷贝环境变量") { appModel.copyEnvironment(conn) }
+        Button("粘贴环境变量") {
+            pasteResultCount = appModel.pasteEnvironment(into: conn)
+            pasteResultConn = conn
         }
-        Menu("会话") {
-            Button("克隆 session") { appModel.cloneTerminal(conn) }
-            Button("重启 session（重载环境变量）") { restartTarget = conn }
-        }
+        Divider()
+
+        Button("克隆 session") { appModel.cloneTerminal(conn) }
+        Button("重启 session（重载环境变量）") { restartTarget = conn }
         Divider()
 
         // Non-destructive: detach (session survives, resumes next launch).
@@ -675,13 +673,9 @@ private struct TerminalRow: View {
     let conn: ConnectionSession
     let isSelected: Bool
 
-    /// "Working" = producing output right now. For local sessions this fuses the live tmux poll
-    /// (`window_activity`, which catches activity even on sessions this app hasn't attached) with the
-    /// attached controller's streaming phase. Remote sessions fall back to the streaming phase only.
-    private var working: Bool {
-        if conn.host == nil { return appModel.activity.isWorking(name: conn.groupKey) || conn.outputPhase == .streaming }
-        return conn.outputPhase == .streaming
-    }
+    /// "Working" = producing output right now (shared logic on AppModel — fuses the live tmux
+    /// `window_activity` poll with the attached controller's streaming phase).
+    private var working: Bool { appModel.isWorking(conn) }
     /// The latest output line for a working local session — "what it's doing right now".
     private var liveLine: String? { conn.host == nil ? appModel.activity.line(conn.groupKey) : nil }
 
@@ -706,7 +700,6 @@ private struct TerminalRow: View {
                     .font(Theme.Font.rowTitle)
                     .lineLimit(1)
                 subtitle(status)
-                contextChips
             }
             Spacer(minLength: Theme.Space.xs)
             if attention {
@@ -765,69 +758,42 @@ private struct TerminalRow: View {
                 .font(Theme.Font.rowSubtitle)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
-        } else if !conn.subtitle.isEmpty {
-            Text(conn.subtitle)
+        } else if let folder = folderLabel {
+            // Idle connected: just show WHERE this terminal is — the working directory, home as ~.
+            Text(folder)
                 .font(Theme.Font.rowSubtitle)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .truncationMode(.middle)
         }
     }
 
-    /// Git branch + listening ports of this terminal's working directory (local, connected sessions).
-    /// A quiet metadata line that only appears when there's something to show.
-    @ViewBuilder private var contextChips: some View {
-        if let ctx = appModel.sessionContext.context(conn.id), ctx.branch != nil || !ctx.ports.isEmpty {
-            HStack(spacing: Theme.Space.sm) {
-                if let branch = ctx.branch {
-                    chip("arrow.triangle.branch", branch)
-                }
-                if !ctx.ports.isEmpty {
-                    chip("network", ctx.ports.prefix(3).map { ":\($0)" }.joined(separator: " ")
-                         + (ctx.ports.count > 3 ? " +\(ctx.ports.count - 3)" : ""))
-                }
-            }
-        }
-    }
-
-    private func chip(_ symbol: String, _ text: String) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: symbol).font(.system(size: 8))
-            Text(text).font(.system(size: 10)).lineLimit(1).truncationMode(.middle)
-        }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 5).padding(.vertical, 1)
-        .background(.quaternary, in: Capsule())
+    /// The terminal's current working directory with home abbreviated to `~` (nil until known).
+    private var folderLabel: String? {
+        guard let p = conn.currentPath else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return p == home ? "~" : p.replacingOccurrences(of: home, with: "~")
     }
 
     private func accessibilityText(_ status: TerminalStatus, showDot: Bool) -> String {
         var parts = [conn.title, working ? "活动中" : status.label]
-        if !conn.subtitle.isEmpty { parts.append("running \(conn.subtitle)") }
+        if let folder = folderLabel { parts.append("目录 \(folder)") }
         if showDot { parts.append("new output") }
-        if let ctx = appModel.sessionContext.context(conn.id) {
-            if let b = ctx.branch { parts.append("分支 \(b)") }
-            if !ctx.ports.isEmpty { parts.append("端口 " + ctx.ports.map(String.init).joined(separator: " ")) }
-        }
         return parts.joined(separator: ", ")
     }
 }
 
-/// An amber bell that gently wobbles to draw the eye — a terminal is explicitly waiting for you.
-/// Honors Reduce Motion (static bell).
+/// A static amber bell — a terminal is explicitly waiting for you. The amber tint + bell glyph are
+/// signal enough; an endless wobble loop (one per waiting terminal) was needless continuous motion.
 private struct AttentionBell: View {
-    let animated: Bool
+    let animated: Bool // kept for call-site compatibility; the bell no longer animates
     let tint: Color
-    @State private var ring = false
 
     var body: some View {
         Image(systemName: "bell.fill")
             .font(.system(size: 12))
             .foregroundStyle(tint)
-            .rotationEffect(.degrees(ring ? 12 : -12), anchor: .top)
             .frame(width: 14, height: 14)
-            .onAppear {
-                guard animated else { return }
-                withAnimation(.easeInOut(duration: 0.4).repeatForever(autoreverses: true)) { ring = true }
-            }
             .accessibilityHidden(true)
     }
 }
@@ -866,23 +832,16 @@ private struct EqualizerBars: View {
 private struct OutputActivityIndicator: View {
     let phase: ConnectionSession.OutputPhase
     let showUnseen: Bool
-    @State private var pulse = false
 
     var body: some View {
         Group {
             switch phase {
             case .streaming:
+                // Static brand dot — no perpetual pulse loop. (Working terminals show the equalizer
+                // upstream; this path is the quieter fallback.)
                 Circle()
                     .fill(Theme.brand)
                     .frame(width: 7, height: 7)
-                    .scaleEffect(pulse ? 1.0 : 0.55)
-                    .opacity(pulse ? 1 : 0.4)
-                    .onAppear {
-                        withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) {
-                            pulse = true
-                        }
-                    }
-                    .onDisappear { pulse = false }
             case .justFinished:
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 11))

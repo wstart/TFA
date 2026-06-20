@@ -166,6 +166,11 @@ final class ConnectionSession: Identifiable {
         }
     }
 
+    /// The terminal's PERMANENT identity (a UUID string) — assigned by AppModel's identity store and
+    /// mirrored into the tmux session env as `@tfa_id`. All persisted state (env, groups, board
+    /// assignments) is keyed by THIS, never by the name: renaming a session never moves data again.
+    var stableID: String = ""
+
     /// The pane's current grid size in cells (nil until known) — header context.
     var grid: (cols: Int, rows: Int)? {
         guard let p = controller.primaryPane, p.width > 0, p.height > 0 else { return nil }
@@ -312,6 +317,16 @@ final class ConnectionSession: Identifiable {
 
     /// This terminal is no longer on screen — future output flags activity.
     func resignViewing() { isViewing = false }
+
+    /// Raise the "needs you" signal from OUTSIDE the output scanner (e.g. a board task entering
+    /// ask/blocked), so the sidebar amber + ⌘⇧] + system notification all treat it identically.
+    /// No-op if already raised or currently viewed.
+    func raiseAttention(message: String?) {
+        guard !isViewing, !needsAttention else { return }
+        needsAttention = true
+        attentionMessage = message
+        onNeedsAttention?(message)
+    }
 
     /// Called for every %output batch: enter the streaming phase and (re)arm the idle timer. When the
     /// timer fires (no output for `outputIdleGap`), the burst is finished → effect + notification hook.

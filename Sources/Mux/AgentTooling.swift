@@ -54,8 +54,6 @@ cmd="${1:-help}"; [ $# -gt 0 ] && shift || true
 case "$cmd" in
   list)
     _db -noheader "SELECT substr(id,1,8) || '  [' || status || ']  ' || title || coalesce('  @'||assignee,'') FROM tasks ORDER BY ord;" ;;
-  mine)
-    me="ext:$(_who)"; _db -noheader "SELECT substr(id,1,8) || '  [' || status || ']  ' || title FROM tasks WHERE assignee=$(_q "$me");" ;;
   show)
     id="$(_resolve "$1")"; [ -n "$id" ] || { echo "未找到任务 $1" >&2; exit 1; }
     _db -noheader "SELECT '标题: '||title||char(10)||'状态: '||status||char(10)||'指派: '||coalesce(assignee,'未指派')||char(10)||char(10)||body FROM tasks WHERE id=$(_q "$id");"
@@ -65,16 +63,10 @@ case "$cmd" in
     id="$(_uuid)"; t="$(_now)"
     _db "INSERT INTO tasks (id,title,body,status,assignee,createdAt,updatedAt,ord) VALUES ($(_q "$id"),$(_q "$*"),'','todo',NULL,$t,$t,-$t);"
     printf '已创建 %.8s\n' "$id" ;;
-  register)
-    [ -n "$1" ] || { echo "用法: tfa-task register <名字> [类型]" >&2; exit 1; }
-    name="$1"; kind="${2:-agent}"; id="ext:$name"; t="$(_now)"
-    _db "INSERT OR REPLACE INTO agents (id,name,kind,session,cwd,external,lastSeen) VALUES ($(_q "$id"),$(_q "$name"),$(_q "$kind"),NULL,'',1,$t);"
-    printf '已注册 agent: %s (id %s) — 在看板上即可被指派。\n' "$name" "$id" ;;
   claim)
-    id="$(_resolve "$1")"; [ -n "$id" ] || { echo "未找到任务 $1" >&2; exit 1; }
-    who="ext:$(_who)"; t="$(_now)"
-    _db "UPDATE tasks SET status='doing',assignee=$(_q "$who"),updatedAt=$t WHERE id=$(_q "$id");"
-    echo "已认领 $1" ;;
+    id="$(_resolve "$1")"; [ -n "$id" ] || { echo "未找到任务 $1" >&2; exit 1; }; t="$(_now)"
+    _db "UPDATE tasks SET status='doing',updatedAt=$t WHERE id=$(_q "$id");"
+    echo "已开始 $1（→ 进行中）" ;;
   comment)
     id="$(_resolve "$1")"; [ -n "$id" ] || { echo "未找到任务 $1" >&2; exit 1; }; shift
     t="$(_now)"; cid="$(_uuid)"
@@ -104,11 +96,9 @@ case "$cmd" in
     cat <<'EOF'
 tfa-task — TFA 任务看板命令行（数据存 SQLite：~/.tfa/board.db）
   tfa-task list                 列出所有任务
-  tfa-task mine                 列出指派给我的任务（按 TFA_AGENT）
   tfa-task show <id>            查看任务详情（id 取前 8 位即可）
   tfa-task add <标题>           新建任务
-  tfa-task register <名字> [类型] 把自己注册成可被指派的 agent
-  tfa-task claim <id>          认领任务（→ 进行中，指派给我）
+  tfa-task claim <id>          开始任务（→ 进行中）
   tfa-task step <id> <文字>     记录一步执行过程（推荐：边做边报）
   tfa-task comment <id> <文字>  记录一条普通备注
   tfa-task ask <id> <问题>      需要人回复才能继续
@@ -139,11 +129,9 @@ TFA 把每个任务渲染成看板卡片，可以指派给某个终端 agent 并
 
 ```
 ~/.tfa/bin/tfa-task list                 # 所有任务
-~/.tfa/bin/tfa-task mine                 # 指派给我的任务（按 $TFA_AGENT）
 ~/.tfa/bin/tfa-task show <id>            # 任务详情（id 取前 8 位）
 ~/.tfa/bin/tfa-task add "<标题>"          # 新建任务
-~/.tfa/bin/tfa-task register <名字> [类型] # 注册成可被指派的 agent
-~/.tfa/bin/tfa-task claim <id>           # 认领（→ 进行中、指派给我）
+~/.tfa/bin/tfa-task claim <id>           # 开始（→ 进行中）
 ~/.tfa/bin/tfa-task step <id> "<这一步做了啥>"  # 记录一步执行过程（边做边报）
 ~/.tfa/bin/tfa-task comment <id> "<备注>" # 普通备注
 ~/.tfa/bin/tfa-task ask <id> "<问题>"     # 需要人回复才能继续
@@ -151,7 +139,7 @@ TFA 把每个任务渲染成看板卡片，可以指派给某个终端 agent 并
 ~/.tfa/bin/tfa-task done <id>            # 标记完成
 ```
 
-建议先 `export TFA_AGENT="你的名字"`，回报会带署名；`register` 后别人就能在 TFA 看板上把任务指派给你。
+建议先 `export TFA_AGENT="你的名字"`，回报会带署名。任务由人在 TFA 看板上指派给某个终端；你在被指派的终端里用上面的命令回报即可。
 
 ## 标准工作流（务必边做边回报，TFA 看板会实时显示你的执行记录）
 

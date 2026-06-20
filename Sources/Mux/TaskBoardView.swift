@@ -53,6 +53,9 @@ struct TaskBoardView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        // Only poll the board DB (1.2s) while the board is actually on screen.
+        .onAppear { store.watchFast = true; store.tickIfChanged() } // instant freshness on open
+        .onDisappear { store.watchFast = false } // heartbeat keeps a slow watch (attention relies on it)
         .sheet(item: $editing) { task in
             TaskEditor(taskID: task.id, agents: store.board.agents,
                        onDispatch: { tid, a in editing = nil; dispatchTarget = (tid, a) },
@@ -99,6 +102,15 @@ struct TaskBoardView: View {
                          onDrop: { id in animated { store.setAssignee(id, to: a.id) } },
                          onAdd: { title in store.addTask(title: title); if let id = newestID() { store.setAssignee(id, to: a.id) } })
                 }
+            // Assignees whose agent row is GONE (closed terminal / legacy ext:) still get a lane —
+            // otherwise their tasks fall into no lane at all and silently vanish from this view.
+            let knownIDs = Set(store.board.agents.map(\.id))
+            for id in usedAgentIDs.subtracting(knownIDs).sorted() {
+                lanes.append(Lane(id: "a:\(id)", title: appModel.assigneeLabel(id), accent: .secondary,
+                                  tasks: tasks.filter { $0.assignee == id }.sorted(by: Self.byStatusThenOrder),
+                                  onDrop: { tid in animated { store.setAssignee(tid, to: id) } },
+                                  onAdd: { title in store.addTask(title: title); if let nid = newestID() { store.setAssignee(nid, to: id) } }))
+            }
             lanes.append(Lane(id: "a:none", title: "未指派", accent: .secondary,
                               tasks: tasks.filter { $0.assignee == nil }.sorted(by: Self.byStatusThenOrder),
                               onDrop: { id in animated { store.setAssignee(id, to: nil) } },
@@ -210,13 +222,14 @@ private struct TaskCard: View {
 
     private var blocked: Bool { task.status == .blocked }
     private var assignedConn: ConnectionSession? {
-        guard let s = appModel.taskBoard.agent(task.assignee)?.session else { return nil }
-        return appModel.connections.first { $0.groupKey == s }
+        // Resolve via the agents table, falling back to the id itself ("tfa:<stableID>") — the
+        // table is rebuilt from live terminals, so a stale row must not hide a live terminal.
+        let s = appModel.taskBoard.agent(task.assignee)?.session
+            ?? task.assignee.flatMap { $0.hasPrefix("tfa:") ? String($0.dropFirst(4)) : nil }
+        guard let s else { return nil }
+        return appModel.connections.first { $0.stableID == s }
     }
-    private var working: Bool {
-        guard let c = assignedConn else { return false }
-        return c.host == nil ? (appModel.activity.isWorking(name: c.groupKey) || c.outputPhase == .streaming) : (c.outputPhase == .streaming)
-    }
+    private var working: Bool { assignedConn.map { appModel.isWorking($0) } ?? false }
     /// Needs a human: the agent asked a question, or its terminal pinged for attention (bell / OSC).
     private var needsTakeover: Bool {
         !blocked && (task.comments.last?.kind == "question" || (assignedConn?.needsAttention == true && !working))
@@ -238,6 +251,16 @@ private struct TaskCard: View {
                 HStack(spacing: 4) {
                     Image(systemName: "person.fill").font(.system(size: 8))
                     Text(agent.name).font(.caption2).lineLimit(1)
+                    if working { workingTag }
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.secondary)
+            } else if let a = task.assignee {
+                // The assignee's agent row is gone (terminal closed, or a legacy ext: registration)
+                // — keep showing WHO it was assigned to instead of dropping the line.
+                HStack(spacing: 4) {
+                    Image(systemName: "person.fill.questionmark").font(.system(size: 8))
+                    Text(appModel.assigneeLabel(a)).font(.caption2).lineLimit(1)
                     if working { workingTag }
                     Spacer(minLength: 0)
                 }
@@ -271,17 +294,10 @@ private struct TaskCard: View {
         }
     }
 
+    // Static "运行中" — the brand-colored waveform reads as active without a per-0.6s blink that
+    // forced every working card to re-render its body on a timer.
     private var workingTag: some View {
-        Group {
-            if reduceMotion {
-                Label("运行中", systemImage: "waveform").foregroundStyle(Theme.brand)
-            } else {
-                TimelineView(.periodic(from: .now, by: 0.6)) { ctx in
-                    let on = Int(ctx.date.timeIntervalSinceReferenceDate / 0.6) % 2 == 0
-                    Label("运行中", systemImage: "waveform").foregroundStyle(Theme.brand).opacity(on ? 1 : 0.5)
-                }
-            }
-        }.font(.caption2)
+        Label("运行中", systemImage: "waveform").foregroundStyle(Theme.brand).font(.caption2)
     }
 
     private func latestRecord(_ c: TaskComment) -> some View {
@@ -303,6 +319,7 @@ private struct TaskCard: View {
                 if let next = nextStatus(task.status) { iconButton("arrow.right", "移到\(next.label)") { onMove(next) } }
                 if task.status != .done { iconButton("checkmark", "标记完成") { onMove(.done) } }
                 if let a = task.assignee { iconButton("paperplane.fill", "派发到终端") { onDispatch(a) } }
+                if let conn = assignedConn { iconButton("terminal", "前往终端") { appModel.goToTerminal(conn.id) } }
             }
             .padding(3).background(.ultraThinMaterial, in: Capsule()).padding(4)
             .transition(.opacity)
@@ -390,6 +407,12 @@ private struct TaskEditor: View {
                     }.fixedSize()
                     Picker("指派给", selection: Binding(get: { t.assignee ?? "" }, set: { store.setAssignee(taskID, to: $0.isEmpty ? nil : $0) })) {
                         Text("未指派").tag("")
+                        // A dangling assignee (closed terminal / legacy ext: agent) gets its own
+                        // entry so the picker still SHOWS who the task is assigned to — without
+                        // this the selection silently renders empty.
+                        if let a = t.assignee, !a.isEmpty, !agents.contains(where: { $0.id == a }) {
+                            Text(appModel.assigneeLabel(a)).tag(a)
+                        }
                         ForEach(agents.sorted { agentLabel($0) < agentLabel($1) }) { Text(agentLabel($0)).tag($0.id) }
                     }
                     Spacer()
@@ -441,7 +464,9 @@ private struct TaskEditor: View {
     private func replyBar(_ t: BoardTask) -> some View {
         HStack(spacing: Theme.Space.sm) {
             TextField("回复 / 补充信息（会推送到终端）…", text: $reply).textFieldStyle(.roundedBorder).focused($replyFocused).onSubmit(send)
-            Button("发送", action: send).disabled(reply.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button("发送", action: send)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(reply.trimmingCharacters(in: .whitespaces).isEmpty)
             if t.status == .blocked {
                 Button("解除受阻") { store.move(taskID, to: .doing) }.buttonStyle(.borderedProminent).tint(Theme.brand)
             }
@@ -459,18 +484,29 @@ private struct TaskEditor: View {
         HStack {
             Button("删除", role: .destructive) { store.delete(taskID); onClose() }
             Spacer()
+            if let conn = assignedConn(t) {
+                Button("前往终端") { saveTitleBody(); onClose(); appModel.goToTerminal(conn.id) }
+            }
             if let a = t.assignee {
                 Button("派发到终端") { saveTitleBody(); onDispatch(taskID, a) }.buttonStyle(.borderedProminent)
             }
             Button("完成") { saveTitleBody(); onClose() }.keyboardShortcut(.defaultAction)
         }
     }
+    /// The live connection behind this task's assigned agent, if it's a TFA-managed terminal.
+    /// Falls back to parsing the "tfa:<stableID>" id so a stale agents table can't hide it.
+    private func assignedConn(_ t: BoardTask) -> ConnectionSession? {
+        let s = store.agent(t.assignee)?.session
+            ?? t.assignee.flatMap { $0.hasPrefix("tfa:") ? String($0.dropFirst(4)) : nil }
+        guard let s else { return nil }
+        return appModel.connections.first { $0.stableID == s }
+    }
     private func saveTitleBody() {
         let t0 = store.task(taskID)
         if t0?.title != title || t0?.body != bodyText { store.updateTitleBody(taskID, title: title, body: bodyText) }
     }
     private func agentLabel(_ a: BoardAgent) -> String {
-        guard let s = a.session, let conn = appModel.connections.first(where: { $0.groupKey == s }),
+        guard let s = a.session, let conn = appModel.connections.first(where: { $0.stableID == s }),
               let g = appModel.group(for: conn)?.name else { return a.name }
         return "[\(g)] \(a.name)"
     }

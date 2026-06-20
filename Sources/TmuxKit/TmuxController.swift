@@ -224,9 +224,13 @@ public final class TmuxController {
     /// rename), else the requested name on the very first refresh (before `%session-changed` lands).
     public func refreshAll() async throws {
         let target = Self.quote(attachedSessionID ?? connection.sessionName)
-        let sessionsReply = try await client.send("display-message -p -t \(target) '\(Self.fmtSession)'")
-        let windowsReply = try await client.send("list-windows -t \(target) -F '\(Self.fmtWindow)'")
-        let panesReply = try await client.send("list-panes -s -t \(target) -F '\(Self.fmtPane)'")
+        // Issue all three queries at once: the control client is a FIFO pipe (replies come back in
+        // command order), so pipelining is safe and saves two full round-trips on every refresh —
+        // most noticeably on first attach and over ssh.
+        async let sessionsTask = client.send("display-message -p -t \(target) '\(Self.fmtSession)'")
+        async let windowsTask = client.send("list-windows -t \(target) -F '\(Self.fmtWindow)'")
+        async let panesTask = client.send("list-panes -s -t \(target) -F '\(Self.fmtPane)'")
+        let (sessionsReply, windowsReply, panesReply) = try await (sessionsTask, windowsTask, panesTask)
 
         // Group windows & panes by their parent id.
         var windowsBySession: [TmuxSessionID: [(id: TmuxWindowID, active: Bool, layout: String, name: String)]] = [:]
@@ -406,6 +410,24 @@ public final class TmuxController {
         for (k, v) in env {
             client.sendFireAndForget("set-environment -t \(sid) \(Self.quote(k)) \(Self.quote(v))")
         }
+    }
+
+    /// Read ONE session environment variable (`show-environment -t session NAME`), or nil when unset.
+    /// Used for the `@tfa_id` identity tag: tmux replies `NAME=value` when set, `-NAME` (or an error
+    /// on older tmux) when not.
+    public func sessionVariable(_ name: String) async -> String? {
+        guard let sid = attachedSessionID ?? attachedSession?.id else { return nil }
+        guard let reply = try? await client.send("show-environment -t \(sid) \(Self.quote(name))") else { return nil }
+        for line in reply.lines where line.hasPrefix(name + "=") {
+            return String(line.dropFirst(name.count + 1))
+        }
+        return nil
+    }
+
+    /// Write ONE session environment variable (fire-and-forget `set-environment`).
+    public func setSessionVariable(_ name: String, _ value: String) {
+        guard let sid = attachedSessionID ?? attachedSession?.id else { return }
+        client.sendFireAndForget("set-environment -t \(sid) \(Self.quote(name)) \(Self.quote(value))")
     }
 
     /// Restart the primary pane's command (`respawn-pane -k`) so a freshly-created session's initial

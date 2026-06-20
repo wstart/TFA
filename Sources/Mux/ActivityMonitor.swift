@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 import TmuxKit
@@ -19,40 +20,42 @@ final class TerminalActivityMonitor {
     private(set) var nowEpoch: Int = 0
     static let activeWithin = 5                           // "working" = produced output within this many seconds
 
-    @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var lineCache: [String: (epoch: Int, line: String)] = [:]
+    /// When false (sidebar hidden), skip the per-session `capture-pane` forks — the cheap
+    /// `window_activity` poll still runs so `isWorking` stays correct (dispatch/board need it).
+    @ObservationIgnored var captureEnabled = true
 
-    func start() {
-        guard task == nil else { return }
-        task = Task { @MainActor in
-            while !Task.isCancelled {
-                let within = Self.activeWithin
-                let cache = self.lineCache
-                let snap = await Task.detached(priority: .utility) { () -> (act: [String: Int], lines: [String: String]) in
-                    let act = TmuxServer.localWindowActivity()
-                    let now = Int(Date().timeIntervalSince1970)
-                    var lines: [String: String] = [:]
-                    for (name, t) in act where now - t < within {
-                        if let c = cache[name], c.epoch == t { lines[name] = c.line }            // reuse — no new output
-                        else if let l = TmuxServer.lastOutputLine(session: name) { lines[name] = l }
-                    }
-                    return (act, lines)
-                }.value
-                let now = Int(Date().timeIntervalSince1970)
-                let workingNames = Set(snap.act.filter { now - $0.value < within }.map { $0.key })
-                var since = self.workingSince
-                for n in workingNames where since[n] == nil { since[n] = now }
-                for k in Array(since.keys) where !workingNames.contains(k) { since[k] = nil }
-                var cacheNext: [String: (epoch: Int, line: String)] = [:]
-                for (name, line) in snap.lines { if let t = snap.act[name] { cacheNext[name] = (t, line) } }
-                self.lineCache = cacheNext
-                self.activity = snap.act; self.lastLine = snap.lines; self.workingSince = since; self.nowEpoch = now
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+    /// ONE sampling round, called from the app's single scheduler heartbeat (no loop of its own).
+    func tick() async {
+        // Nobody can see the app (hidden / fully occluded) → skip the tmux forks entirely this
+        // tick. Attached terminals still track `outputPhase` from the live -CC stream, so dispatch
+        // stays safe; the sidebar effects refresh as soon as we're visible again.
+        guard NSApp.occlusionState.contains(.visible) else { return }
+        let within = Self.activeWithin
+        let cache = self.lineCache
+        let capture = self.captureEnabled
+        let snap = await Task.detached(priority: .utility) { () -> (act: [String: Int], lines: [String: String]) in
+            let act = TmuxServer.localWindowActivity()
+            let now = Int(Date().timeIntervalSince1970)
+            var lines: [String: String] = [:]
+            if capture {
+                for (name, t) in act where now - t < within {
+                    if let c = cache[name], c.epoch == t { lines[name] = c.line }          // reuse — no new output
+                    else if let l = TmuxServer.lastOutputLine(session: name) { lines[name] = l }
+                }
             }
-        }
+            return (act, lines)
+        }.value
+        let now = Int(Date().timeIntervalSince1970)
+        let workingNames = Set(snap.act.filter { now - $0.value < within }.map { $0.key })
+        var since = self.workingSince
+        for n in workingNames where since[n] == nil { since[n] = now }
+        for k in Array(since.keys) where !workingNames.contains(k) { since[k] = nil }
+        var cacheNext: [String: (epoch: Int, line: String)] = [:]
+        for (name, line) in snap.lines { if let t = snap.act[name] { cacheNext[name] = (t, line) } }
+        self.lineCache = cacheNext
+        self.activity = snap.act; self.lastLine = snap.lines; self.workingSince = since; self.nowEpoch = now
     }
-
-    func stop() { task?.cancel(); task = nil }
 
     /// True when this (local) session produced output within the last `activeWithin` seconds.
     func isWorking(name: String) -> Bool { activity[name].map { nowEpoch - $0 < Self.activeWithin } ?? false }

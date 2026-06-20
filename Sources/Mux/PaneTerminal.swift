@@ -49,6 +49,10 @@ final class PaneTerminal {
         self.controller = controller
 
         let tv = TerminalView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
+        // Bounded local scrollback (决议 #6): 10k lines instead of SwiftTerm's 500-line default —
+        // deep history for search/scroll, but still a hard cap so a day-long `tail -f` can't grow
+        // memory without bound. tmux keeps its own history regardless.
+        tv.getTerminal().changeScrollback(10_000)
         tv.configureNativeColors()
         // Terminal theme (see Theme.terminalBackgroundNS): pin a FIXED dark fg/bg so the pane never
         // flashes a light/dark-mismatched band (the dynamic textBackgroundColor resolved as white
@@ -161,9 +165,12 @@ final class PaneTerminal {
             // pane size BEFORE capturing, so captureRows == engineRows == the screen cursor_y is
             // measured against, regardless of other attached clients.
             await self.pinEngineToPaneSize()
-            let snapshot = await controller.capturePaneANSI(pane)
-            // capture-pane restores the screen TEXT but not the cursor; query and restore it.
-            let cursor = await controller.cursorPosition(pane)
+            // capture-pane restores the screen TEXT but not the cursor — query both in one
+            // pipelined round-trip (FIFO control client), apply text first then cursor.
+            async let snapshotTask = controller.capturePaneANSI(pane)
+            async let cursorTask = controller.cursorPosition(pane)
+            let snapshot = await snapshotTask
+            let cursor = await cursorTask
             if !snapshot.isEmpty {
                 view.feed(byteArray: ArraySlice(snapshot))
             }

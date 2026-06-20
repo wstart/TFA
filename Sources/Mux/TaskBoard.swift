@@ -66,19 +66,20 @@ struct BoardTask: Identifiable, Hashable {
 
 /// An agent that can be assigned work. TFA auto-registers each of its terminals (id `tfa:<groupKey>`,
 /// `session` ties back to the tmux session so TFA can dispatch into it). External processes self-
-/// register via the CLI (id `ext:<name>`, `external == true`) — display/relay only.
+/// The board's agents ARE TFA's open terminals (one per `tfa:<groupKey>`). `session` ties it back to
+/// the tmux session so TFA can dispatch into it. (There is no separate external-registration concept.)
 struct BoardAgent: Identifiable, Hashable {
     var id: String
     var name: String
     var kind: String = ""
     var session: String? = nil
     var cwd: String = ""
-    var external: Bool = false
     var lastSeen: Double = 0
 }
 
 /// In-memory snapshot of the whole board (rebuilt from SQLite on every change). Observed by the view.
-struct Board {
+/// Equatable so `reload()` can skip publishing when nothing actually changed (no spurious re-render).
+struct Board: Equatable {
     var agents: [BoardAgent] = []
     var tasks: [BoardTask] = []
 }
@@ -95,29 +96,28 @@ final class TaskBoardStore {
     static let dbURL = dir.appendingPathComponent("board.db")
 
     @ObservationIgnored private var db: OpaquePointer?
-    @ObservationIgnored private var watchTask: Task<Void, Never>?
     @ObservationIgnored private var lastDataVersion: Int64 = -1
 
     init() {
-        AgentTooling.install() // drop ~/.tfa/bin/tfa-task + the skill — here because the store's init
-                               // runs deterministically at launch (unlike the SwiftUI onAppear path).
+        // The store is constructed during AppModel() on the MAIN thread before the window appears, so
+        // keep init light: open the (tiny) DB synchronously, but push the agent-tooling file writes
+        // (CLI + skill, ~9KB + chmod) OFF the main thread — they're only needed by agents in terminals.
+        Task.detached(priority: .utility) { AgentTooling.install() }
         openDB(); reload()
     }
     deinit { if let db { sqlite3_close(db) } }
 
-    func start() {
-        guard watchTask == nil else { return }
-        // Poll PRAGMA data_version — it bumps when ANOTHER connection (the CLI / an agent) commits, so
-        // we reload only when something actually changed. Cheap; our own writes don't bump it.
-        watchTask = Task { @MainActor in
-            while !Task.isCancelled {
-                let v = dataVersion()
-                if v != lastDataVersion { lastDataVersion = v; reload() }
-                try? await Task.sleep(nanoseconds: 1_200_000_000)
-            }
-        }
+    /// When true (board on screen) the app heartbeat checks every tick for a live feel; when false
+    /// it checks every few ticks — agent ask/block still surfaces attention while the board is CLOSED.
+    @ObservationIgnored var watchFast = false
+
+    /// ONE change-check, called from the app's single scheduler heartbeat. Polls PRAGMA data_version —
+    /// it bumps when ANOTHER connection (the CLI / an agent) commits, so we reload only when
+    /// something actually changed. Cheap; our own writes don't bump it.
+    func tickIfChanged() {
+        let v = dataVersion()
+        if v != lastDataVersion { lastDataVersion = v; reload() }
     }
-    func stop() { watchTask?.cancel(); watchTask = nil }
 
     // MARK: queries
 
@@ -161,6 +161,13 @@ final class TaskBoardStore {
         run("UPDATE tasks SET assignee=?,updatedAt=? WHERE id=?", [.tOpt(agentID), .d(Self.now()), .t(idStr(id))])
         reloadAndStamp()
     }
+    /// Re-point every task from one agent id to another (terminal rename: "tfa:<old>" → "tfa:<new>"),
+    /// so a rename never strands its tasks under a dead id.
+    func migrateAssignee(from old: String, to new: String) {
+        guard old != new else { return }
+        run("UPDATE tasks SET assignee=? WHERE assignee=?", [.t(new), .t(old)])
+        reloadAndStamp()
+    }
     func addComment(_ id: UUID, by: String, text: String, kind: String = "note") {
         let t = Self.now()
         run("INSERT INTO comments (id,taskId,by,text,at,kind) VALUES (?,?,?,?,?,?)",
@@ -169,13 +176,14 @@ final class TaskBoardStore {
         reloadAndStamp()
     }
 
-    /// Reconcile TFA-managed agents (one per live terminal), preserving externally-registered ones.
+    /// Replace the agent list with TFA's current terminals — the board's agents simply ARE the open
+    /// terminals (no external-registration to preserve).
     func syncManagedAgents(_ managed: [BoardAgent]) {
         let now = Self.now()
         exec("BEGIN")
-        run("DELETE FROM agents WHERE external=0")
+        run("DELETE FROM agents")
         for a in managed {
-            run("INSERT OR REPLACE INTO agents (id,name,kind,session,cwd,external,lastSeen) VALUES (?,?,?,?,?,0,?)",
+            run("INSERT OR REPLACE INTO agents (id,name,kind,session,cwd,lastSeen) VALUES (?,?,?,?,?,?)",
                 [.t(a.id), .t(a.name), .t(a.kind), .tOpt(a.session), .t(a.cwd), .d(now)])
         }
         exec("COMMIT")
@@ -226,12 +234,13 @@ final class TaskBoardStore {
                 comments: commentsByTask[idText] ?? []))
         }
         var agents: [BoardAgent] = []
-        query("SELECT id,name,kind,session,cwd,external,lastSeen FROM agents") { s in
+        query("SELECT id,name,kind,session,cwd,lastSeen FROM agents") { s in
             agents.append(BoardAgent(
                 id: colText(s, 0), name: colText(s, 1), kind: colText(s, 2), session: colTextOpt(s, 3),
-                cwd: colText(s, 4), external: sqlite3_column_int64(s, 5) != 0, lastSeen: colDouble(s, 6)))
+                cwd: colText(s, 4), lastSeen: colDouble(s, 5)))
         }
-        board = Board(agents: agents, tasks: tasks)
+        let next = Board(agents: agents, tasks: tasks)
+        if next != board { board = next } // only invalidate observers on a real change
     }
     private func reloadAndStamp() { reload(); lastDataVersion = dataVersion() } // ignore our own write on next poll
 
