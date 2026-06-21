@@ -117,6 +117,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainWindow = window
         window.delegate = self
         if statusItem == nil { installStatusItem() }
+        // Open in native macOS full screen (its own Space, menu bar hidden) on every launch.
+        window.collectionBehavior.insert(.fullScreenPrimary)
+        if !window.styleMask.contains(.fullScreen) {
+            window.toggleFullScreen(nil)
+        }
     }
 
     private func installStatusItem() {

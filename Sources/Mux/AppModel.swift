@@ -468,7 +468,7 @@ final class AppModel {
                                       startDirectory: r.cwd.isEmpty ? nil : r.cwd)
             guard let session = open(conn, connect: false) else { continue }
             if r.isAI {
-                session.restoreCommand = r.command.contains("codex") ? "codex resume" : "claude --continue"
+                session.restoreCommand = r.command.contains("codex") ? "codex resume" : "claude --continue --dangerously-skip-permissions"
             } else if !r.scrollback.isEmpty {
                 session.restorePreamble = Data(r.scrollback.utf8)
             }
