@@ -43,10 +43,14 @@ final class PaneTerminal {
     private var hydrating = true
     private var hasHydrated = false
     private var pending = Data()
+    /// Saved scrollback (a RESTORED session's pre-reboot history) to paint once at hydrate, above
+    /// the fresh shell, as a dimmed read-only preamble. nil for normal terminals.
+    private let historyPreamble: Data?
 
-    init(paneID: TmuxPaneID, controller: TmuxController) {
+    init(paneID: TmuxPaneID, controller: TmuxController, historyPreamble: Data? = nil) {
         self.paneID = paneID
         self.controller = controller
+        self.historyPreamble = historyPreamble
 
         let tv = TerminalView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
         // Bounded local scrollback (决议 #6): 10k lines instead of SwiftTerm's 500-line default —
@@ -160,6 +164,13 @@ final class PaneTerminal {
         hasHydrated = true
         guard let controller else { hydrating = false; return }
         let pane = paneID
+        // A RESTORED session: paint the saved pre-reboot history first (dimmed), then a separator,
+        // so the fresh shell's prompt appears below readable history. Plain text, fed before the
+        // live (empty) capture of the new shell.
+        if let preamble = historyPreamble, !preamble.isEmpty {
+            view.feed(byteArray: ArraySlice(Self.dim(preamble)))
+            view.feed(byteArray: ArraySlice(Array("\u{1B}[0m\r\n\u{1B}[2m—— 以上为重启前的历史 ——\u{1B}[0m\r\n".utf8)))
+        }
         Task { @MainActor in
             // THE CURSOR INVARIANT (see pinEngineToPaneSize): pin the engine to tmux's reconciled
             // pane size BEFORE capturing, so captureRows == engineRows == the screen cursor_y is
@@ -231,6 +242,12 @@ final class PaneTerminal {
     /// reports `cursor_x`/`cursor_y` 0-based, hence the `+ 1`.
     static func cup(x: Int, y: Int) -> [UInt8] {
         Array("\u{1B}[\(y + 1);\(x + 1)H".utf8)
+    }
+
+    /// Wrap saved scrollback in a dim SGR so restored history reads as muted, past context. The
+    /// saved text is PLAIN (captured without `-e`), so a single leading `\u{1B}[2m` dims all of it.
+    static func dim(_ text: Data) -> [UInt8] {
+        Array("\u{1B}[2m".utf8) + Array(text) + Array("\u{1B}[0m".utf8)
     }
 
     // MARK: - Sizing

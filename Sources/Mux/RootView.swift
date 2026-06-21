@@ -77,6 +77,9 @@ struct RootView: View {
         .animation(.easeInOut(duration: 0.22), value: appModel.sidebarCollapsed)
         .tint(Theme.brand) // app accent → brand green; buttons/controls adopt the brand tint
         .navigationTitle("TFA")
+        // Host the per-session menu's sheets/alerts ONCE here, so right-clicking the sidebar row OR
+        // the terminal area both work — even when the sidebar is collapsed.
+        .sessionMenuHost(appModel.sessionMenu, appModel)
         // Primary actions live in the left panel now (SidebarHeader) — title stays on the right.
         .sheet(isPresented: $model.isShowingSearch) {
             SearchView()

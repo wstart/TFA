@@ -49,6 +49,14 @@ final class AppModel {
     /// The shared task board (~/.tfa/board.db) — Kanban of tasks dispatched to terminal "agents".
     let taskBoard = TaskBoardStore()
 
+    /// Session persistence (~/.tfa/sessions.db) — a disk snapshot of each local terminal so sessions
+    /// (and AI conversations) survive a reboot / `tmux kill-server`, which wipe the in-memory server.
+    let sessionStore = SessionStore()
+
+    /// Per-session right-click menu state — shared by the sidebar row and the terminal area so both
+    /// surfaces offer the same actions; its sheets/alerts are hosted once at the root.
+    let sessionMenu = SessionMenu()
+
     /// True when no `tmux` binary was found — drives a friendly "install tmux" banner instead of
     /// letting the user hit a connection-failure page on their first New Terminal. Checked async.
     var tmuxMissing = false
@@ -128,14 +136,15 @@ final class AppModel {
         Task { @MainActor in
             let existing = await Task.detached(priority: .userInitiated) { TmuxServer.listLocalSessions() }.value
             guard self.connections.isEmpty else { return } // user may have created one while we waited
-            if existing.isEmpty {
-                self.openLocal(sessionName: "main")         // create-or-attach a fresh default (connects)
-            } else {
-                for name in existing {
-                    self.openLocal(sessionName: name, attachOnly: true, connect: false)
-                }
-                self.selectedConnectionID = self.connections.first?.id // selecting triggers its attach
+            for name in existing {
+                self.openLocal(sessionName: name, attachOnly: true, connect: false)
             }
+            // Recreate sessions the live server lost to a reboot / kill-server (dormant placeholders).
+            self.restoreMissingSessions(liveLocalNames: Set(existing))
+            if self.connections.isEmpty {
+                self.openLocal(sessionName: "main")          // nothing live, nothing to restore → fresh default
+            }
+            self.selectedConnectionID = self.connections.first?.id // selecting triggers its attach
             // Register the discovered terminals as assignable agents only NOW — syncing before
             // discovery would wipe the agents table with an empty list, leaving every task's
             // assignee dangling (the board showed cards with no 指派 until it was reopened).
@@ -389,10 +398,97 @@ final class AppModel {
                 await activity.tick()
                 if taskBoard.watchFast || n % 3 == 0 { taskBoard.tickIfChanged() }
                 dispatch.tick()
+                if n == 40 || (n > 0 && n % 2400 == 0) { await snapshotSessions() } // baseline ~1 min, then hourly
                 n &+= 1
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
             }
         }
+    }
+
+    // MARK: - Session persistence (恢复对话 across reboot)
+
+    /// Full snapshot of every CONNECTED local terminal — metadata + scrollback — to `sessions.db`.
+    /// Async (it runs `capture-pane` per terminal); driven by the heartbeat every ~10 min. Upsert-only,
+    /// so dormant/restored rows we haven't reconnected to are preserved.
+    private func snapshotSessions() async {
+        for conn in connections where conn.host == nil && conn.state.connected {
+            guard let pane = conn.primaryPane?.id else { continue }
+            let name = conn.controller.connection.sessionName
+            let cwd = conn.currentPath ?? ""
+            let ai = isAITerminal(command: conn.subtitle, cwd: conn.currentPath)
+            let text = await conn.controller.capturePaneText(pane, historyLines: 3000)
+            if text.isEmpty {
+                // Transient capture failure → keep the previously saved scrollback, refresh metadata.
+                sessionStore.upsertMeta(tfaID: conn.stableID, name: name, cwd: cwd, command: conn.subtitle, isAI: ai)
+            } else {
+                sessionStore.upsert(SessionRecord(
+                    tfaID: conn.stableID, name: name, cwd: cwd, command: conn.subtitle,
+                    isAI: ai, scrollback: text, updatedAt: 0))
+            }
+        }
+    }
+
+    /// Full snapshot on graceful quit (scrollback included), bounded by a ~2.5s deadline so quitting
+    /// never hangs on a stuck `capture-pane`. Falls back to synchronous metadata if it times out.
+    func snapshotSessionsOnQuit() async {
+        let full = Task { @MainActor in await self.snapshotSessions() }
+        let timeout = Task { try? await Task.sleep(nanoseconds: 2_500_000_000) }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await full.value }
+            group.addTask { await timeout.value }
+            await group.next()       // whichever finishes first
+            group.cancelAll()
+        }
+        snapshotMetadataNow()        // guarantee at least fresh metadata even if capture was slow
+    }
+
+    /// Best-effort SYNCHRONOUS metadata snapshot for clean quit (⌘Q / SIGTERM) — no async capture
+    /// (the exit path can't await), but it freshens cwd/command and keeps the last scrollback row.
+    private func snapshotMetadataNow() {
+        for conn in connections where conn.host == nil && conn.state.connected {
+            sessionStore.upsertMeta(
+                tfaID: conn.stableID, name: conn.controller.connection.sessionName,
+                cwd: conn.currentPath ?? "", command: conn.subtitle,
+                isAI: isAITerminal(command: conn.subtitle, cwd: conn.currentPath))
+        }
+    }
+
+    /// On launch, recreate local sessions the live tmux server no longer has (lost to a reboot /
+    /// `tmux kill-server`). Each is recreated as a DORMANT placeholder under its saved name → same
+    /// `@tfa_id` → its env / group / board assignments reconnect automatically. Opening it connects
+    /// a fresh session in the saved cwd, then replays history (or resumes the AI conversation).
+    private func restoreMissingSessions(liveLocalNames: Set<String>) {
+        let existing = Set(connections.compactMap { $0.host == nil ? $0.controller.connection.sessionName : nil })
+        let cutoff = Date().timeIntervalSince1970 - 14 * 86_400 // don't resurrect sessions idle > 14 days
+        for r in sessionStore.roster()
+        where !liveLocalNames.contains(r.name) && !existing.contains(r.name) && r.updatedAt >= cutoff {
+            seedIdentity(name: r.name, id: r.tfaID) // ensure the restored placeholder keeps its UUID
+            let conn = TmuxConnection(endpoint: .local, sessionName: r.name,
+                                      attachOnly: false,            // create-or-attach on first open
+                                      startDirectory: r.cwd.isEmpty ? nil : r.cwd)
+            guard let session = open(conn, connect: false) else { continue }
+            if r.isAI {
+                session.restoreCommand = r.command.contains("codex") ? "codex resume" : "claude --continue"
+            } else if !r.scrollback.isEmpty {
+                session.restorePreamble = Data(r.scrollback.utf8)
+            }
+        }
+    }
+
+    /// A terminal is an AI agent session if it's (was) running claude/codex, or its directory has a
+    /// Claude Code transcript — meaning `claude --continue` there would actually resume a conversation.
+    private func isAITerminal(command: String, cwd: String?) -> Bool {
+        let c = command.lowercased()
+        if c.contains("claude") || c.contains("codex") { return true }
+        guard let cwd, !cwd.isEmpty else { return false }
+        return claudeProjectExists(cwd: cwd)
+    }
+    /// Claude Code encodes a project's cwd by replacing `/` and `.` with `-` under ~/.claude/projects.
+    private func claudeProjectExists(cwd: String) -> Bool {
+        let encoded = cwd.map { ($0 == "/" || $0 == ".") ? "-" : $0 }.reduce("") { $0 + String($1) }
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects/\(encoded)", isDirectory: true)
+        return FileManager.default.fileExists(atPath: dir.path)
     }
 
     /// Switching to a tool pane (Lab / Skills / CLAUDE.md): no terminal is on screen, so stop flagging
@@ -544,6 +640,7 @@ final class AppModel {
 
     /// Destructive: kill the terminal's tmux session and remove it from the app.
     func closeTerminal(_ conn: ConnectionSession) {
+        sessionStore.remove(tfaID: conn.stableID) // user explicitly destroyed it → don't ever restore it
         if conn.isDormant {
             // A never-connected placeholder has no live -CC client to send `kill-session` on, so
             // briefly connect, then kill. The sidebar row is removed immediately regardless.
@@ -786,6 +883,14 @@ final class AppModel {
         identityMap[groupKey] = id
         persistIdentities()
         return id
+    }
+
+    /// Force a name→UUID mapping (session restore: the roster row carries the permanent id, so the
+    /// recreated placeholder must adopt it rather than mint a new one).
+    private func seedIdentity(name: String, id: String) {
+        guard identityMap[name] != id else { return }
+        identityMap[name] = id
+        persistIdentities()
     }
 
     /// Rename: the UUID (and all data) stays put — only the name→UUID bootstrap entry moves.
@@ -1075,6 +1180,7 @@ final class AppModel {
     /// Cleanly tear down every live connection on app quit.
     /// Detach only — never kill sessions here, so they can be resumed on next launch.
     func shutdown() {
+        snapshotMetadataNow() // freshen the roster (cwd/command) so a clean quit restores accurately
         for conn in connections { conn.disconnect() }
         connections.removeAll()
     }

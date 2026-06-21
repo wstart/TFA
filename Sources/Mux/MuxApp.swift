@@ -174,6 +174,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// Graceful quit (⌘Q / menu): take a FULL session snapshot (scrollback included) before exiting,
+    /// so "save on quit" really saves the conversation, not just metadata. Bounded so quit never hangs;
+    /// SIGTERM/`pkill` skip this (they exit immediately, relying on the hourly/baseline snapshot).
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let appModel else { return .terminateNow }
+        Task { @MainActor in
+            await appModel.snapshotSessionsOnQuit()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated { appModel?.shutdown() }
     }

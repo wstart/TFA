@@ -31,6 +31,8 @@ private struct TerminalContent: View {
                 // switch AND after a reconnect (generation bumps → re-hydrate); the underlying
                 // SwiftTerm view is still reused from the registry.
                 .id("\(conn.id)-\(conn.generation)-\(pane.id)")
+                // Right-clicking the terminal offers the SAME session actions as the sidebar row.
+                .contextMenu { SessionMenuItems(conn: conn) }
         } else if conn.isReconnecting {
             ReconnectingView(connection: conn)
         } else if let error = conn.connectError {

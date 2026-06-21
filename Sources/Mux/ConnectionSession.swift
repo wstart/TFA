@@ -171,6 +171,15 @@ final class ConnectionSession: Identifiable {
     /// assignments) is keyed by THIS, never by the name: renaming a session never moves data again.
     var stableID: String = ""
 
+    // MARK: - Restore (session persistence across reboot / tmux restart)
+    /// Saved scrollback to paint as a dimmed "history before the restart" preamble the first time a
+    /// RESTORED terminal's pane hydrates. Consumed once (set to nil after the first pane is built).
+    var restorePreamble: Data?
+    /// A command to run once after a RESTORED terminal first connects — e.g. `claude --continue` to
+    /// resume an AI agent's actual conversation (not just replay text). Sent once.
+    var restoreCommand: String?
+    @ObservationIgnored private var restoreCommandSent = false
+
     /// The pane's current grid size in cells (nil until known) — header context.
     var grid: (cols: Int, rows: Int)? {
         guard let p = controller.primaryPane, p.width > 0, p.height > 0 else { return nil }
@@ -365,6 +374,14 @@ final class ConnectionSession: Identifiable {
             isClosed = false
             applyEnvironment(freshCreate: freshCreate)
             hasEverConnected = true
+            // Restored AI session: resume the real conversation once the fresh shell is up.
+            if freshCreate, let cmd = restoreCommand, !restoreCommandSent {
+                restoreCommandSent = true
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 600_000_000) // let the new shell reach its prompt
+                    self.sendLine(cmd)
+                }
+            }
         } catch {
             connectError = Self.describe(error)
         }
@@ -556,7 +573,11 @@ final class ConnectionSession: Identifiable {
         if let existing = terminals[paneID] {
             return existing
         }
-        let term = PaneTerminal(paneID: paneID, controller: controller)
+        // A restored terminal paints its saved scrollback as a one-shot history preamble on the
+        // first pane it builds (single-pane model), then clears it so reconnects don't re-show it.
+        let preamble = restorePreamble
+        restorePreamble = nil
+        let term = PaneTerminal(paneID: paneID, controller: controller, historyPreamble: preamble)
         terminals[paneID] = term
         return term
     }

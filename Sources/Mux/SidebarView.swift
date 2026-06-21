@@ -22,13 +22,6 @@ struct SidebarView: View {
     @Environment(\.openWindow) private var openWindow
 
     @State private var filter: String = ""
-    @State private var renameTarget: ConnectionSession?
-    @State private var renameText: String = ""
-    @State private var killTarget: ConnectionSession?
-    @State private var restartTarget: ConnectionSession?
-    @State private var envTarget: ConnectionSession?
-    @State private var pasteResultConn: ConnectionSession?
-    @State private var pasteResultCount = 0
 
     @State private var showHostSheet = false
     @State private var showServerSheet = false
@@ -126,61 +119,6 @@ struct SidebarView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
-        .alert("Rename Terminal", isPresented: Binding(
-            get: { renameTarget != nil },
-            set: { if !$0 { renameTarget = nil } })
-        ) {
-            TextField("Name", text: $renameText)
-            Button("Rename") {
-                if let conn = renameTarget { appModel.renameTerminal(conn, to: renameText) }
-                renameTarget = nil
-            }
-            Button("Cancel", role: .cancel) { renameTarget = nil }
-        }
-        .alert("Kill Session?", isPresented: Binding(
-            get: { killTarget != nil },
-            set: { if !$0 { killTarget = nil } })
-        ) {
-            Button("Kill Session", role: .destructive) {
-                if let conn = killTarget { appModel.closeTerminal(conn) }
-                killTarget = nil
-            }
-            Button("Cancel", role: .cancel) { killTarget = nil }
-        } message: {
-            Text("This permanently ends the tmux session and it will not resume on next launch.")
-        }
-        .alert("重启 session?", isPresented: Binding(
-            get: { restartTarget != nil },
-            set: { if !$0 { restartTarget = nil } })
-        ) {
-            Button("重启", role: .destructive) {
-                if let conn = restartTarget { appModel.restartSession(conn) }
-                restartTarget = nil
-            }
-            Button("取消", role: .cancel) { restartTarget = nil }
-        } message: {
-            Text("重启该会话的 shell 以重新加载环境变量。会话本身保留，但当前窗格里正在运行的程序会被中断。")
-        }
-        .alert(pasteResultCount > 0 ? "已粘贴环境变量" : "没有可粘贴的内容", isPresented: Binding(
-            get: { pasteResultConn != nil },
-            set: { if !$0 { pasteResultConn = nil } })
-        ) {
-            if pasteResultCount > 0 {
-                Button("重启 session 生效") {
-                    if let conn = pasteResultConn { appModel.restartSession(conn) }
-                    pasteResultConn = nil
-                }
-                Button("稍后", role: .cancel) { pasteResultConn = nil }
-            } else {
-                Button("好", role: .cancel) { pasteResultConn = nil }
-            }
-        } message: {
-            if pasteResultCount > 0 {
-                Text("已合并 \(pasteResultCount) 个环境变量到「\(pasteResultConn?.title ?? "")」。新窗口或重启 session 后生效。")
-            } else {
-                Text("剪贴板里没有可识别的 KEY=VALUE 环境变量。先在另一个会话「拷贝环境变量」，或复制 .env 格式的文本。")
-            }
-        }
         .alert(groupRenameID == nil ? "New Group" : "Rename Group", isPresented: $groupAlertShown) {
             TextField("Group name", text: $groupAlertName)
             Button(groupRenameID == nil ? "Create" : "Rename") { confirmGroupAlert() }
@@ -196,16 +134,6 @@ struct SidebarView: View {
             }
         }
         .sheet(isPresented: $showServerSheet) { ServerListView() }
-        .sheet(item: $envTarget) { conn in
-            EnvironmentSheet(initial: appModel.environment(for: conn), sessionName: conn.title) { env in
-                appModel.setEnvironment(env, for: conn)
-                envTarget = nil
-            } onSaveAndRestart: { env in
-                appModel.setEnvironment(env, for: conn)
-                conn.restartShell()   // respawn the shell so the current pane gets the new env now
-                envTarget = nil
-            } onCancel: { envTarget = nil }
-        }
     }
 
     // MARK: - Sections
@@ -276,7 +204,7 @@ struct SidebarView: View {
             // Drag a row onto a group folder to file it there (#8). We carry the stable String
             // groupKey (Transferable) rather than the id so the drop side can re-resolve the session.
             .draggable(conn.groupKey)
-            .contextMenu { rowMenu(conn) }
+            .contextMenu { SessionMenuItems(conn: conn) }
     }
 
     /// A tappable folder header with a self-drawn chevron (rotates 90° on expand). Tapping anywhere on
@@ -376,55 +304,6 @@ struct SidebarView: View {
             }
         }
         .padding(.vertical, Theme.Space.xxs)
-    }
-
-    @ViewBuilder
-    private func rowMenu(_ conn: ConnectionSession) -> some View {
-        Button("重命名…") { renameTarget = conn; renameText = conn.title }
-        Divider()
-
-        Button("同步当前文件夹") { conn.syncCurrentFolder() }
-            .help("重新读取该终端真实的工作目录（cd 后刷新路径 / 分支 / 端口）")
-        Button("文件管理器…") {
-            if let p = conn.currentPath { openWindow(value: URL(fileURLWithPath: p)) }
-        }
-        .disabled(conn.host != nil || conn.currentPath == nil)
-        .help(conn.host != nil ? "暂不支持远程会话" : "")
-
-        // Less-frequent actions collapsed into submenus to keep the top level scannable.
-        Menu("分组") {
-            ForEach(appModel.currentGroups) { g in
-                Button {
-                    appModel.assign(conn, toGroup: g.id)
-                } label: {
-                    appModel.group(for: conn)?.id == g.id ? Label(g.name, systemImage: "checkmark") : Label(g.name, systemImage: "")
-                }
-            }
-            if !appModel.currentGroups.isEmpty { Divider() }
-            Button("新建分组…") { startNewGroup(assigning: conn) }
-            if appModel.group(for: conn) != nil {
-                Button("移出分组") { appModel.removeFromGroups(conn) }
-            }
-        }
-        Divider()
-
-        // Env + session ops stay TOP-LEVEL: they're daily drivers, a submenu hid them too well.
-        Button("环境变量…") { envTarget = conn }
-        Button("拷贝环境变量") { appModel.copyEnvironment(conn) }
-        Button("粘贴环境变量") {
-            pasteResultCount = appModel.pasteEnvironment(into: conn)
-            pasteResultConn = conn
-        }
-        Divider()
-
-        Button("克隆 session") { appModel.cloneTerminal(conn) }
-        Button("重启 session（重载环境变量）") { restartTarget = conn }
-        Divider()
-
-        // Non-destructive: detach (session survives, resumes next launch).
-        Button("关闭") { appModel.detachTerminal(conn) }
-        // Destructive: confirm, then kill-session.
-        Button("结束 session…", role: .destructive) { killTarget = conn }
     }
 
     // MARK: - Helpers
