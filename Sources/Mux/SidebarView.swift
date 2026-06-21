@@ -62,7 +62,7 @@ struct SidebarView: View {
                 // screen — so don't keep a terminal row highlighted (avoids a confusing double-selection).
                 // selectedConnectionID is preserved underneath, so returning to a terminal restores it.
                 get: { (model.tasksSelected || model.labSelected || model.skillsSelected || model.claudeMdSelected || model.tunnelsSelected) ? nil : model.selectedConnectionID },
-                set: { if let id = $0 { model.selectedConnectionID = id } }
+                set: { if let id = $0 { model.activateTerminal(id) } } // robust to re-selecting the same row while a tool pane is open
             )) {
                 // Tree: group folders (expandable) with their sessions indented underneath, then
                 // loose (ungrouped) sessions at the top level. Scoped to the current host.

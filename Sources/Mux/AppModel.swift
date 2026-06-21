@@ -303,7 +303,23 @@ final class AppModel {
     // MARK: - Selecting / renaming / closing
 
     func select(_ conn: ConnectionSession) {
-        selectedConnectionID = conn.id
+        activateTerminal(conn.id)
+    }
+
+    /// Show a terminal in the detail area (sidebar click / ⌘K / ⌘1–9). Robust to the "same id" case:
+    /// while a tool pane (任务/隧道/Lab/…) is open, `selectedConnectionID` is preserved underneath, so
+    /// re-selecting the SAME terminal wouldn't trip `selectedConnectionID.didSet` (its `guard oldValue
+    /// != …` short-circuits) — and we'd stay stuck on the tool pane. Detect that and leave the tool
+    /// pane + re-show the terminal explicitly.
+    func activateTerminal(_ id: UUID) {
+        if selectedConnectionID == id {
+            let onTool = tasksSelected || labSelected || skillsSelected || claudeMdSelected || tunnelsSelected
+            tasksSelected = false; labSelected = false; skillsSelected = false; claudeMdSelected = false; tunnelsSelected = false
+            if onTool, let c = connection(id) { c.markViewed() } // returning to it counts as viewed again
+            ensureConnected(id)
+        } else {
+            selectedConnectionID = id // didSet clears tool flags + markViewed/resign + ensureConnected
+        }
     }
 
     /// Show the Lab (experiments) pane in the detail area. Keeps `selectedConnectionID` so returning
@@ -544,7 +560,7 @@ final class AppModel {
         guard let conn = connection(id) else { return }
         let target = hostTarget(of: conn)
         if currentHost != target { currentHost = target }
-        selectedConnectionID = id
+        activateTerminal(id)
     }
 
     /// Select the Nth terminal (1-based, for ⌘1…⌘9) among the CURRENTLY VISIBLE ones.
@@ -552,7 +568,7 @@ final class AppModel {
         let i = i1 - 1
         let vis = visibleConnections
         guard vis.indices.contains(i) else { return }
-        selectedConnectionID = vis[i].id
+        activateTerminal(vis[i].id)
     }
 
     /// Select the next visible terminal, wrapping around (⌘⌥→).
@@ -565,11 +581,11 @@ final class AppModel {
         guard !vis.isEmpty else { return }
         guard let id = selectedConnectionID,
               let cur = vis.firstIndex(where: { $0.id == id }) else {
-            selectedConnectionID = (delta > 0 ? vis.first : vis.last)?.id
+            if let to = (delta > 0 ? vis.first : vis.last)?.id { activateTerminal(to) }
             return
         }
         let n = vis.count
-        selectedConnectionID = vis[((cur + delta) % n + n) % n].id
+        activateTerminal(vis[((cur + delta) % n + n) % n].id)
     }
 
     /// Jump to the next terminal that needs eyes (⌘]), wrapping around. Priority: a terminal that's
@@ -580,11 +596,11 @@ final class AppModel {
         guard !vis.isEmpty else { return }
         let start = vis.firstIndex { $0.id == selectedConnectionID } ?? -1
         for off in 1...vis.count where vis[(start + off) % vis.count].needsAttention {
-            selectedConnectionID = vis[(start + off) % vis.count].id
+            activateTerminal(vis[(start + off) % vis.count].id)
             return
         }
         for off in 1...vis.count where vis[(start + off) % vis.count].hasUnseenOutput {
-            selectedConnectionID = vis[(start + off) % vis.count].id
+            activateTerminal(vis[(start + off) % vis.count].id)
             return
         }
     }
@@ -599,7 +615,7 @@ final class AppModel {
         guard !vis.isEmpty else { return }
         let start = vis.firstIndex { $0.id == selectedConnectionID } ?? -1
         for off in 1...vis.count where vis[(start + off) % vis.count].needsAttention {
-            selectedConnectionID = vis[(start + off) % vis.count].id
+            activateTerminal(vis[(start + off) % vis.count].id)
             return
         }
     }

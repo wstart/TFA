@@ -3,6 +3,11 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
+## [0.15.1] — 2026-06-21
+
+### 修复
+- **在工具面板(任务 / 隧道 / CLAUDE.md / Skills / 实验室)上点回**当前 session 无法切回终端界面。根因:打开工具面板时 `selectedConnectionID` 故意保留在原终端,再点同一个时其 `didSet` 因"同值"短路、清除工具面板标志的逻辑没执行。改为所有"激活终端"入口(侧栏点选、⌘1–9、⌘⌥←→、⌘] / ⌘⇧]、⌘K / 搜索跳转)统一走 `activateTerminal`,同值时也强制退出工具面板并重新显示终端。
+
 ## [0.15.0] — 2026-06-21
 
 ### 新增
