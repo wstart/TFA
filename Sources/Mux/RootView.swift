@@ -61,6 +61,11 @@ struct RootView: View {
                     Divider()
                     LabView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if appModel.tunnelsSelected {
+                    TunnelsHeaderBar()
+                    Divider()
+                    TunnelsView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ActiveTerminalHeader(connection: appModel.selectedConnection)
                     Divider()
@@ -385,6 +390,30 @@ private struct LabHeaderBar: View {
 
             Image(systemName: "flask").foregroundStyle(Theme.brand)
             Text("实验室 · 系统监控").font(Theme.Font.headerTitle).lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, Theme.Space.lg)
+        .padding(.vertical, Theme.Space.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+/// Slim header for the SSH reverse-tunnel manager pane.
+private struct TunnelsHeaderBar: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        HStack(spacing: Theme.Space.md) {
+            Button { appModel.toggleSidebar() } label: {
+                Image(systemName: "sidebar.left")
+            }
+            .buttonStyle(.borderless)
+            .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
+            .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
+
+            Image(systemName: "network.badge.shield.half.filled").foregroundStyle(Theme.brand)
+            Text("SSH 反向转发 · 隧道管理").font(Theme.Font.headerTitle).lineLimit(1)
             Spacer()
         }
         .padding(.horizontal, Theme.Space.lg)

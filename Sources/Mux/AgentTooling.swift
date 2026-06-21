@@ -10,14 +10,26 @@ enum AgentTooling {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let binDir = home.appendingPathComponent(".tfa/bin", isDirectory: true)
         let skillDir = home.appendingPathComponent(".claude/skills/tfa-task", isDirectory: true)
-        try? FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: skillDir, withIntermediateDirectories: true)
 
+        // The CLI lives under ~/.tfa (our own dir). Write only when changed.
         let cli = binDir.appendingPathComponent("tfa-task")
-        if (try? cliScript.write(to: cli, atomically: true, encoding: .utf8)) != nil {
+        if writeIfChanged(cliScript, to: cli, createDir: binDir) {
             try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
         }
-        try? skillDoc.write(to: skillDir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+        // The skill lives under ~/.claude (Claude Code's data) — on macOS Sequoia, WRITING there
+        // triggers the "access other apps' data" privacy prompt. Only touch it when the content
+        // actually differs, so an unchanged launch never writes (no needless prompt).
+        writeIfChanged(skillDoc, to: skillDir.appendingPathComponent("SKILL.md"), createDir: skillDir)
+    }
+
+    /// Write `content` to `url` only if the file is missing or differs — avoids needless writes (and,
+    /// for ~/.claude, the macOS privacy prompt that every write would otherwise raise). Returns whether
+    /// a write happened. Creating the parent dir + reading to compare don't trip the WRITE prompt.
+    @discardableResult
+    private static func writeIfChanged(_ content: String, to url: URL, createDir: URL) -> Bool {
+        if let existing = try? String(contentsOf: url, encoding: .utf8), existing == content { return false }
+        try? FileManager.default.createDirectory(at: createDir, withIntermediateDirectories: true)
+        return (try? content.write(to: url, atomically: true, encoding: .utf8)) != nil
     }
 
     // MARK: - the CLI (SQLite-backed)

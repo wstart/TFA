@@ -61,7 +61,7 @@ struct SidebarView: View {
                 // While a tool pane (Tasks / Lab / Skills / CLAUDE.md) is showing, no terminal is on
                 // screen — so don't keep a terminal row highlighted (avoids a confusing double-selection).
                 // selectedConnectionID is preserved underneath, so returning to a terminal restores it.
-                get: { (model.tasksSelected || model.labSelected || model.skillsSelected || model.claudeMdSelected) ? nil : model.selectedConnectionID },
+                get: { (model.tasksSelected || model.labSelected || model.skillsSelected || model.claudeMdSelected || model.tunnelsSelected) ? nil : model.selectedConnectionID },
                 set: { if let id = $0 { model.selectedConnectionID = id } }
             )) {
                 // Tree: group folders (expandable) with their sessions indented underneath, then
@@ -111,8 +111,9 @@ struct SidebarView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
 
-            // Bottom-left entries: Tasks + CLAUDE.md rules + Skills + Lab.
+            // Bottom-left entries: Tasks + Tunnels + CLAUDE.md rules + Skills + Lab.
             ToolEntry(title: "任务", icon: "checklist", selected: appModel.tasksSelected) { appModel.openTasks() }
+            ToolEntry(title: "隧道", icon: "network.badge.shield.half.filled", selected: appModel.tunnelsSelected) { appModel.openTunnels() }
             ClaudeMdEntry(selected: appModel.claudeMdSelected) { appModel.openClaudeMd() }
             SkillsEntry(selected: appModel.skillsSelected) { appModel.openSkills() }
             LabEntry(selected: appModel.labSelected) { appModel.openLab() }

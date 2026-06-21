@@ -25,11 +25,13 @@ final class AppModel {
     var claudeMdSelected = false
     /// True when the task board (Kanban) is shown in the detail area instead of a terminal.
     var tasksSelected = false
+    /// True when the SSH reverse-tunnel manager is shown in the detail area instead of a terminal.
+    var tunnelsSelected = false
 
     var selectedConnectionID: UUID? {
         didSet {
             guard oldValue != selectedConnectionID else { return }
-            labSelected = false; skillsSelected = false; claudeMdSelected = false; tasksSelected = false // a terminal leaves the tool panes
+            labSelected = false; skillsSelected = false; claudeMdSelected = false; tasksSelected = false; tunnelsSelected = false // a terminal leaves the tool panes
             // Single-terminal view: the selected one is "viewed" (its output is seen); everything else
             // resigns viewing so the sidebar can keep flagging its activity.
             for c in connections {
@@ -122,6 +124,8 @@ final class AppModel {
     func start() {
         loadIdentities()
         loadGroups()
+        loadTunnels()
+        tunnelRunner.passwordFor = { [weak self] (id: UUID) in self?.hostPasswords["tunnel:\(id.uuidString)"] }
         loadHosts()
         loadEnvironments()
         migrateLegacyKeysIfNeeded() // one-time: name-keyed env/groups/assignees → UUID keys
@@ -305,26 +309,32 @@ final class AppModel {
     /// Show the Lab (experiments) pane in the detail area. Keeps `selectedConnectionID` so returning
     /// to a terminal restores the last one — this just flips the detail area over to the Lab.
     func openLab() {
-        labSelected = true; skillsSelected = false; claudeMdSelected = false; tasksSelected = false
+        labSelected = true; skillsSelected = false; claudeMdSelected = false; tasksSelected = false; tunnelsSelected = false
         leaveTerminals() // no terminal is on screen while the Lab shows
     }
 
     /// Show the Skills manager in the detail area. Mutually exclusive with the other tool panes / a terminal.
     func openSkills() {
-        skillsSelected = true; labSelected = false; claudeMdSelected = false; tasksSelected = false
+        skillsSelected = true; labSelected = false; claudeMdSelected = false; tasksSelected = false; tunnelsSelected = false
         leaveTerminals()
     }
 
     /// Show the global CLAUDE.md rules editor. Mutually exclusive with the other tool panes / a terminal.
     func openClaudeMd() {
-        claudeMdSelected = true; labSelected = false; skillsSelected = false; tasksSelected = false
+        claudeMdSelected = true; labSelected = false; skillsSelected = false; tasksSelected = false; tunnelsSelected = false
         leaveTerminals()
     }
 
     /// Show the task board (Kanban). Mutually exclusive with the other tool panes / a terminal.
     func openTasks() {
-        tasksSelected = true; labSelected = false; skillsSelected = false; claudeMdSelected = false
+        tasksSelected = true; labSelected = false; skillsSelected = false; claudeMdSelected = false; tunnelsSelected = false
         syncBoardAgents()
+        leaveTerminals()
+    }
+
+    /// Show the SSH reverse-tunnel manager. Mutually exclusive with the other tool panes / a terminal.
+    func openTunnels() {
+        tunnelsSelected = true; tasksSelected = false; labSelected = false; skillsSelected = false; claudeMdSelected = false
         leaveTerminals()
     }
 
@@ -338,7 +348,7 @@ final class AppModel {
     /// Selection may be UNCHANGED, so the didSet that normally clears the tool flags won't fire —
     /// clear them explicitly and re-mark the terminal as viewed.
     private func backToTerminal() {
-        tasksSelected = false; labSelected = false; skillsSelected = false; claudeMdSelected = false
+        tasksSelected = false; labSelected = false; skillsSelected = false; claudeMdSelected = false; tunnelsSelected = false
         if selectedConnectionID == nil { selectedConnectionID = connections.first?.id }
         if let id = selectedConnectionID, let c = connection(id) {
             c.markViewed()
@@ -349,7 +359,7 @@ final class AppModel {
     /// Jump from a board card straight into its agent's terminal (the other half of the dispatch
     /// loop: dispatch on the board, watch in the terminal).
     func goToTerminal(_ id: UUID) {
-        tasksSelected = false; labSelected = false; skillsSelected = false; claudeMdSelected = false
+        tasksSelected = false; labSelected = false; skillsSelected = false; claudeMdSelected = false; tunnelsSelected = false
         reveal(id) // switches host if needed; the didSet marks viewed when the id changes
         if let c = connection(id) { c.markViewed() } // and when it doesn't, mark it here
         ensureConnected(id)
@@ -483,12 +493,18 @@ final class AppModel {
         guard let cwd, !cwd.isEmpty else { return false }
         return claudeProjectExists(cwd: cwd)
     }
+    /// Cache of cwd → "has a Claude project dir", so the hourly snapshot doesn't re-stat ~/.claude
+    /// every time (reads there also raise the macOS "access other apps' data" prompt).
+    @ObservationIgnored private var claudeProjectCache: [String: Bool] = [:]
     /// Claude Code encodes a project's cwd by replacing `/` and `.` with `-` under ~/.claude/projects.
     private func claudeProjectExists(cwd: String) -> Bool {
+        if let cached = claudeProjectCache[cwd] { return cached }
         let encoded = cwd.map { ($0 == "/" || $0 == ".") ? "-" : $0 }.reduce("") { $0 + String($1) }
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/projects/\(encoded)", isDirectory: true)
-        return FileManager.default.fileExists(atPath: dir.path)
+        let exists = FileManager.default.fileExists(atPath: dir.path)
+        claudeProjectCache[cwd] = exists
+        return exists
     }
 
     /// Switching to a tool pane (Lab / Skills / CLAUDE.md): no terminal is on screen, so stop flagging
@@ -726,7 +742,78 @@ final class AppModel {
                 let backup = await Task.detached(priority: .utility) { SSHPasswordStore.loadBackup() }.value
                 if let backup, !backup.isEmpty { self.pendingBackup = backup; self.keychainRecoveryNeeded = true }
             }
+            self.autoStartTunnels() // passwords are loaded now → bring up enabled tunnels
         }
+    }
+
+    // MARK: - SSH reverse tunnels (ssh -R)
+
+    /// Reverse tunnels (`ssh -N -R`). Config persisted in UserDefaults; passwords in the Keychain
+    /// (same aggregated item as host passwords, under a `tunnel:<id>` key). The runner owns the
+    /// processes + auto-reconnect; the UI observes `sshTunnels` + `tunnelRunner.states`.
+    let tunnelRunner = TunnelRunner()
+    private static let tunnelsKey = "sshTunnels.v1"
+    private(set) var sshTunnels: [SSHTunnel] = [] {
+        didSet { persistTunnels() }
+    }
+
+    private func loadTunnels() {
+        guard let data = UserDefaults.standard.data(forKey: Self.tunnelsKey),
+              let decoded = try? JSONDecoder().decode([SSHTunnel].self, from: data) else { return }
+        sshTunnels = decoded
+    }
+    private func persistTunnels() {
+        if let data = try? JSONEncoder().encode(sshTunnels) {
+            UserDefaults.standard.set(data, forKey: Self.tunnelsKey)
+        }
+    }
+
+    private func tunnelPasswordKey(_ id: UUID) -> String { "tunnel:\(id.uuidString)" }
+    /// The saved password for a tunnel (for the editor's initial value).
+    func tunnelPassword(_ t: SSHTunnel) -> String { hostPasswords[tunnelPasswordKey(t.id)] ?? "" }
+
+    private func setTunnelPassword(_ id: UUID, _ password: String) {
+        if password.isEmpty { hostPasswords[tunnelPasswordKey(id)] = nil }
+        else { hostPasswords[tunnelPasswordKey(id)] = password }
+        SSHPasswordStore.persist(hostPasswords) // whole aggregated map (hosts + tunnels)
+    }
+
+    /// Create + (since new tunnels default enabled) immediately start a tunnel.
+    func addTunnel(name: String, serverIP: String, account: String, password: String,
+                   loginPort: Int, remotePort: Int, localPort: Int, gatewayPorts: Bool) {
+        let t = SSHTunnel(name: name, serverIP: serverIP, account: account,
+                          loginPort: loginPort, remotePort: remotePort, localPort: localPort,
+                          enabled: true, gatewayPorts: gatewayPorts)
+        setTunnelPassword(t.id, password)
+        sshTunnels.append(t)
+        if t.enabled { tunnelRunner.start(t) }
+    }
+
+    /// Apply edits to an existing tunnel; `password == nil` keeps the saved one. Restarts if enabled.
+    func updateTunnel(_ t: SSHTunnel, password: String?) {
+        guard let i = sshTunnels.firstIndex(where: { $0.id == t.id }) else { return }
+        sshTunnels[i] = t
+        if let pw = password { setTunnelPassword(t.id, pw) }
+        if t.enabled { tunnelRunner.restart(t) } else { tunnelRunner.stop(t.id) }
+    }
+
+    func removeTunnel(_ t: SSHTunnel) {
+        tunnelRunner.stop(t.id)
+        sshTunnels.removeAll { $0.id == t.id }
+        setTunnelPassword(t.id, "") // clears the key + persists
+    }
+
+    /// Flip a tunnel's remembered on/off switch and start/stop it accordingly.
+    func setTunnelEnabled(_ t: SSHTunnel, _ on: Bool) {
+        guard let i = sshTunnels.firstIndex(where: { $0.id == t.id }) else { return }
+        sshTunnels[i].enabled = on
+        if on { tunnelRunner.start(sshTunnels[i]) } else { tunnelRunner.stop(t.id) }
+    }
+
+    /// Launch-time: bring up every tunnel whose switch was left on. Called after Keychain passwords
+    /// have loaded (askpass needs them).
+    private func autoStartTunnels() {
+        for t in sshTunnels where t.enabled { tunnelRunner.start(t) }
     }
 
     /// Set when the Keychain read failed but an encrypted local backup is available — drives a
@@ -743,6 +830,7 @@ final class AppModel {
         if let b = pendingBackup { hostPasswords = b; SSHPasswordStore.persist(hostPasswords) }
         pendingBackup = nil
         keychainRecoveryNeeded = false
+        autoStartTunnels() // passwords just recovered → enabled tunnels can connect now
     }
 
     func dismissKeychainRecovery() {
@@ -1181,6 +1269,7 @@ final class AppModel {
     /// Detach only — never kill sessions here, so they can be resumed on next launch.
     func shutdown() {
         snapshotMetadataNow() // freshen the roster (cwd/command) so a clean quit restores accurately
+        tunnelRunner.stopAll() // terminate ssh -R children so they don't orphan
         for conn in connections { conn.disconnect() }
         connections.removeAll()
     }
