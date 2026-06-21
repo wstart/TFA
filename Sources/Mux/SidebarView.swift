@@ -119,7 +119,7 @@ struct SidebarView: View {
             LabEntry(selected: appModel.labSelected) { appModel.openLab() }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.canvas)
         .alert(groupRenameID == nil ? "New Group" : "Rename Group", isPresented: $groupAlertShown) {
             TextField("Group name", text: $groupAlertName)
             Button(groupRenameID == nil ? "Create" : "Rename") { confirmGroupAlert() }
@@ -301,7 +301,7 @@ struct SidebarView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, Theme.Space.sm)
                     .padding(.vertical, 1)
-                    .background(.quaternary, in: Capsule())
+                    .background(Theme.surface2, in: Capsule())
             }
         }
         .padding(.vertical, Theme.Space.xxs)
@@ -540,7 +540,7 @@ private struct FilterField: View {
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
         .padding(.horizontal, Theme.Space.md)
         .padding(.bottom, Theme.Space.sm)
         .accessibilityLabel("Filter terminals")
@@ -561,7 +561,7 @@ private struct TerminalRow: View {
 
     /// An agent in the background is waiting for you (bell / OSC notification). Top-priority cue.
     private var attention: Bool { conn.needsAttention && !isSelected }
-    private static let amber = Color(red: 0.95, green: 0.62, blue: 0.16)
+    private static let amber = Theme.Status.attention
 
     var body: some View {
         let status = TerminalStatus.of(conn)
@@ -725,7 +725,7 @@ private struct OutputActivityIndicator: View {
             case .justFinished:
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(Theme.Status.connected)
+                    .foregroundStyle(Theme.Status.positive)
                     .transition(.scale.combined(with: .opacity))
             case .idle:
                 if showUnseen {
@@ -753,7 +753,7 @@ struct ServerListView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
-            Text("Servers").font(.headline)
+            Text("Servers").font(Theme.Font.headerTitle)
             if servers.isEmpty {
                 Text("No saved servers. Use “Add Host…” to add one.")
                     .font(Theme.Font.emptyBody)
@@ -806,7 +806,7 @@ struct EnvironmentSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
-            Text("环境变量 · \(sessionName)").font(.headline)
+            Text("环境变量 · \(sessionName)").font(Theme.Font.headerTitle)
             Text("保存后对该会话**新开的窗口 / 重启的 shell**生效；已经在跑的 shell 不变。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -885,7 +885,7 @@ struct SSHSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
-            Text("Add SSH Host").font(.headline)
+            Text("Add SSH Host").font(Theme.Font.headerTitle)
             VStack(alignment: .leading, spacing: Theme.Space.md) {
                 TextField("Host (host or ssh alias)", text: $host)
                     .textFieldStyle(.roundedBorder)

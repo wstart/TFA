@@ -211,7 +211,7 @@ struct SkillsView: View {
                             Text(Syntax.from(url).label).font(.caption2)
                                 .foregroundStyle(.tertiary).monospaced()
                             if savedFlash {
-                                Text("已保存 ✓").font(.caption).foregroundStyle(Theme.Status.connected)
+                                Text("已保存 ✓").font(.caption).foregroundStyle(Theme.Status.positive)
                             }
                             Button("保存") { saveCurrent() }
                                 .disabled(!dirty).keyboardShortcut("s", modifiers: .command)
@@ -228,7 +228,7 @@ struct SkillsView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Theme.canvas)
         .onAppear { store.reload() }
         .onChange(of: selectedID) { loadSelected() }
         .alert("新建 Skill", isPresented: $showNew) {

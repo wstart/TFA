@@ -32,7 +32,7 @@ struct TunnelsView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Theme.canvas)
         .sheet(isPresented: $showAdd) {
             TunnelSheet(existing: nil)
         }
@@ -93,8 +93,8 @@ private struct TunnelRow: View {
                 .buttonStyle(.borderless).foregroundStyle(.secondary).help("删除")
         }
         .padding(Theme.Space.md)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.black.opacity(0.08), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
         .alert("删除隧道?", isPresented: $confirmDelete) {
             Button("删除", role: .destructive) { appModel.removeTunnel(tunnel) }
             Button("取消", role: .cancel) {}
@@ -108,9 +108,9 @@ private struct TunnelRow: View {
 
     private var statusColor: Color {
         switch state {
-        case .running: return Theme.Status.connected
+        case .running: return Theme.Status.positive
         case .connecting: return Theme.brand
-        case .retrying: return .orange
+        case .retrying: return Theme.Status.attention
         case .stopped: return .secondary
         }
     }
@@ -141,7 +141,7 @@ private struct TunnelSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
-            Text(existing == nil ? "新建反向隧道" : "编辑隧道").font(.headline)
+            Text(existing == nil ? "新建反向隧道" : "编辑隧道").font(Theme.Font.headerTitle)
 
             VStack(alignment: .leading, spacing: Theme.Space.md) {
                 field("名称(可选)", "给这条隧道起个名", text: $name)
@@ -233,7 +233,7 @@ private struct TunnelLogView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.md) {
             HStack {
-                Text("连接日志 · \(tunnel.name.isEmpty ? tunnel.endpointLabel : tunnel.name)").font(.headline)
+                Text("连接日志 · \(tunnel.name.isEmpty ? tunnel.endpointLabel : tunnel.name)").font(Theme.Font.headerTitle)
                 Spacer()
                 Button("清空") { appModel.tunnelRunner.clearLog(tunnel.id) }
                     .buttonStyle(.borderless).disabled(lines.isEmpty)
@@ -255,8 +255,8 @@ private struct TunnelLogView: View {
                     }
                     .padding(Theme.Space.sm)
                 }
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.black.opacity(0.1)))
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.canvas))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border))
                 .onChange(of: lines.count) { proxy.scrollTo("bottom", anchor: .bottom) }
                 .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
             }

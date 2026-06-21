@@ -1,6 +1,6 @@
 import SwiftUI
 
-private let amber = Color(red: 0.95, green: 0.62, blue: 0.16)
+private let amber = Theme.Status.attention
 
 /// Kanban task board. Group by STATUS (todo/doing/done/blocked) or by the assigned terminal AGENT.
 /// Cards drag between lanes (status mode → change status; agent mode → reassign), have hover quick-
@@ -52,7 +52,7 @@ struct TaskBoardView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.canvas)
         // Only poll the board DB (1.2s) while the board is actually on screen.
         .onAppear { store.watchFast = true; store.tickIfChanged() } // instant freshness on open
         .onDisappear { store.watchFast = false } // heartbeat keeps a slow watch (attention relies on it)
@@ -137,7 +137,7 @@ struct TaskBoardView: View {
                 Circle().fill(lane.accent).frame(width: 8, height: 8)
                 Text(lane.title).font(Theme.Font.headerTitle).lineLimit(1)
                 Text("\(lane.tasks.count)").font(.caption).foregroundStyle(.secondary)
-                    .padding(.horizontal, 6).padding(.vertical, 1).background(.quaternary, in: Capsule())
+                    .padding(.horizontal, 6).padding(.vertical, 1).background(Theme.surface2, in: Capsule())
                 Spacer()
             }
             ScrollView {
@@ -161,7 +161,7 @@ struct TaskBoardView: View {
         .frame(maxHeight: .infinity, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(targeted ? lane.accent.opacity(0.07) : Color.black.opacity(0.03))
+                .fill(targeted ? lane.accent.opacity(0.07) : Theme.surface2)
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(targeted ? lane.accent : .clear, lineWidth: 1.5))
         )
         .scaleEffect(targeted ? 1.012 : 1)
@@ -193,16 +193,16 @@ struct TaskBoardView: View {
             }
             .buttonStyle(.plain).foregroundStyle(.secondary)
             .overlay(RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4])).foregroundStyle(.quaternary))
+                .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4])).foregroundStyle(Theme.surface2))
         }
     }
 
     private func accent(_ s: TaskStatus) -> Color {
         switch s {
-        case .todo: return .secondary
-        case .doing: return Theme.brand
-        case .done: return Theme.Status.connected
-        case .blocked: return Theme.Status.failed
+        case .todo: return Theme.Status.neutral
+        case .doing: return Theme.Status.active
+        case .done: return Theme.Status.positive
+        case .blocked: return Theme.Status.error
         }
     }
 }
@@ -240,7 +240,7 @@ private struct TaskCard: View {
             HStack(alignment: .top, spacing: 4) {
                 Text(task.title).font(Theme.Font.rowTitle).foregroundStyle(.primary).lineLimit(2)
                 Spacer(minLength: 0)
-                if blocked { badge("受阻", "exclamationmark.octagon.fill", Theme.Status.failed) }
+                if blocked { badge("受阻", "exclamationmark.octagon.fill", Theme.Status.error) }
                 else if needsTakeover { badge("待接管", "hand.raised.fill", amber) }
             }
             if showStatus { statusChip }
@@ -287,10 +287,10 @@ private struct TaskCard: View {
     }
     private var statusTint: Color {
         switch task.status {
-        case .todo: return .secondary
-        case .doing: return Theme.brand
-        case .done: return Theme.Status.connected
-        case .blocked: return Theme.Status.failed
+        case .todo: return Theme.Status.neutral
+        case .doing: return Theme.Status.active
+        case .done: return Theme.Status.positive
+        case .blocked: return Theme.Status.error
         }
     }
 
@@ -309,7 +309,7 @@ private struct TaskCard: View {
             if steps > 0 { Text("\(steps)步").font(.caption2).foregroundStyle(.tertiary) }
         }
         .padding(.horizontal, 6).padding(.vertical, 3)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.sm).fill(.quaternary.opacity(0.4)))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.sm).fill(Theme.surface2.opacity(0.4)))
     }
 
     @ViewBuilder private var quickActions: some View {
@@ -335,23 +335,23 @@ private struct TaskCard: View {
     }
 
     private var cardFill: Color {
-        if blocked { return Theme.Status.failed.opacity(0.06) }
+        if blocked { return Theme.Status.error.opacity(0.06) }
         if needsTakeover { return amber.opacity(0.10) }
-        return Color(nsColor: .controlBackgroundColor)
+        return Theme.surface
     }
     private var borderColor: Color {
-        if blocked { return Theme.Status.failed.opacity(0.35) }
+        if blocked { return Theme.Status.error.opacity(0.35) }
         if needsTakeover { return amber.opacity(0.4) }
-        return Color.black.opacity(0.08)
+        return Theme.border
     }
     @ViewBuilder private var accentBar: some View {
-        let c: Color? = blocked ? Theme.Status.failed : (needsTakeover ? amber : (working ? Theme.brand : nil))
+        let c: Color? = blocked ? Theme.Status.error : (needsTakeover ? amber : (working ? Theme.brand : nil))
         if let c { RoundedRectangle(cornerRadius: 1).fill(c).frame(width: 3).padding(.vertical, 4) }
     }
     private func recordTint(_ kind: String) -> Color {
         switch kind {
         case "step": return Theme.brand
-        case "blocked": return Theme.Status.failed
+        case "blocked": return Theme.Status.error
         case "question": return amber
         default: return .secondary
         }
@@ -368,9 +368,8 @@ private struct TaskCard: View {
     static func preview(_ task: BoardTask) -> some View {
         Text(task.title).font(Theme.Font.rowTitle).lineLimit(1)
             .padding(Theme.Space.sm).frame(width: 220, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.brand, lineWidth: 1.5))
-            .shadow(color: .black.opacity(0.22), radius: 8, y: 4)
     }
 }
 
@@ -400,7 +399,7 @@ private struct TaskEditor: View {
                 TextField("标题", text: $title).textFieldStyle(.roundedBorder).font(.title3.weight(.semibold))
                 TextEditor(text: $bodyText)
                     .font(.body).frame(minHeight: 80)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.surface2))
                 HStack {
                     Picker("状态", selection: Binding(get: { t.status }, set: { store.move(taskID, to: $0) })) {
                         ForEach(TaskStatus.allCases) { Text($0.label).tag($0) }
@@ -453,7 +452,7 @@ private struct TaskEditor: View {
                             Spacer(minLength: 0)
                         }
                         .padding(.vertical, 6).padding(.horizontal, Theme.Space.sm)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.25)))
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.surface2.opacity(0.25)))
                     }
                 }.padding(.vertical, 2)
             }
@@ -513,7 +512,7 @@ private struct TaskEditor: View {
     private func tint(_ kind: String) -> Color {
         switch kind {
         case "step": return Theme.brand
-        case "blocked": return Theme.Status.failed
+        case "blocked": return Theme.Status.error
         case "question": return amber
         default: return .secondary
         }

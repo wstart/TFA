@@ -74,7 +74,7 @@ private struct EmptyTerminalView: View {
         }
         .padding(Theme.Space.xxxl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Theme.canvas)
     }
 }
 
@@ -90,7 +90,7 @@ private struct ShortcutHints: View {
                         .font(.caption.monospaced())
                         .padding(.horizontal, Theme.Space.sm)
                         .padding(.vertical, Theme.Space.xxs)
-                        .background(.quaternary, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
                     Text(pair.label)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -119,7 +119,7 @@ private struct ReconnectingView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Theme.canvas)
     }
 }
 
@@ -133,7 +133,7 @@ private struct ConnectionFailureView: View {
         VStack(spacing: Theme.Space.lg) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 34))
-                .foregroundStyle(Theme.Status.failed)
+                .foregroundStyle(Theme.Status.error)
             Text("Couldn't connect")
                 .font(Theme.Font.emptyTitle)
             Text(error)
@@ -152,7 +152,7 @@ private struct ConnectionFailureView: View {
         }
         .padding(Theme.Space.xxxl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Theme.canvas)
     }
 }
 
@@ -177,7 +177,7 @@ private struct LoginView: View {
             }
             .padding(.horizontal, Theme.Space.lg)
             .padding(.vertical, Theme.Space.sm)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(Theme.canvas)
             Divider()
             LoginTerminalView(login: login)
                 .background(Theme.terminalBackground)
@@ -200,7 +200,8 @@ private struct SessionWatermark: View {
         GeometryReader { geo in
             Text(name)
                 .font(.system(size: max(geo.size.height * 0.46, 64), weight: .bold, design: .rounded))
-                .foregroundStyle(Theme.brand.opacity(0.09))
+                .foregroundStyle(Theme.terminalForeground.opacity(0.08)) // faint on the DARK terminal
+
                 .lineLimit(1)
                 .minimumScaleFactor(0.04) // shrink long names to one line
                 .frame(width: geo.size.width * 0.9)
@@ -403,7 +404,6 @@ private struct ComboCounter: View {
             Text("×\(count)")
                 .font(.system(size: 26 + min(CGFloat(count) * 0.8, 28), weight: .heavy, design: .rounded))
                 .foregroundStyle(Theme.brand)
-                .shadow(color: Theme.brand.opacity(0.55), radius: min(CGFloat(count), 14))
                 .contentTransition(.numericText())
             Text("COMBO")
                 .font(.system(size: 10, weight: .bold, design: .rounded))

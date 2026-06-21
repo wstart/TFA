@@ -28,7 +28,7 @@ struct ClaudeMdView: View {
                 Spacer()
                 Text("markdown").font(.caption2).foregroundStyle(.tertiary).monospaced()
                 if savedFlash {
-                    Text("已保存 ✓").font(.caption).foregroundStyle(Theme.Status.connected)
+                    Text("已保存 ✓").font(.caption).foregroundStyle(Theme.Status.positive)
                 }
                 Button { dirty ? (confirmReload = true) : load() } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.borderless).help("从磁盘重新加载")
@@ -43,7 +43,7 @@ struct ClaudeMdView: View {
                     if dirty { savedFlash = false }
                 }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Theme.canvas)
         .onAppear(perform: load)
         .alert("放弃未保存的改动？", isPresented: $confirmReload) {
             Button("重新加载", role: .destructive) { load() }

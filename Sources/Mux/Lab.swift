@@ -121,7 +121,7 @@ struct LabView: View {
             default: PtyMonitorPane()
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Theme.canvas)
     }
 }
 
@@ -154,7 +154,7 @@ private struct SystemMonitorPane: View {
             .padding(Theme.Space.xxl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Theme.canvas)
         .onAppear { monitor.start() }
         .onDisappear { monitor.stop() }
     }
@@ -290,7 +290,7 @@ private struct PtyMonitorPane: View {
             .padding(Theme.Space.xxl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Theme.canvas)
         .onAppear { monitor.refresh() }
         .alert("清理孤儿 tmux -CC 客户端?", isPresented: $confirmCleanup) {
             Button("清理", role: .destructive) { monitor.cleanupOrphans() }
@@ -324,7 +324,7 @@ private struct MetricBar: View {
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: Theme.Radius.sm).fill(.quaternary)
+                    RoundedRectangle(cornerRadius: Theme.Radius.sm).fill(Theme.surface2)
                     RoundedRectangle(cornerRadius: Theme.Radius.sm)
                         .fill(Theme.brand)
                         .frame(width: max(0, min(1, value)) * geo.size.width)

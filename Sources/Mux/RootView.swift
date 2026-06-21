@@ -79,8 +79,10 @@ struct RootView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.canvas) // ivory page canvas under everything (DESIGN.md)
+        .preferredColorScheme(.light) // DESIGN.md is a warm LIGHT system — never invert under system dark
         .animation(.easeInOut(duration: 0.22), value: appModel.sidebarCollapsed)
-        .tint(Theme.brand) // app accent → brand green; buttons/controls adopt the brand tint
+        .tint(Theme.brand) // emphasis = ink/charcoal → prominent buttons read as DESIGN.md "Primary Dark Button"
         .navigationTitle("TFA")
         // Host the per-session menu's sheets/alerts ONCE here, so right-clicking the sidebar row OR
         // the terminal area both work — even when the sidebar is collapsed.
@@ -190,7 +192,7 @@ private struct ActiveTerminalHeader: View {
         .padding(.horizontal, Theme.Space.lg)
         .padding(.vertical, Theme.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.canvas)
     }
 
     /// The active pane's working directory, rendered as a flexible middle-truncating chip — the
@@ -206,7 +208,7 @@ private struct ActiveTerminalHeader: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, Theme.Space.sm)
         .padding(.vertical, Theme.Space.xxs)
-        .background(.quaternary, in: Capsule())
+        .background(Theme.surface2, in: Capsule())
         .help(text)
         .accessibilityLabel("当前路径 \(text)")
     }
@@ -229,7 +231,7 @@ private struct ActiveTerminalHeader: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, Theme.Space.sm)
         .padding(.vertical, Theme.Space.xxs)
-        .background(.quaternary, in: Capsule())
+        .background(Theme.surface2, in: Capsule())
         .accessibilityLabel("\(text)")
     }
 }
@@ -240,11 +242,11 @@ private struct TmuxMissingBanner: View {
     @State private var copied = false
     var body: some View {
         HStack(spacing: Theme.Space.md) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.Status.reconnecting)
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.Status.pending)
             Text("未检测到 tmux —— TFA 需要它来运行终端。").lineLimit(1)
             Text("brew install tmux").font(.caption.monospaced())
                 .padding(.horizontal, Theme.Space.sm).padding(.vertical, 2)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
             Button(copied ? "已复制" : "复制") {
                 NSPasteboard.general.clearContents(); NSPasteboard.general.setString("brew install tmux", forType: .string)
                 copied = true
@@ -254,7 +256,7 @@ private struct TmuxMissingBanner: View {
         }
         .font(Theme.Font.headerMeta)
         .padding(.horizontal, Theme.Space.lg).padding(.vertical, Theme.Space.md)
-        .background(Theme.Status.reconnecting.opacity(0.12))
+        .background(Theme.Status.pending.opacity(0.12))
         .overlay(alignment: .bottom) { Divider() }
     }
 }
@@ -266,7 +268,7 @@ private struct ErrorBanner: View {
     var body: some View {
         HStack(spacing: Theme.Space.md) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(Theme.Status.failed)
+                .foregroundStyle(Theme.Status.error)
             Text(message)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -282,7 +284,7 @@ private struct ErrorBanner: View {
         .font(Theme.Font.headerMeta)
         .padding(.horizontal, Theme.Space.lg)
         .padding(.vertical, Theme.Space.md)
-        .background(Theme.Status.failed.opacity(0.12))
+        .background(Theme.Status.error.opacity(0.12))
         .overlay(alignment: .bottom) { Divider() }
     }
 }
@@ -308,7 +310,7 @@ private struct TasksHeaderBar: View {
             let blocked = tasks.filter { $0.status == .blocked }.count
             let waiting = tasks.filter { $0.comments.last?.kind == "question" }.count
             if doing > 0 { headerStat("进行中", doing, Theme.brand) }
-            if blocked > 0 { headerStat("受阻", blocked, Theme.Status.failed) }
+            if blocked > 0 { headerStat("受阻", blocked, Theme.Status.error) }
             if waiting > 0 { headerStat("待回复", waiting, Color(red: 0.95, green: 0.62, blue: 0.16)) }
             Spacer()
             if !tasks.isEmpty { Text("共 \(tasks.count)").font(.caption).foregroundStyle(.tertiary).monospacedDigit() }
@@ -316,7 +318,7 @@ private struct TasksHeaderBar: View {
         .padding(.horizontal, Theme.Space.lg)
         .padding(.vertical, Theme.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.canvas)
     }
 
     private func headerStat(_ label: String, _ n: Int, _ tint: Color) -> some View {
@@ -345,7 +347,7 @@ private struct ClaudeMdHeaderBar: View {
         .padding(.horizontal, Theme.Space.lg)
         .padding(.vertical, Theme.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.canvas)
     }
 }
 
@@ -370,7 +372,7 @@ private struct SkillsHeaderBar: View {
         .padding(.horizontal, Theme.Space.lg)
         .padding(.vertical, Theme.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.canvas)
     }
 }
 
@@ -395,7 +397,7 @@ private struct LabHeaderBar: View {
         .padding(.horizontal, Theme.Space.lg)
         .padding(.vertical, Theme.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.canvas)
     }
 }
 
@@ -419,7 +421,7 @@ private struct TunnelsHeaderBar: View {
         .padding(.horizontal, Theme.Space.lg)
         .padding(.vertical, Theme.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.canvas)
     }
 }
 

@@ -14,6 +14,7 @@ struct MuxApp: App {
                 .onAppear {
                     delegate.appModel = appModel
                     NSApplication.shared.setActivationPolicy(.regular)
+                    NSApplication.shared.appearance = NSAppearance(named: .aqua) // DESIGN.md is a light system → pin light chrome (titlebar/menus) regardless of system dark mode
                     NSApplication.shared.activate(ignoringOtherApps: true)
                     NotificationManager.requestAuthorization()
                     appModel.start()

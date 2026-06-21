@@ -144,7 +144,7 @@ private struct KeyCap: View {
             .font(.caption.monospaced())
             .padding(.horizontal, Theme.Space.sm)
             .padding(.vertical, Theme.Space.xxs)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+            .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
             .accessibilityHidden(true)
     }
 }

@@ -79,7 +79,7 @@ struct TokenUsageView: View {
             Divider()
             content(rows)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Theme.canvas)
         .onAppear { store.loadIfNeeded() }
     }
 

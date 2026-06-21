@@ -65,7 +65,7 @@ final class PaneTerminal {
         tv.nativeForegroundColor = Theme.terminalForegroundNS
         tv.nativeBackgroundColor = Theme.terminalBackgroundNS
         tv.layer?.backgroundColor = Theme.terminalBackgroundNS.cgColor
-        tv.caretColor = NSColor(Theme.brand)
+        tv.caretColor = NSColor(Theme.accent) // dust blue — the sole accent, legible on the dark terminal
         // Start at the persisted font size (same key AppModel mirrors) so panes created at a
         // non-default size render correctly from the first frame.
         let saved = UserDefaults.standard.double(forKey: AppModel.fontSizeKey)
