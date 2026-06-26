@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Developer ID + Hardened Runtime entitlements for TFA.
+      TFA is deliberately NOT sandboxed (it manages real tmux/ssh sessions and the user's files),
+      so there are no App Sandbox keys here. Child processes it spawns (tmux, ssh, shells) run as
+      separate processes and are not bound by this runtime, so no special "spawn" entitlement is
+      needed. Everything is statically linked via SwiftPM (no external unsigned dylibs), so library
+      validation stays ON. Kept minimal on purpose — add a key only if notarization/launch needs it.
+
+      The point of Developer ID signing here is a STABLE signature: TCC grants (Desktop / Documents /
+      "access other apps' data") then persist across launches and upgrades, instead of resetting every
+      time as they did under ad-hoc signing.
+    -->
+</dict>
+</plist>

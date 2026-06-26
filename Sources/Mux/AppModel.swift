@@ -501,26 +501,14 @@ final class AppModel {
         }
     }
 
-    /// A terminal is an AI agent session if it's (was) running claude/codex, or its directory has a
-    /// Claude Code transcript — meaning `claude --continue` there would actually resume a conversation.
+    /// A terminal is an AI agent session if it's (was) running claude/codex. Detection is by the
+    /// RUNNING COMMAND NAME only — deliberately NO filesystem probe of `~/.claude/projects`: reading
+    /// another app's data dir trips macOS Sequoia's "access other apps' data" prompt, and the hourly
+    /// snapshot would re-raise it. The tradeoff is tiny — a terminal whose command momentarily reads
+    /// as something else just falls back to scrollback replay instead of `claude --continue`.
     private func isAITerminal(command: String, cwd: String?) -> Bool {
         let c = command.lowercased()
-        if c.contains("claude") || c.contains("codex") { return true }
-        guard let cwd, !cwd.isEmpty else { return false }
-        return claudeProjectExists(cwd: cwd)
-    }
-    /// Cache of cwd → "has a Claude project dir", so the hourly snapshot doesn't re-stat ~/.claude
-    /// every time (reads there also raise the macOS "access other apps' data" prompt).
-    @ObservationIgnored private var claudeProjectCache: [String: Bool] = [:]
-    /// Claude Code encodes a project's cwd by replacing `/` and `.` with `-` under ~/.claude/projects.
-    private func claudeProjectExists(cwd: String) -> Bool {
-        if let cached = claudeProjectCache[cwd] { return cached }
-        let encoded = cwd.map { ($0 == "/" || $0 == ".") ? "-" : $0 }.reduce("") { $0 + String($1) }
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/projects/\(encoded)", isDirectory: true)
-        let exists = FileManager.default.fileExists(atPath: dir.path)
-        claudeProjectCache[cwd] = exists
-        return exists
+        return c.contains("claude") || c.contains("codex")
     }
 
     /// Switching to a tool pane (Lab / Skills / CLAUDE.md): no terminal is on screen, so stop flagging

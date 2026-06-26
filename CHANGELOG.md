@@ -3,6 +3,14 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
+## [0.15.2] — 2026-06-26
+
+### 优化
+- **正式签名 + Apple 公证**：改用 **Developer ID** 签名(hardened runtime + 安全时间戳 + entitlements)并经 Apple 公证(notarytool + staple),取代此前的 ad-hoc 临时签名。**双击即可打开**(不再需要右键「打开」绕过 Gatekeeper);更关键的是签名稳定后,macOS 的隐私授权(桌面 / 文稿 / 「访问其他 App 数据」)**持久保留、升级不再重置**——根治此前反复弹窗、终端读不到桌面文件夹的问题。打包脚本内置签名(从钥匙串自动探测身份,公开 clone 无证书时退回 ad-hoc),`NOTARIZE=1` 一键公证。
+
+### 修复
+- **大幅减少 macOS Sequoia「访问其他 App 数据」弹窗**:会话持久化的 AI 终端检测**不再探测 `~/.claude/projects/` 文件系统**(每小时快照都会触发该提示),改为只看运行的命令名(claude/codex)。
+
 ## [0.15.1] — 2026-06-21
 
 ### 修复

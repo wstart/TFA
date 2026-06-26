@@ -11,8 +11,7 @@
 
 1. 解压 `TFA.app.zip`，拖入「应用程序」。
 2. 依赖 `tmux`：`brew install tmux`（没装的话 App 内也会提示）。
-3. **首次打开**（ad-hoc 签名，未走 Apple 公证）：**右键 App →「打开」** 一次即可；若提示「已损坏 / 无法打开」，在终端执行
-   `xattr -dr com.apple.quarantine /Applications/TFA.app` 后再打开。
+3. **双击打开**即可——已用 Developer ID 签名并经 Apple 公证,无需右键绕过 Gatekeeper。
 4. 仅支持 **Apple Silicon（M 系列）**；暂不提供 Intel 版。
 
 TFA 不是另写一个多路复用器，而是封装真实的 tmux：通过 tmux 的**控制模式**（`tmux -CC`）
@@ -255,6 +254,7 @@ open TFA.app
 
 每版一句话，详细见 [`CHANGELOG.md`](CHANGELOG.md)。
 
+- **v0.15.2** — **正式签名 + Apple 公证**(Developer ID,双击即开、隐私授权升级不再重置);大幅减少「访问其他 App 数据」弹窗。
 - **v0.15.1** — 修复:在工具面板（任务 / 隧道等）上点回当前 session 无法切回终端界面（同值选择短路,改走统一的 `activateTerminal`）。
 - **v0.15.0** — **会话持久化**（重启 / `tmux kill-server` 后恢复：会话 + scrollback 存 SQLite，AI 终端自动 `claude --continue` 续接对话）；**SSH 反向端口转发**管理（侧栏「隧道」面板：多配置、开机自启、断线重连、GatewayPorts、连接日志）；**全面换肤**——按 DESIGN.md 的暖色凸版浅色外壳 + 固定深色终端、系统字体（中英一致）、统一状态色标准；启动原生全屏；终端区右键 = 侧栏会话右键。
 - **v0.14.0** — **稳定终端身份**（`@tfa_id`）：环境变量 / 分组 / 看板指派改用永久 UUID 为键，改名 · 重启不再丢数据；任务看板 **⌘⇧T** + 看板↔终端互跳，**⌘]** 优先跳待处理终端；**关窗驻留菜单栏**（调度不停）；大幅**减少动画**（键入特效默认关）+ 启动 / 运行性能优化（单一心跳、流水线 attach、回滚封顶）；侧栏精简为「文件夹 + 状态」；移除分屏多终端同屏。
