@@ -268,14 +268,14 @@ private struct TaskCard: View {
             }
             if let last = task.comments.last { latestRecord(last) }
         }
-        .padding(Theme.Space.sm)
+        .padding(Theme.Space.lg)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 8).fill(cardFill))
+        .background(RoundedRectangle(cornerRadius: 14).fill(cardFill))
         .overlay(alignment: .leading) { accentBar }
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(borderColor, lineWidth: 1))
         .overlay(alignment: .topTrailing) { quickActions }
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .contentShape(RoundedRectangle(cornerRadius: 14))
         .onHover { inside in withAnimation(.easeInOut(duration: 0.12)) { hovering = inside } }
         .onTapGesture { onOpen() }
     }

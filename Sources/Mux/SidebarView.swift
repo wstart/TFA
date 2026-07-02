@@ -111,15 +111,12 @@ struct SidebarView: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
 
-            // Bottom-left entries: Tasks + Tunnels + CLAUDE.md rules + Skills + Lab.
-            ToolEntry(title: "任务", icon: "checklist", selected: appModel.tasksSelected) { appModel.openTasks() }
-            ToolEntry(title: "隧道", icon: "network.badge.shield.half.filled", selected: appModel.tunnelsSelected) { appModel.openTunnels() }
-            ClaudeMdEntry(selected: appModel.claudeMdSelected) { appModel.openClaudeMd() }
-            SkillsEntry(selected: appModel.skillsSelected) { appModel.openSkills() }
-            LabEntry(selected: appModel.labSelected) { appModel.openLab() }
+            // Bottom tool dock (DESIGN.md v2): Tasks + Tunnels + CLAUDE.md + Skills + Lab as an
+            // equal-width icon+label row.
+            ToolDock()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.canvas)
+        .background(Theme.chrome)
         .alert(groupRenameID == nil ? "New Group" : "Rename Group", isPresented: $groupAlertShown) {
             TextField("Group name", text: $groupAlertName)
             Button(groupRenameID == nil ? "Create" : "Rename") { confirmGroupAlert() }
@@ -296,12 +293,10 @@ struct SidebarView: View {
                 .lineLimit(1)
             Spacer(minLength: Theme.Space.xs)
             if count > 0 {
+                // Plain muted count (v2): a badge fill would vanish on the cream sidebar (surface2 == cream).
                 Text("\(count)")
                     .font(.caption.monospacedDigit().weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, Theme.Space.sm)
-                    .padding(.vertical, 1)
-                    .background(Theme.surface2, in: Capsule())
+                    .foregroundStyle(Theme.textTertiary)
             }
         }
         .padding(.vertical, Theme.Space.xxs)
@@ -367,38 +362,53 @@ private struct SidebarHeader: View {
                     Button { onManageServers() } label: { Label("Manage Servers…", systemImage: "server.rack") }
                 }
             } label: {
-                HStack(spacing: Theme.Space.xs) {
-                    Image(systemName: appModel.currentHost.icon).font(.caption)
+                // v2 host pill: a white capsule with a status dot, host name, and a chevron.
+                HStack(spacing: Theme.Space.sm) {
+                    Circle()
+                        .fill(hostDot)
+                        .frame(width: 7, height: 7)
                     Text(appModel.currentHost.label).font(Theme.Font.rowTitle).lineLimit(1)
-                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                    Spacer(minLength: Theme.Space.xs)
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.textTertiary)
                 }
+                .padding(.horizontal, Theme.Space.md)
+                .padding(.vertical, 6)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
-            .fixedSize()
+            .fixedSize()                       // hug content → the host pill sits left-aligned
             .help("Switch host for new terminals")
 
-            Spacer(minLength: Theme.Space.xs)
+            Spacer(minLength: Theme.Space.sm)  // push the trailing actions to the right edge
 
-            // Click = new terminal (⌘T). Click-and-hold = pick a start folder (local).
-            Menu {
-                Button { appModel.newTerminal() } label: { Label("新建终端", systemImage: "plus") }
-                Button { appModel.newTerminalPickingFolder() } label: { Label("选择文件夹新建…", systemImage: "folder.badge.plus") }
-            } label: {
-                Image(systemName: "plus").font(.system(size: 13, weight: .medium))
-            } primaryAction: {
-                appModel.newTerminal()
+            // New terminal — a filled charcoal square (v2 primary action); opens the「新建会话」sheet.
+            Button { appModel.newTerminal() } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(Theme.canvas)
+                    .frame(width: 30, height: 30)
+                    .background(Theme.brand, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+                    .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("New terminal on \(appModel.currentHost.label) (⌘T) · 长按可选起始文件夹")
+            .buttonStyle(.plain)
+            .help("New terminal on \(appModel.currentHost.label) (⌘T)")
+            .accessibilityLabel("新建终端")
+
             HeaderButton(system: "magnifyingglass", help: "Search across all panes (⌘F)", action: onSearch)
             HeaderButton(system: "folder.badge.plus", help: "New group", action: onNewGroup)
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.top, Theme.Space.md)
         .padding(.bottom, Theme.Space.xs)
+    }
+
+    /// The host pill's status dot — sage for the always-available local host, neutral for a remote
+    /// host (its live state is shown per-terminal in the list).
+    private var hostDot: Color {
+        if case .local = appModel.currentHost { return Theme.Status.positive }
+        return Theme.Status.neutral
     }
 }
 
@@ -418,100 +428,57 @@ private struct HeaderButton: View {
 }
 
 /// Bottom-of-sidebar entry into the global CLAUDE.md rules editor.
-private struct ClaudeMdEntry: View {
-    let selected: Bool
-    let action: () -> Void
+/// v2 tool dock: the five tool panes as an equal-width icon+label row pinned to the sidebar bottom.
+/// Selected = a filled charcoal cell (mirrors a selected terminal row), per DESIGN.md v2.
+private struct ToolDock: View {
+    @Environment(AppModel.self) private var appModel
 
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: Theme.Space.sm) {
-                Image(systemName: "text.book.closed")
-                    .foregroundStyle(selected ? Theme.brand : Color.secondary)
-                Text("CLAUDE.md").font(Theme.Font.rowTitle)
-                Spacer()
-            }
-            .contentShape(Rectangle())
-            .padding(.horizontal, Theme.Space.md)
-            .padding(.vertical, Theme.Space.sm)
-        }
-        .buttonStyle(.plain)
-        .background(selected ? Theme.brand.opacity(0.12) : Color.clear)
-        .overlay(alignment: .top) { Divider() }
-        .accessibilityLabel("CLAUDE.md 规则")
+    private struct Tool: Identifiable {
+        let id: String
+        let title: String
+        let icon: String
+        let selected: Bool
+        let action: () -> Void
     }
-}
 
-/// Generic bottom-of-sidebar tool entry (used by the Tasks board).
-private struct ToolEntry: View {
-    let title: String
-    let icon: String
-    let selected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: Theme.Space.sm) {
-                Image(systemName: icon)
-                    .foregroundStyle(selected ? Theme.brand : Color.secondary)
-                Text(title).font(Theme.Font.rowTitle)
-                Spacer()
-            }
-            .contentShape(Rectangle())
-            .padding(.horizontal, Theme.Space.md)
-            .padding(.vertical, Theme.Space.sm)
-        }
-        .buttonStyle(.plain)
-        .background(selected ? Theme.brand.opacity(0.12) : Color.clear)
-        .overlay(alignment: .top) { Divider() }
-        .accessibilityLabel(title)
+    private var tools: [Tool] {
+        [
+            Tool(id: "tasks",   title: "任务",   icon: "checklist",                          selected: appModel.tasksSelected)   { appModel.openTasks() },
+            Tool(id: "tunnels", title: "隧道",   icon: "network.badge.shield.half.filled",   selected: appModel.tunnelsSelected) { appModel.openTunnels() },
+            Tool(id: "claude",  title: "CLAUDE", icon: "text.book.closed",                   selected: appModel.claudeMdSelected){ appModel.openClaudeMd() },
+            Tool(id: "skills",  title: "Skills", icon: "wand.and.stars",                     selected: appModel.skillsSelected)  { appModel.openSkills() },
+            Tool(id: "lab",     title: "实验室", icon: "flask",                              selected: appModel.labSelected)     { appModel.openLab() },
+        ]
     }
-}
-
-/// Bottom-of-sidebar entry into the Skills manager. Selected → the detail area shows Skills.
-private struct SkillsEntry: View {
-    let selected: Bool
-    let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: Theme.Space.sm) {
-                Image(systemName: "wand.and.stars")
-                    .foregroundStyle(selected ? Theme.brand : Color.secondary)
-                Text("Skills").font(Theme.Font.rowTitle)
-                Spacer()
+        HStack(spacing: Theme.Space.sm) {
+            ForEach(tools) { tool in
+                Button(action: tool.action) {
+                    VStack(spacing: Theme.Space.xs) {
+                        Image(systemName: tool.icon)
+                            .font(.system(size: 15, weight: .regular))
+                            .foregroundStyle(tool.selected ? Theme.canvas : Theme.textSecondary)
+                        Text(tool.title)
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(tool.selected ? Theme.canvas : Theme.textTertiary)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, Theme.Space.md)
+                    .padding(.horizontal, Theme.Space.xs)
+                    .background(tool.selected ? Theme.brand : Color.clear,
+                                in: RoundedRectangle(cornerRadius: 10))
+                    .contentShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+                .help(tool.title)
+                .accessibilityLabel(tool.title)
             }
-            .contentShape(Rectangle())
-            .padding(.horizontal, Theme.Space.md)
-            .padding(.vertical, Theme.Space.sm)
         }
-        .buttonStyle(.plain)
-        .background(selected ? Theme.brand.opacity(0.12) : Color.clear)
+        .padding(.horizontal, Theme.Space.lg)
+        .padding(.vertical, Theme.Space.md)
         .overlay(alignment: .top) { Divider() }
-        .accessibilityLabel("Skills 管理")
-    }
-}
-
-/// Bottom-of-sidebar entry into the Lab (experiments). Selected → the detail area shows the Lab.
-private struct LabEntry: View {
-    let selected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: Theme.Space.sm) {
-                Image(systemName: "flask")
-                    .foregroundStyle(selected ? Theme.brand : Color.secondary)
-                Text("实验室").font(Theme.Font.rowTitle)
-                Spacer()
-            }
-            .contentShape(Rectangle())
-            .padding(.horizontal, Theme.Space.md)
-            .padding(.vertical, Theme.Space.sm)
-        }
-        .buttonStyle(.plain)
-        .background(selected ? Theme.brand.opacity(0.12) : Color.clear)
-        .overlay(alignment: .top) { Divider() }
-        .accessibilityLabel("实验室")
     }
 }
 
@@ -538,9 +505,10 @@ private struct FilterField: View {
                 .accessibilityLabel("Clear filter")
             }
         }
-        .padding(.horizontal, Theme.Space.md)
-        .padding(.vertical, Theme.Space.sm)
-        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+        .padding(.horizontal, Theme.Space.lg)
+        .padding(.vertical, 7)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
         .padding(.horizontal, Theme.Space.md)
         .padding(.bottom, Theme.Space.sm)
         .accessibilityLabel("Filter terminals")

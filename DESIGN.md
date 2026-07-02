@@ -18,13 +18,17 @@ work for a Chinese-heavy, dense, long-running terminal UI.
 
 ---
 
-## 1. The dual-surface model (TFA's defining decision)
+## 1. The surface model (TFA's defining decision)
 
-TFA has **two surface worlds**, and every styling choice respects which world it's in:
+TFA is a **three-tier warm paper stack** in the light chrome, plus one fixed-dark terminal — every
+styling choice respects which tier it's in. The tiers must stay visibly distinct: that layering IS the
+"editorial workbench" identity (v2).
 
 | World | Background | Foreground | Where | Why |
 |-------|-----------|-----------|-------|-----|
-| **Chrome** (light) | Ivory `#faf9f5` / White `#ffffff` | Ink `#141413` | Sidebar, headers, task board, tunnels, lab, sheets, banners | The letterpress identity |
+| **Chrome** (cream) | Cream `#f4f2ea` | Ink `#141413` | Sidebar, titlebar, tool dock, quiet chips | One tier warmer than canvas — frames the workspace |
+| **Chrome** (canvas) | Ivory `#faf9f5` | Ink `#141413` | Main content: terminal header, task board, tunnels, lab | The neutral working ground |
+| **Chrome** (cards) | White `#ffffff` | Ink `#141413` | Cards, inputs, list rows, host pill, sheets | Elevated surfaces floating on canvas |
 | **Terminal** (fixed dark) | `#1D2026` | `#DBDEE5` | The terminal pane only | ANSI/TUI palettes are tuned for dark; a cream terminal makes `ls` colors, vim, claude TUIs illegible |
 
 The dark terminal is **not** system-appearance-driven — it's a fixed sRGB color so a freshly-created
@@ -44,15 +48,17 @@ are what views actually reference — never raw `NSColor.windowBackgroundColor` 
 
 | Name | Value | Semantic alias | Role |
 |------|-------|----------------|------|
-| Ivory Canvas | `#faf9f5` | `canvas` | Page background — the warm off-white that defines the whole chrome |
-| Pure White | `#ffffff` | `surface` | Cards, input fields, list/board rows, elevated containers |
-| Warm Parchment | `#f0eee6` | `surface2` | Toggle tracks, hover washes, quiet fills, subtle differentiation |
+| Ivory Canvas | `#faf9f5` | `canvas` | Main-content background — the neutral working ground |
+| Cream Chrome | `#f4f2ea` | `chrome` / `surface2` | Sidebar / titlebar / tool dock / quiet chips — one tier warmer than canvas |
+| Pure White | `#ffffff` | `surface` | Cards, input fields, list/board rows, host pill, elevated containers |
+| Warm Parchment | `#f0eee6` | — | Legacy quiet fill (kept; new washes use Cream) |
 | Ink Black | `#141413` | `textPrimary` | Primary text, high-emphasis labels |
 | Charcoal | `#1f1e1d` | `brand` / emphasis | Filled buttons, active emphasis, focus — the monochrome "annotation" weight |
 | Warm Slate | `#3d3d3a` | `textSecondary` | Secondary text; the calm "connected" status tint |
 | Stone Gray | `#73726c` | `textTertiary` | Muted helper text, captions, inactive/quiet states |
 | Pewter | `#9c9a92` | — | Subtle icons, low-emphasis strokes |
 | Linen Border | `#dedcd1` | `border` | Hairline borders, card outlines, dividers — defines surfaces without harshness |
+| Mist | `#c9c6bd` | — | Faintest tone: dormant dots, off-switch tracks |
 | Cool Stone | `#b7b7b5` | `borderStrong` | Nav-level interactive borders only — never on content cards |
 | Dust Blue | `#ccdbe8` | `accent` | The sole chromatic accent: links, soft washes, the terminal cursor |
 | Terminal BG | `#1D2026` | `terminalBackground` | The dark terminal pane only |
@@ -189,16 +195,21 @@ signature looping animation**:
 
 Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
 
-- **Sidebar terminal row** — White on Ivory; `rowTitle` name + `rowSubtitle` (cwd / live line);
+- **Sidebar** — Cream chrome; hosts the host pill, filter pill, terminal list, and tool dock.
+- **Host pill** — White capsule + Linen border on Cream; sage status dot + host name + chevron; paired
+  with a filled-charcoal square `+` (new terminal).
+- **Filter pill** — White capsule + Linen border, 9.6px; live-filters the list (distinct from ⌘F search).
+- **Sidebar terminal row** — White on Cream; `rowTitle` name + `rowSubtitle` (cwd / live line);
   status glyph (§6); left accent rail (amber=needs-you, charcoal=working); active = charcoal wash.
 - **Group folder** — disclosure row, `groupHeader`; drag-reorderable; drop targets highlight in accent.
-- **Tool entry** (任务 / 隧道 / CLAUDE.md / Skills / 实验室) — bottom-of-sidebar; selected = charcoal wash.
+- **Tool dock** (任务 / 隧道 / CLAUDE / Skills / 实验室) — sidebar bottom; equal-width icon+label cells,
+  selected = filled charcoal cell with ivory glyph (mirrors a selected row).
 - **Status indicator** — shared spinner-or-glyph component; symbol + tint + VoiceOver label.
-- **Panel header bar** — Ivory, `headerTitle`, sidebar-toggle + a leading accent icon.
+- **Panel header bar** — Ivory canvas, `headerTitle`, sidebar-toggle + a leading accent icon.
 - **Task board card** — White, Linen border, 16px radius; status chip, agent label, latest-record line;
   blocked = brick wash, needs-takeover = amber wash.
-- **Tunnel row** — White card; status dot (running=slate, retrying=amber, stopped=stone), enable switch,
-  log/edit/delete; reverse-SSH config.
+- **Tunnel row** — White card, 16px radius; status dot (running=slate, retrying=amber, stopped=stone),
+  name + endpoint, a Cream port-mapping chip (mono), enable switch, log/edit/delete.
 - **Sheets / forms** (SSH host, tunnel, environment editor) — White, Linen border, `headerTitle` title,
   rounded-border inputs, Charcoal primary button.
 - **Banners & toasts** (tmux-missing, error, detach-undo) — flat, Linen-bordered, accent-tinted.
@@ -210,7 +221,8 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
 ## 10. Do's and Don'ts
 
 ### Do
-- Keep Ivory (`#faf9f5`) as the chrome canvas; White for cards; never invert under system dark mode.
+- Keep the three tiers distinct: Cream (`#f4f2ea`) sidebar/chrome, Ivory (`#faf9f5`) main canvas,
+  White (`#ffffff`) cards; never invert under system dark mode.
 - Use Linen (`#dedcd1`) 1px borders instead of shadows to separate surfaces.
 - Use Charcoal fill + white text for primary actions; the global `.tint` is Charcoal.
 - Use the **system font** for all chrome text so 中英 mix stays size-consistent.
@@ -230,9 +242,9 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
 ## 11. Agent quick reference
 
 ```
-Chrome canvas      #faf9f5   (Theme.canvas)
+Main canvas        #faf9f5   (Theme.canvas)
+Cream chrome       #f4f2ea   (Theme.chrome / Theme.surface2)  → sidebar, tool dock, quiet chips
 Card surface       #ffffff   (Theme.surface)
-Quiet surface      #f0eee6   (Theme.surface2)
 Primary text       #141413   (Theme.textPrimary)
 Emphasis / filled  #1f1e1d   (Theme.brand)
 Secondary text     #3d3d3a   (Theme.textSecondary)

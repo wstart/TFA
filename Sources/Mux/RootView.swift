@@ -94,6 +94,14 @@ struct RootView: View {
         .sheet(isPresented: $model.isShowingQuickSwitch) {
             QuickSwitchView()
         }
+        .sheet(item: $model.historyViewer) { conn in
+            HistoryViewerSheet(connection: conn)
+                .environment(appModel)
+        }
+        .sheet(isPresented: $model.isShowingNewSession) {
+            NewSessionSheet()
+                .environment(appModel)
+        }
         .alert("从备份恢复 SSH 密码?", isPresented: $model.keychainRecoveryNeeded) {
             Button("恢复") { appModel.recoverPasswordsFromBackup() }
             Button("以后再说", role: .cancel) { appModel.dismissKeychainRecovery() }
@@ -171,6 +179,15 @@ private struct ActiveTerminalHeader: View {
                 if let path = conn.currentPath { pathChip(displayPath(path, remote: conn.host != nil)) }
 
                 Spacer(minLength: Theme.Space.md)
+
+                // History viewer: scroll back through this pane's scrollback even when it's on the
+                // alternate screen (claude / vim / less), where the live view can't scroll.
+                Button { appModel.showHistoryViewer() } label: {
+                    Image(systemName: "clock.arrow.circlepath")
+                }
+                .buttonStyle(.borderless)
+                .help("查看历史(⌘⇧H)")
+                .accessibilityLabel("查看历史")
 
                 if TerminalStatus.of(conn) == .failed {
                     Button { conn.retry() } label: {
@@ -311,7 +328,7 @@ private struct TasksHeaderBar: View {
             let waiting = tasks.filter { $0.comments.last?.kind == "question" }.count
             if doing > 0 { headerStat("进行中", doing, Theme.brand) }
             if blocked > 0 { headerStat("受阻", blocked, Theme.Status.error) }
-            if waiting > 0 { headerStat("待回复", waiting, Color(red: 0.95, green: 0.62, blue: 0.16)) }
+            if waiting > 0 { headerStat("待回复", waiting, Theme.Status.attention) }
             Spacer()
             if !tasks.isEmpty { Text("共 \(tasks.count)").font(.caption).foregroundStyle(.tertiary).monospacedDigit() }
         }

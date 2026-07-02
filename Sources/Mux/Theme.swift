@@ -12,7 +12,8 @@ enum Theme {
     // hairline borders instead of shadows, nearly monochrome with ONE chromatic accent (Dust Blue).
     // Emphasis is carried by ink/charcoal (not a saturated brand color); see `brand` below.
     enum Colors {
-        static let ivory = Color(.sRGB, red: 0.980, green: 0.976, blue: 0.961, opacity: 1)   // #faf9f5 canvas
+        static let ivory = Color(.sRGB, red: 0.980, green: 0.976, blue: 0.961, opacity: 1)   // #faf9f5 main content
+        static let cream = Color(.sRGB, red: 0.957, green: 0.949, blue: 0.918, opacity: 1)    // #f4f2ea chrome (sidebar / titlebar / quiet chips)
         static let white = Color(.sRGB, red: 1, green: 1, blue: 1, opacity: 1)                // #ffffff card
         static let parchment = Color(.sRGB, red: 0.941, green: 0.933, blue: 0.902, opacity: 1)// #f0eee6 secondary surface
         static let ink = Color(.sRGB, red: 0.078, green: 0.078, blue: 0.075, opacity: 1)      // #141413 primary text
@@ -21,14 +22,20 @@ enum Theme {
         static let stone = Color(.sRGB, red: 0.451, green: 0.447, blue: 0.424, opacity: 1)    // #73726c muted text
         static let pewter = Color(.sRGB, red: 0.612, green: 0.604, blue: 0.573, opacity: 1)   // #9c9a92 subtle icons
         static let linen = Color(.sRGB, red: 0.871, green: 0.863, blue: 0.820, opacity: 1)    // #dedcd1 hairline border
+        static let mist = Color(.sRGB, red: 0.788, green: 0.776, blue: 0.741, opacity: 1)     // #c9c6bd faintest tone (dormant dot / off-track)
         static let coolStone = Color(.sRGB, red: 0.718, green: 0.718, blue: 0.710, opacity: 1)// #b7b7b5 nav-level border
         static let dustBlue = Color(.sRGB, red: 0.800, green: 0.859, blue: 0.910, opacity: 1) // #ccdbe8 sole accent
     }
 
     // MARK: - Semantic surfaces & text (use these in views, not raw NSColors)
-    static let canvas = Colors.ivory          // page background
+    //
+    // DESIGN.md v2 is a three-tier warm paper stack: cream chrome (sidebar/titlebar) frames an ivory
+    // main content, with white cards floating on top. The tiers must stay distinct — that layering IS
+    // the "editorial workbench" identity.
+    static let canvas = Colors.ivory          // main content background
+    static let chrome = Colors.cream          // sidebar / titlebar / quiet chips — one tier warmer than canvas
     static let surface = Colors.white         // cards, inputs, elevated containers
-    static let surface2 = Colors.parchment    // toggle tracks, hover washes, quiet zones
+    static let surface2 = Colors.cream        // toggle tracks, hover washes, quiet chips (#f4f2ea)
     static let border = Colors.linen          // hairline card/divider borders
     static let borderStrong = Colors.coolStone// nav-level interactive borders only
     static let textPrimary = Colors.ink

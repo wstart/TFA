@@ -74,6 +74,15 @@ final class AppModel {
     /// Drives the ⌘K quick-switch palette.
     var isShowingQuickSwitch: Bool = false
 
+    /// The connection whose scrollback history is shown in the read-only history viewer (⌘⇧H), or nil
+    /// when it's closed. Lets the user scroll back through a pane that's on the alternate screen
+    /// (claude / vim / less), which has no scrollback of its own.
+    var historyViewer: ConnectionSession?
+
+    /// Drives the「新建会话」sheet — a LOCAL new terminal is named + folder-bound there before it's
+    /// created (instead of auto-spawning mux-N).
+    var isShowingNewSession = false
+
     /// Whether the playful per-keystroke typing-combo effect is shown. Persisted; toggled in Settings.
     var typingEffectsEnabled: Bool = (UserDefaults.standard.object(forKey: "typingEffectsEnabled") as? Bool) ?? false {
         didSet { UserDefaults.standard.set(typingEffectsEnabled, forKey: "typingEffectsEnabled") }
@@ -164,40 +173,39 @@ final class AppModel {
 
     /// New terminal on the CURRENTLY-SELECTED host (rebuild.md #2): local → a fresh local session;
     /// ssh → a fresh session on that host (reusing the host's authenticated ssh master).
-    func newTerminal(startDirectory: String? = nil) {
+    func newTerminal() {
         switch currentHost {
         case .local:
-            openLocal(sessionName: nextLocalSessionName(), startDirectory: startDirectory)
+            // Local terminals are named + folder-bound in the「新建会话」sheet before they're created.
+            isShowingNewSession = true
         case .ssh(let host, let args):
-            // startDirectory is a LOCAL path → meaningless on a remote host, so it's ignored for ssh.
             open(TmuxConnection(endpoint: .ssh(host: host, sshArgs: args),
                                 sessionName: nextSSHName(host: host),
                                 password: hostPasswords[host]))
         }
     }
 
-    /// New local terminal whose shell starts in a folder the user picks (`new-session -c <dir>`).
-    /// Local hosts only — for a remote host the panel would pick a path that doesn't exist there.
-    func newTerminalPickingFolder() {
-        guard case .local = currentHost else { newTerminal(); return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.prompt = "在此新建"
-        panel.message = "选择新终端的起始目录"
-        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
-        if panel.runModal() == .OK, let url = panel.url {
-            newTerminal(startDirectory: url.path)
-        }
+    /// Create a LOCAL session with a user-chosen name, starting in `startDirectory` (`new-session -c`).
+    /// Called by the「新建会话」sheet once the name is validated.
+    func createLocalSession(name: String, startDirectory: String?) {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty else { return }
+        openLocal(sessionName: n, startDirectory: startDirectory)
+    }
+
+    /// The default name proposed in the「新建会话」sheet (lowest unused "mux-N").
+    func suggestedLocalSessionName() -> String { Self.lowestUnusedName(taken: takenLocalSessionNames()) }
+
+    /// Session names already in use (this app's terminals + live local tmux sessions) — the sheet
+    /// uses it to reject a duplicate name before creating.
+    func takenLocalSessionNames() -> Set<String> {
+        var taken = Set(connections.map { $0.controller.connection.sessionName })
+        taken.formUnion(TmuxServer.listLocalSessions())
+        return taken
     }
 
     /// Lowest unused "mux-N" given current terminals and live server sessions.
-    private func nextLocalSessionName() -> String {
-        var taken = Set(connections.map { $0.controller.connection.sessionName })
-        taken.formUnion(TmuxServer.listLocalSessions())
-        return Self.lowestUnusedName(taken: taken)
-    }
+    private func nextLocalSessionName() -> String { Self.lowestUnusedName(taken: takenLocalSessionNames()) }
 
     /// Lowest unused "`prefix`N" (N ≥ 1) not present in `taken`. Pure → unit-tested.
     static func lowestUnusedName(prefix: String = "mux-", taken: Set<String>) -> String {
@@ -359,6 +367,15 @@ final class AppModel {
     func toggleTasks() {
         if tasksSelected { backToTerminal() } else { openTasks() }
     }
+
+    /// Open the read-only history viewer for the active terminal (no-op without a live pane). Lets the
+    /// user scroll back through scrollback even when the live pane is on the alternate screen.
+    func showHistoryViewer() {
+        guard let c = selectedConnection, c.primaryPane != nil else { return }
+        historyViewer = c
+    }
+
+    func closeHistoryViewer() { historyViewer = nil }
 
     /// Leave whatever tool pane is open and land on a terminal (the selected one, or the first).
     /// Selection may be UNCHANGED, so the didSet that normally clears the tool flags won't fire —

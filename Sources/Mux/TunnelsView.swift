@@ -69,15 +69,22 @@ private struct TunnelRow: View {
             Circle().fill(statusColor).frame(width: 9, height: 9)
                 .help(statusText)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: Theme.Space.sm) {
-                    Text(tunnel.name.isEmpty ? tunnel.endpointLabel : tunnel.name)
-                        .font(Theme.Font.rowTitle).lineLimit(1)
-                    Text(tunnel.forwardLabel).font(.caption.monospaced()).foregroundStyle(.secondary)
-                }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(tunnel.name.isEmpty ? tunnel.endpointLabel : tunnel.name)
+                    .font(Theme.Font.rowTitle).lineLimit(1)
                 Text("\(tunnel.endpointLabel) · \(statusText)")
                     .font(Theme.Font.rowSubtitle).foregroundStyle(.secondary).lineLimit(1)
             }
+            .frame(minWidth: 180, alignment: .leading)
+
+            // v2 port-mapping chip: the forward on a quiet cream capsule so it reads as a discrete fact.
+            Text(tunnel.forwardLabel)
+                .font(.caption.monospaced())
+                .foregroundStyle(Theme.textSecondary)
+                .padding(.horizontal, Theme.Space.md).padding(.vertical, Theme.Space.xs)
+                .background(Theme.chrome, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.sm).stroke(Theme.border, lineWidth: 1))
+
             Spacer(minLength: Theme.Space.sm)
 
             Toggle("", isOn: Binding(get: { tunnel.enabled },
@@ -92,9 +99,9 @@ private struct TunnelRow: View {
             Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash") }
                 .buttonStyle(.borderless).foregroundStyle(.secondary).help("删除")
         }
-        .padding(Theme.Space.md)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.surface))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
+        .padding(Theme.Space.xl)
+        .background(RoundedRectangle(cornerRadius: 16).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.border, lineWidth: 1))
         .alert("删除隧道?", isPresented: $confirmDelete) {
             Button("删除", role: .destructive) { appModel.removeTunnel(tunnel) }
             Button("取消", role: .cancel) {}

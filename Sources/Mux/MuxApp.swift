@@ -74,6 +74,10 @@ struct MuxApp: App {
                 Button("搜索全部终端") { appModel.isShowingSearch = true }
                     .keyboardShortcut("f")
 
+                Button("查看历史…") { appModel.showHistoryViewer() }
+                    .keyboardShortcut("h", modifiers: [.command, .shift])
+                    .disabled(appModel.selectedConnection == nil)
+
                 Divider()
 
                 Button("放大字号") { appModel.incFont() }
