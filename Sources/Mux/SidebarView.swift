@@ -61,7 +61,7 @@ struct SidebarView: View {
                 // While a tool pane (Tasks / Lab / Skills / CLAUDE.md) is showing, no terminal is on
                 // screen — so don't keep a terminal row highlighted (avoids a confusing double-selection).
                 // selectedConnectionID is preserved underneath, so returning to a terminal restores it.
-                get: { (model.tasksSelected || model.labSelected || model.skillsSelected || model.claudeMdSelected || model.tunnelsSelected) ? nil : model.selectedConnectionID },
+                get: { (model.tasksSelected || model.labSelected || model.skillsSelected || model.claudeMdSelected || model.tunnelsSelected || model.groupNoteSelected) ? nil : model.selectedConnectionID },
                 set: { if let id = $0 { model.activateTerminal(id) } } // robust to re-selecting the same row while a tool pane is open
             )) {
                 // Tree: group folders (expandable) with their sessions indented underneath, then
@@ -213,13 +213,19 @@ struct SidebarView: View {
         // the folder hard to pick up. A plain tappable row lets tap and drag coexist cleanly — quick
         // click toggles, press-and-move reorders. `.isButton` keeps the VoiceOver semantics.
         return HStack(spacing: Theme.Space.xs) {
+            // Chevron = fold/unfold. Its own (generously sized) tap target, separate from the name.
             Image(systemName: "chevron.right")
                 .font(.caption2.weight(.bold))
                 .foregroundStyle(.secondary)
                 .rotationEffect(.degrees(expanded ? 90 : 0))
-                .frame(width: 10)
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+                .onTapGesture { toggleGroup(group.id) }
+            // Name (icon → count stretch) = open this group's Markdown note in the detail area.
             sectionHeaderLabel(group.name, icon: "folder.fill",
                                count: appModel.visibleTerminals(in: group).count)
+                .contentShape(Rectangle())
+                .onTapGesture { appModel.openGroupNote(group) }
             // Dedicated drag handle: the ONLY draggable bit, so the tap-to-toggle area never fights the
             // drag recognizer (that conflict is why dragging the whole header didn't start a drag).
             Image(systemName: "line.3.horizontal")
@@ -242,14 +248,14 @@ struct SidebarView: View {
                 .fill(dropTargetGroup == group.id ? Theme.brand.opacity(0.18) : .clear)
         )
         .contentShape(Rectangle())
-        .onTapGesture { toggleGroup(group.id) }
-        .help("点击折叠/展开 · 拖右侧手柄重新排序")
+        .help("点名字看分组说明 · 点箭头折叠/展开 · 拖右侧手柄重新排序")
         .animation(.easeInOut(duration: 0.15), value: expanded)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("\(group.name) group, \(expanded ? "expanded" : "collapsed")")
         .accessibilityHint(expanded ? "Collapse group" : "Expand group")
         .accessibilityAction { toggleGroup(group.id) } // VoiceOver activate → toggle
+        .accessibilityAction(named: "查看分组说明") { appModel.openGroupNote(group) }
         // Keyboard / VoiceOver alternative to drag-reorder.
         .accessibilityAction(named: "上移分组") { moveGroupBy(group.id, -1) }
         .accessibilityAction(named: "下移分组") { moveGroupBy(group.id, 1) }

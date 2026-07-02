@@ -159,6 +159,8 @@ struct SkillsView: View {
     @State private var newName = ""
     @State private var deleteTarget: SkillNode?
     @State private var search = ""
+    /// Markdown files (SKILL.md) default to the rendered preview (tables read clearly); toggle to edit.
+    @State private var preview = false
 
     private var home: String { FileManager.default.homeDirectoryForCurrentUser.path }
 
@@ -179,11 +181,13 @@ struct SkillsView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 1) {
-                                ForEach(rows) { vr in rowView(vr) }
+                            LazyVStack(alignment: .leading, spacing: 2) {
+                                ForEach(Array(rows.enumerated()), id: \.element.id) { idx, vr in
+                                    rowView(vr, isFirst: idx == 0)
+                                }
                             }
-                            .padding(.vertical, 4)
-                            .padding(.horizontal, 6)
+                            .padding(.vertical, Theme.Space.sm)
+                            .padding(.horizontal, Theme.Space.sm)
                         }
                     }
                 }
@@ -203,23 +207,37 @@ struct SkillsView: View {
             // Right: editor
             Group {
                 if let url = fileURL {
+                    let isMarkdown = Syntax.from(url) == .markdown
                     VStack(spacing: 0) {
                         HStack(spacing: Theme.Space.sm) {
                             Text(url.path.replacingOccurrences(of: home, with: "~"))
                                 .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                             Spacer()
+                            // Markdown gets an 编辑 / 预览 switch (preview renders tables as aligned grids).
+                            if isMarkdown {
+                                Picker("", selection: $preview) {
+                                    Text("编辑").tag(false)
+                                    Text("预览").tag(true)
+                                }
+                                .pickerStyle(.segmented).labelsHidden().fixedSize()
+                            }
                             Text(Syntax.from(url).label).font(.caption2)
                                 .foregroundStyle(.tertiary).monospaced()
                             if savedFlash {
                                 Text("已保存 ✓").font(.caption).foregroundStyle(Theme.Status.positive)
                             }
                             Button("保存") { saveCurrent() }
-                                .disabled(!dirty).keyboardShortcut("s", modifiers: .command)
+                                .disabled(!dirty || (isMarkdown && preview))
+                                .keyboardShortcut("s", modifiers: .command)
                         }
                         .padding(Theme.Space.sm)
                         Divider()
-                        CodeEditor(text: $text, syntax: Syntax.from(url))
-                            .onChange(of: text) { dirty = true; savedFlash = false }
+                        if isMarkdown && preview {
+                            MarkdownPreviewView(text: text)
+                        } else {
+                            CodeEditor(text: $text, syntax: Syntax.from(url))
+                                .onChange(of: text) { dirty = true; savedFlash = false }
+                        }
                     }
                 } else {
                     ContentUnavailableView("选择一个文件", systemImage: "doc.text",
@@ -298,49 +316,70 @@ struct SkillsView: View {
     // Self-drawn tree row. We do NOT use `List(children:)` / `Button`-in-`List`: on some macOS
     // versions List eats the row's tap so disclosure never fires. A plain ScrollView row + an
     // explicit `onTapGesture` is reliable — tapping a folder toggles, tapping a file selects it.
-    @ViewBuilder private func rowView(_ vr: VisibleRow) -> some View {
-        let node = vr.node
-        let isSelected = !node.isDirectory && selectedID == node.id
-        HStack(spacing: 4) {
-            if node.isDirectory {
-                Image(systemName: expanded.contains(node.id) ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary).frame(width: 12)
-            } else {
-                Color.clear.frame(width: 12)            // align with chevron column
+    @ViewBuilder private func rowView(_ vr: VisibleRow, isFirst: Bool) -> some View {
+        if vr.node.isRoot {
+            skillRow(vr.node, isFirst: isFirst)
+        } else {
+            fileRow(vr)
+        }
+    }
+
+    /// A top-level skill: a roomy card-like header — wand icon + name + up-to-2-line description, with
+    /// breathing room above each skill so the list reads as distinct entries, not a dense tree.
+    @ViewBuilder private func skillRow(_ node: SkillNode, isFirst: Bool) -> some View {
+        let isOpen = expanded.contains(node.id)
+        HStack(alignment: .top, spacing: Theme.Space.sm) {
+            // No chevron — the wand marks a skill and the filled background shows it's open.
+            Image(systemName: "wand.and.stars")
+                .foregroundStyle(isOpen ? Theme.brand : Theme.textTertiary).padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(node.name).font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.textPrimary).lineLimit(1)
+                if let s = node.subtitle, !s.isEmpty {
+                    Text(s).font(Theme.Font.rowSubtitle).foregroundStyle(.secondary)
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                }
             }
-            label(node)
             Spacer(minLength: 0)
         }
-        .padding(.leading, CGFloat(vr.depth) * 14)
-        .padding(.vertical, node.isRoot ? 4 : 3)
-        .padding(.horizontal, 6)
+        .padding(.vertical, Theme.Space.md)
+        .padding(.horizontal, Theme.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isSelected ? Theme.brand.opacity(0.18) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .background(isOpen ? Theme.surface2 : Color.clear, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
         .contentShape(Rectangle())
-        .onTapGesture {
-            if node.isDirectory { toggle(node.id) } else { selectedID = node.id }
+        .onTapGesture { toggle(node.id) }
+        .contextMenu { folderMenu(node) }
+        .padding(.top, isFirst ? 0 : Theme.Space.md)   // gap between skills
+    }
+
+    /// A child file (or sub-folder) under a skill: light, indented, secondary — clearly subordinate.
+    @ViewBuilder private func fileRow(_ vr: VisibleRow) -> some View {
+        let node = vr.node
+        let isSelected = !node.isDirectory && selectedID == node.id
+        HStack(spacing: Theme.Space.sm) {
+            Image(systemName: node.isDirectory
+                  ? (expanded.contains(node.id) ? "chevron.down" : "chevron.right")
+                  : Self.icon(for: node.url))
+                .font(.system(size: 13)).foregroundStyle(isSelected ? Theme.brand : .secondary).frame(width: 16)
+            Text(node.name)
+                .font(.system(size: 14))   // same size as the skill title; weight + color carry the hierarchy
+                .foregroundStyle(isSelected ? Theme.textPrimary : Theme.textSecondary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
         }
+        .padding(.leading, CGFloat(vr.depth) * 16)
+        .padding(.vertical, 4)
+        .padding(.horizontal, Theme.Space.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isSelected ? Theme.brand.opacity(0.16) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 5))
+        .contentShape(Rectangle())
+        .onTapGesture { if node.isDirectory { toggle(node.id) } else { selectedID = node.id } }
         .contextMenu { node.isDirectory ? AnyView(folderMenu(node)) : AnyView(fileMenu(node)) }
     }
 
     @ViewBuilder private func fileMenu(_ node: SkillNode) -> some View {
         Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([node.url]) }
-    }
-
-    @ViewBuilder private func label(_ node: SkillNode) -> some View {
-        if node.isRoot {
-            VStack(alignment: .leading, spacing: 2) {
-                Label(node.name, systemImage: "wand.and.stars").font(Theme.Font.rowTitle).lineLimit(1)
-                if let s = node.subtitle, !s.isEmpty {
-                    Text(s).font(Theme.Font.rowSubtitle).foregroundStyle(.secondary).lineLimit(2)
-                }
-            }
-        } else if node.isDirectory {
-            Label(node.name, systemImage: "folder").lineLimit(1)
-        } else {
-            Label(node.name, systemImage: Self.icon(for: node.url)).lineLimit(1)
-        }
     }
 
     @ViewBuilder private func folderMenu(_ node: SkillNode) -> some View {
@@ -369,6 +408,7 @@ struct SkillsView: View {
         fileURL = node.url
         text = store.content(of: node.url)
         dirty = false; savedFlash = false
+        preview = Syntax.from(node.url) == .markdown   // open docs in the readable preview by default
     }
 
     private func saveCurrent() {
@@ -551,4 +591,200 @@ enum SyntaxHighlighter {
         Rule(regex: rx(#""(?:[^"\\\n]|\\.)*""#), color: .systemRed),            // all strings (values)
         Rule(regex: rx(#""(?:[^"\\\n]|\\.)*"(?=\s*:)"#), color: .systemTeal),   // keys override values
     ]
+}
+
+// MARK: - Markdown preview (SKILL.md)
+
+/// A read-only Markdown preview for SKILL.md. The point is TABLES: in the raw editor a skill's
+/// `| col | col |` tables are unaligned pipe-text and hard to read — here they render as aligned
+/// grids. Headings / lists / code / paragraphs get light rendering too. NOT a full CommonMark engine,
+/// just enough to read a skill's doc clearly; editing still happens in the CodeEditor.
+struct MarkdownPreviewView: View {
+    let text: String
+
+    private enum Block: Identifiable {
+        case heading(level: Int, text: String)
+        case paragraph(String)
+        case bullets([String])
+        case code(String)
+        case table(header: [String], rows: [[String]])
+        var id: String {
+            switch self {
+            case .heading(_, let t): return "h:" + t
+            case .paragraph(let t): return "p:" + t
+            case .bullets(let b): return "b:" + b.joined()
+            case .code(let c): return "c:" + c
+            case .table(let h, let r): return "t:" + h.joined() + "\(r.count)"
+            }
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.Space.lg) {
+                ForEach(Array(parse().enumerated()), id: \.offset) { _, block in
+                    view(for: block)
+                }
+            }
+            .padding(Theme.Space.xxl)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .textSelection(.enabled)
+        }
+        .background(Theme.canvas)
+    }
+
+    @ViewBuilder private func view(for block: Block) -> some View {
+        switch block {
+        case .heading(let level, let t):
+            inline(t)
+                .font(level <= 1 ? .title2.bold() : (level == 2 ? .title3.weight(.semibold) : .headline))
+                .foregroundStyle(Theme.textPrimary)
+                .padding(.top, level <= 2 ? Theme.Space.sm : 0)
+        case .paragraph(let t):
+            inline(t).font(Theme.Font.emptyBody).foregroundStyle(Theme.textSecondary)
+        case .bullets(let items):
+            VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                ForEach(items, id: \.self) { item in
+                    HStack(alignment: .firstTextBaseline, spacing: Theme.Space.sm) {
+                        Text("•").foregroundStyle(Theme.textTertiary)
+                        inline(item).font(Theme.Font.emptyBody).foregroundStyle(Theme.textSecondary)
+                    }
+                }
+            }
+        case .code(let code):
+            Text(code)
+                .font(.system(.callout, design: .monospaced))
+                .foregroundStyle(Theme.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(Theme.Space.md)
+                .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+        case .table(let header, let rows):
+            tableView(header: header, rows: rows)
+        }
+    }
+
+    /// The whole reason for the preview: an aligned grid with a shaded header and hairline row rules.
+    private func tableView(header: [String], rows: [[String]]) -> some View {
+        let cols = max(header.count, rows.map(\.count).max() ?? 0)
+        return Grid(alignment: .topLeading, horizontalSpacing: Theme.Space.lg, verticalSpacing: 0) {
+            GridRow {
+                ForEach(0..<cols, id: \.self) { c in
+                    inline(c < header.count ? header[c] : "")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, Theme.Space.sm).padding(.horizontal, Theme.Space.md)
+                }
+            }
+            .background(Theme.surface2)
+            Divider()
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                GridRow {
+                    ForEach(0..<cols, id: \.self) { c in
+                        inline(c < row.count ? row[c] : "")
+                            .font(Theme.Font.emptyBody)
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, Theme.Space.sm).padding(.horizontal, Theme.Space.md)
+                    }
+                }
+                Divider()
+            }
+        }
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.sm).stroke(Theme.border, lineWidth: 1))
+    }
+
+    /// Inline markdown (**bold**, `code`, [links]) → a styled Text; falls back to plain on parse error.
+    private func inline(_ s: String) -> Text {
+        if let a = try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            return Text(a)
+        }
+        return Text(s)
+    }
+
+    // MARK: parsing
+
+    private func parse() -> [Block] {
+        let lines = text.components(separatedBy: "\n")
+        var blocks: [Block] = []
+        var i = 0
+        var para: [String] = []
+        func flushPara() {
+            if !para.isEmpty { blocks.append(.paragraph(para.joined(separator: " "))); para = [] }
+        }
+        while i < lines.count {
+            let line = lines[i]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // fenced code block
+            if trimmed.hasPrefix("```") {
+                flushPara()
+                var code: [String] = []
+                i += 1
+                while i < lines.count, !lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                    code.append(lines[i]); i += 1
+                }
+                i += 1 // closing fence
+                blocks.append(.code(code.joined(separator: "\n")))
+                continue
+            }
+
+            // heading
+            if let hashes = trimmed.range(of: #"^#{1,6}\s"#, options: .regularExpression) {
+                flushPara()
+                let level = trimmed.distance(from: trimmed.startIndex, to: hashes.upperBound) - 1
+                blocks.append(.heading(level: level, text: String(trimmed[hashes.upperBound...])))
+                i += 1; continue
+            }
+
+            // table: a `|...|` line whose NEXT line is a separator (---|:--- etc.)
+            if trimmed.contains("|"), i + 1 < lines.count, Self.isSeparator(lines[i + 1]) {
+                flushPara()
+                let header = Self.cells(trimmed)
+                var rows: [[String]] = []
+                i += 2 // header + separator
+                while i < lines.count, lines[i].contains("|"), !lines[i].trimmingCharacters(in: .whitespaces).isEmpty {
+                    rows.append(Self.cells(lines[i])); i += 1
+                }
+                blocks.append(.table(header: header, rows: rows))
+                continue
+            }
+
+            // bullet list
+            if trimmed.range(of: #"^[-*+]\s"#, options: .regularExpression) != nil {
+                flushPara()
+                var items: [String] = []
+                while i < lines.count,
+                      let r = lines[i].trimmingCharacters(in: .whitespaces).range(of: #"^[-*+]\s"#, options: .regularExpression) {
+                    let t = lines[i].trimmingCharacters(in: .whitespaces)
+                    items.append(String(t[r.upperBound...])); i += 1
+                }
+                blocks.append(.bullets(items))
+                continue
+            }
+
+            // blank line → paragraph break
+            if trimmed.isEmpty { flushPara(); i += 1; continue }
+
+            para.append(trimmed); i += 1
+        }
+        flushPara()
+        return blocks
+    }
+
+    /// A GitHub-style table separator row: only `|`, `-`, `:`, spaces, and at least one `-`.
+    private static func isSeparator(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        guard t.contains("-"), t.contains("|") else { return false }
+        return t.allSatisfy { $0 == "|" || $0 == "-" || $0 == ":" || $0 == " " }
+    }
+
+    /// Split a `| a | b |` row into trimmed cell strings (dropping the empty edges).
+    private static func cells(_ line: String) -> [String] {
+        var s = line.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("|") { s.removeFirst() }
+        if s.hasSuffix("|") { s.removeLast() }
+        return s.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
 }

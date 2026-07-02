@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Presentation state for the per-session right-click menu, shared by BOTH the sidebar row and the
@@ -36,6 +37,11 @@ struct SessionMenuItems: View {
             .help("重新读取该终端真实的工作目录（cd 后刷新路径）")
         Button("文件管理器…") {
             if let p = conn.currentPath { openWindow(value: URL(fileURLWithPath: p)) }
+        }
+        .disabled(conn.host != nil || conn.currentPath == nil)
+        .help(conn.host != nil ? "暂不支持远程会话" : "")
+        Button("在 Finder 中打开当前文件夹") {
+            if let p = conn.currentPath { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
         }
         .disabled(conn.host != nil || conn.currentPath == nil)
         .help(conn.host != nil ? "暂不支持远程会话" : "")

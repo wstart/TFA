@@ -66,6 +66,9 @@ struct RootView: View {
                     Divider()
                     TunnelsView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if appModel.groupNoteSelected, let gid = appModel.groupNoteID {
+                    GroupNoteView(groupID: gid)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ActiveTerminalHeader(connection: appModel.selectedConnection)
                     Divider()

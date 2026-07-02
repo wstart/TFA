@@ -20,7 +20,7 @@ cd "$ROOT"
 BIN_NAME="Mux"        # SwiftPM executable target (built binary name) — keep as "Mux"
 APP_NAME="TFA"        # user-facing app/bundle name
 BUNDLE_ID="com.tfa.app"
-VERSION="0.16.0"
+VERSION="0.16.1"
 
 # Code signing / notarization (Developer ID). The signing identity is auto-detected from the keychain
 # (the first "Developer ID Application" identity) so no personal name/team is hardcoded in this repo;

@@ -27,19 +27,30 @@ final class AppModel {
     var tasksSelected = false
     /// True when the SSH reverse-tunnel manager is shown in the detail area instead of a terminal.
     var tunnelsSelected = false
+    /// True when a group's Markdown note is shown in the detail area (which group = `groupNoteID`).
+    var groupNoteSelected = false
+    var groupNoteID: UUID?
 
     var selectedConnectionID: UUID? {
         didSet {
             guard oldValue != selectedConnectionID else { return }
-            labSelected = false; skillsSelected = false; claudeMdSelected = false; tasksSelected = false; tunnelsSelected = false // a terminal leaves the tool panes
+            clearToolPanes() // a terminal leaves the tool panes
             // Single-terminal view: the selected one is "viewed" (its output is seen); everything else
             // resigns viewing so the sidebar can keep flagging its activity.
             for c in connections {
                 if c.id == selectedConnectionID { c.markViewed() } else { c.resignViewing() }
             }
             if let id = selectedConnectionID { ensureConnected(id) } // lazy attach on first view
+            // Remember which terminal was active so the next launch restores it (by permanent
+            // stableID, since UUIDs are per-run). Nil / empty stableID → leave the last value.
+            if let id = selectedConnectionID, let c = connection(id), !c.stableID.isEmpty {
+                UserDefaults.standard.set(c.stableID, forKey: Self.lastActiveStableIDKey)
+            }
         }
     }
+
+    /// UserDefaults key for the stableID of the last-active terminal (restored on launch).
+    static let lastActiveStableIDKey = "lastActiveStableID"
 
     /// Last surfaced error (e.g. tmux not found, ssh failed). Shown as a banner in the UI.
     var lastError: String?
@@ -157,7 +168,11 @@ final class AppModel {
             if self.connections.isEmpty {
                 self.openLocal(sessionName: "main")          // nothing live, nothing to restore → fresh default
             }
-            self.selectedConnectionID = self.connections.first?.id // selecting triggers its attach
+            // Restore the terminal that was active last launch (by permanent stableID); fall back to
+            // the first if it's gone. Selecting triggers its lazy attach.
+            let lastID = UserDefaults.standard.string(forKey: Self.lastActiveStableIDKey)
+            self.selectedConnectionID = self.connections.first(where: { $0.stableID == lastID })?.id
+                ?? self.connections.first?.id
             // Register the discovered terminals as assignable agents only NOW — syncing before
             // discovery would wipe the agents table with an empty list, leaving every task's
             // assignee dangling (the board showed cards with no 指派 until it was reopened).
@@ -321,8 +336,8 @@ final class AppModel {
     /// pane + re-show the terminal explicitly.
     func activateTerminal(_ id: UUID) {
         if selectedConnectionID == id {
-            let onTool = tasksSelected || labSelected || skillsSelected || claudeMdSelected || tunnelsSelected
-            tasksSelected = false; labSelected = false; skillsSelected = false; claudeMdSelected = false; tunnelsSelected = false
+            let onTool = tasksSelected || labSelected || skillsSelected || claudeMdSelected || tunnelsSelected || groupNoteSelected
+            clearToolPanes()
             if onTool, let c = connection(id) { c.markViewed() } // returning to it counts as viewed again
             ensureConnected(id)
         } else {
@@ -332,34 +347,67 @@ final class AppModel {
 
     /// Show the Lab (experiments) pane in the detail area. Keeps `selectedConnectionID` so returning
     /// to a terminal restores the last one — this just flips the detail area over to the Lab.
+    /// Clear every tool-pane flag in ONE place — so adding a pane (like the group note) can't leave a
+    /// stale flag set behind the newly-opened one. Each `open*` calls this, then sets its own flag.
+    private func clearToolPanes() {
+        tasksSelected = false; labSelected = false; skillsSelected = false
+        claudeMdSelected = false; tunnelsSelected = false; groupNoteSelected = false
+    }
+
     func openLab() {
-        labSelected = true; skillsSelected = false; claudeMdSelected = false; tasksSelected = false; tunnelsSelected = false
+        clearToolPanes(); labSelected = true
         leaveTerminals() // no terminal is on screen while the Lab shows
     }
 
     /// Show the Skills manager in the detail area. Mutually exclusive with the other tool panes / a terminal.
     func openSkills() {
-        skillsSelected = true; labSelected = false; claudeMdSelected = false; tasksSelected = false; tunnelsSelected = false
+        clearToolPanes(); skillsSelected = true
         leaveTerminals()
     }
 
     /// Show the global CLAUDE.md rules editor. Mutually exclusive with the other tool panes / a terminal.
     func openClaudeMd() {
-        claudeMdSelected = true; labSelected = false; skillsSelected = false; tasksSelected = false; tunnelsSelected = false
+        clearToolPanes(); claudeMdSelected = true
         leaveTerminals()
     }
 
     /// Show the task board (Kanban). Mutually exclusive with the other tool panes / a terminal.
     func openTasks() {
-        tasksSelected = true; labSelected = false; skillsSelected = false; claudeMdSelected = false; tunnelsSelected = false
+        clearToolPanes(); tasksSelected = true
         syncBoardAgents()
         leaveTerminals()
     }
 
     /// Show the SSH reverse-tunnel manager. Mutually exclusive with the other tool panes / a terminal.
     func openTunnels() {
-        tunnelsSelected = true; tasksSelected = false; labSelected = false; skillsSelected = false; claudeMdSelected = false
+        clearToolPanes(); tunnelsSelected = true
         leaveTerminals()
+    }
+
+    /// Show a group's Markdown note (its "what this group / each session does" doc) in the detail area.
+    func openGroupNote(_ group: TerminalGroup) {
+        clearToolPanes(); groupNoteSelected = true; groupNoteID = group.id
+        leaveTerminals()
+    }
+
+    /// Read a group's note (creating a starter template the first time). Stored at
+    /// `~/.tfa/group-notes/<groupID>.md` — one Markdown file per group.
+    func groupNote(_ id: UUID) -> String {
+        let url = Self.groupNoteURL(id)
+        if let s = try? String(contentsOf: url, encoding: .utf8) { return s }
+        let name = groups.first { $0.id == id }?.name ?? "分组"
+        return "# \(name)\n\n> 这个分组是做什么的？\n\n## 各终端（session）职责\n- \n"
+    }
+
+    func saveGroupNote(_ id: UUID, _ text: String) {
+        let url = Self.groupNoteURL(id)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private static func groupNoteURL(_ id: UUID) -> URL {
+        SessionStore.dir.appendingPathComponent("group-notes", isDirectory: true)
+            .appendingPathComponent("\(id.uuidString).md")
     }
 
     /// ⌘⇧T: flip between the task board and the terminal you were on — the board/terminal round-trip
@@ -381,7 +429,7 @@ final class AppModel {
     /// Selection may be UNCHANGED, so the didSet that normally clears the tool flags won't fire —
     /// clear them explicitly and re-mark the terminal as viewed.
     private func backToTerminal() {
-        tasksSelected = false; labSelected = false; skillsSelected = false; claudeMdSelected = false; tunnelsSelected = false
+        clearToolPanes()
         if selectedConnectionID == nil { selectedConnectionID = connections.first?.id }
         if let id = selectedConnectionID, let c = connection(id) {
             c.markViewed()
@@ -392,7 +440,7 @@ final class AppModel {
     /// Jump from a board card straight into its agent's terminal (the other half of the dispatch
     /// loop: dispatch on the board, watch in the terminal).
     func goToTerminal(_ id: UUID) {
-        tasksSelected = false; labSelected = false; skillsSelected = false; claudeMdSelected = false; tunnelsSelected = false
+        clearToolPanes()
         reveal(id) // switches host if needed; the didSet marks viewed when the id changes
         if let c = connection(id) { c.markViewed() } // and when it doesn't, mark it here
         ensureConnected(id)
