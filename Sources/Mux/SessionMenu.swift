@@ -45,6 +45,11 @@ struct SessionMenuItems: View {
         }
         .disabled(conn.host != nil || conn.currentPath == nil)
         .help(conn.host != nil ? "暂不支持远程会话" : "")
+        Button("在 VS Code 中打开当前文件夹") {
+            if let p = conn.currentPath { VSCode.open(URL(fileURLWithPath: p)) }
+        }
+        .disabled(conn.host != nil || conn.currentPath == nil || VSCode.appURL == nil)
+        .help(VSCode.appURL == nil ? "未检测到 VS Code" : (conn.host != nil ? "暂不支持远程会话" : ""))
 
         Menu("分组") {
             ForEach(appModel.currentGroups) { g in
@@ -68,6 +73,7 @@ struct SessionMenuItems: View {
             menu.pasteCount = appModel.pasteEnvironment(into: conn)
             menu.pasteConn = conn
         }
+        .help("从剪贴板导入:KEY=VALUE(.env)或 JSON——{\"env\": {…}}(settings.json)/ 扁平对象")
         Divider()
 
         Button("克隆 session") { appModel.cloneTerminal(conn) }
@@ -133,7 +139,7 @@ private struct SessionMenuHostModifier: ViewModifier {
                 if menu.pasteCount > 0 {
                     Text("已合并 \(menu.pasteCount) 个环境变量到「\(menu.pasteConn?.title ?? "")」。新窗口或重启 session 后生效。")
                 } else {
-                    Text("剪贴板里没有可识别的 KEY=VALUE 环境变量。先在另一个会话「拷贝环境变量」，或复制 .env 格式的文本。")
+                    Text("剪贴板里没有可识别的环境变量。支持 KEY=VALUE(.env)格式，或 JSON——{\"env\": {…}}(Claude Code settings.json)/ 扁平 {\"KEY\": \"VALUE\"} 对象。")
                 }
             }
             .alert("新建分组", isPresented: $menu.newGroupShown) {

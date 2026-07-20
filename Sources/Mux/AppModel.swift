@@ -1283,12 +1283,42 @@ final class AppModel {
     @discardableResult
     func pasteEnvironment(into conn: ConnectionSession) -> Int {
         guard let text = NSPasteboard.general.string(forType: .string) else { return 0 }
-        let parsed = Self.parseEnvLines(text)
+        let parsed = Self.parseEnvText(text)
         guard !parsed.isEmpty else { return 0 }
         var env = sessionEnvironments[conn.stableID] ?? [:]
         for (k, v) in parsed { env[k] = v }
         setEnvironment(env, for: conn) // persists + applies
         return parsed.count
+    }
+
+    /// Parse clipboard text into an env dict, accepting BOTH formats:
+    /// - JSON: `{"env": {"K": "V", …}}` (Claude Code settings.json shape) or a flat `{"K": "V", …}`
+    ///   object. Number/bool values are stringified; nested objects are ignored.
+    /// - Plain `KEY=VALUE` lines (`.env` style) as a fallback for non-JSON text.
+    /// Pure → testable.
+    static func parseEnvText(_ text: String) -> [String: String] {
+        // Try JSON first: a pasted settings.json (or its "env" block) imports in one go.
+        if let data = text.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let dict = (obj["env"] as? [String: Any]) ?? obj
+            var out: [String: String] = [:]
+            for (key, value) in dict {
+                let valid = !key.isEmpty && (key.first!.isLetter || key.first! == "_")
+                    && key.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
+                guard valid else { continue }
+                switch value {
+                case let s as String: out[key] = s
+                case let n as NSNumber:
+                    // JSON bools arrive as CFBoolean-backed NSNumbers; plain 0/1 must stay numeric
+                    // (`as Bool` would wrongly match them), so distinguish by the CF type.
+                    out[key] = CFGetTypeID(n) == CFBooleanGetTypeID() ? (n.boolValue ? "true" : "false")
+                                                                     : n.stringValue
+                default: continue // nested objects/arrays are not env values
+                }
+            }
+            if !out.isEmpty { return out }
+        }
+        return parseEnvLines(text)
     }
 
     /// Parse `KEY=VALUE` lines (one per line) into an env dict. Tolerates `export ` prefixes, blank

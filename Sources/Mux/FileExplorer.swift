@@ -1,6 +1,20 @@
 import SwiftUI
 import AppKit
 
+// MARK: - VS Code hand-off
+
+/// Locate / open VS Code (by bundle id, stable across install paths). `appURL == nil` → not
+/// installed; call sites disable themselves instead of failing silently.
+enum VSCode {
+    static var appURL: URL? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.VSCode")
+    }
+    static func open(_ target: URL) {
+        guard let app = appURL else { return }
+        NSWorkspace.shared.open([target], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+    }
+}
+
 // MARK: - Model
 
 /// A node in the file-explorer tree. `isDirectory` marks it as expandable; children are loaded
@@ -41,6 +55,11 @@ final class FileExplorerStore {
         cache[path] = c
         return c
     }
+
+    /// Drop one directory's cached listing so the next render re-lists it from disk. Called on every
+    /// expand — otherwise a folder expanded while (still) empty caches [] forever and files created
+    /// later (e.g. by an agent running in the session) never appear.
+    func invalidateChildren(at path: String) { cache.removeValue(forKey: path) }
 
     /// List one directory level: folders first, then files, alpha; hide dotfiles & `.bak`.
     static func directChildren(of dir: URL) -> [FileNode] {
@@ -147,6 +166,10 @@ struct FileExplorerView: View {
                         .buttonStyle(.borderless).help("在根目录新建文件")
                     Button { NSWorkspace.shared.open(root) } label: { Image(systemName: "folder") }
                         .buttonStyle(.borderless).help("在 Finder 中打开")
+                    Button { VSCode.open(root) } label: { Image(systemName: "chevron.left.forwardslash.chevron.right") }
+                        .buttonStyle(.borderless)
+                        .disabled(VSCode.appURL == nil)
+                        .help(VSCode.appURL == nil ? "未检测到 VS Code" : "在 VS Code 中打开此文件夹")
                     Spacer()
                     Button { store.reload() } label: { Image(systemName: "arrow.clockwise") }
                         .buttonStyle(.borderless).help("刷新")
@@ -192,6 +215,16 @@ struct FileExplorerView: View {
         .navigationTitle("文件管理器 — \(root.lastPathComponent)")
         .background(Theme.canvas)
         .onAppear { store.reload() }
+        // Re-focusing this window re-reads the whole tree. openWindow(value:) REUSES the window for a
+        // same-URL open (onAppear doesn't refire), and meanwhile the session's agent may have created
+        // files — without this the stale cache reads as "文件管理器坏了" (folders that look empty but
+        // aren't). Matching by title is deliberate: worst case two roots share a lastPathComponent and
+        // both re-list (one cheap readdir per expanded level).
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
+            if let w = note.object as? NSWindow, w.title == "文件管理器 — \(root.lastPathComponent)" {
+                store.reload()
+            }
+        }
         .onChange(of: selectedID) { loadSelected() }
         .alert("新建文件", isPresented: $showNewFile) {
             TextField("文件名（如 notes.md）", text: $newFileName)
@@ -241,7 +274,12 @@ struct FileExplorerView: View {
     }
 
     private func toggle(_ id: String) {
-        if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
+        if expanded.contains(id) {
+            expanded.remove(id)
+        } else {
+            store.invalidateChildren(at: id) // fresh listing on every expand (see invalidateChildren)
+            expanded.insert(id)
+        }
     }
 
     @ViewBuilder private func rowView(_ vr: VisibleRow) -> some View {
@@ -267,6 +305,8 @@ struct FileExplorerView: View {
         .onTapGesture { if node.isDirectory { toggle(node.id) } else { selectedID = node.id } }
         .contextMenu {
             Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([node.url]) }
+            Button("用 VS Code 打开") { VSCode.open(node.url) }
+                .disabled(VSCode.appURL == nil)
             if node.isDirectory {
                 Button("新建文件…") { newFileTarget = node.url; newFileName = ""; showNewFile = true }
             }
