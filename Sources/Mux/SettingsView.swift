@@ -35,6 +35,10 @@ private struct GeneralSettingsPane: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("更新 / Update") {
+                UpdateRow()
+            }
+
             Section("终端 / Terminal") {
                 LabeledContent("字号") {
                     HStack(spacing: Theme.Space.sm) {
@@ -65,6 +69,46 @@ private struct GeneralSettingsPane: View {
         }
         .formStyle(.grouped)
         .padding(Theme.Space.lg)
+    }
+}
+
+/// 设置里的「检查更新」行:当前版本 + 一键检查;发现新版后变成一键「更新并重启」。状态(检查中 /
+/// 已最新 / 下载中 / 失败原因)就地显示。逻辑都在 `Updater`;这里只是它的视图。
+private struct UpdateRow: View {
+    @State private var updater = Updater.shared
+
+    var body: some View {
+        LabeledContent("当前版本 \(Updater.currentVersion)") {
+            HStack(spacing: Theme.Space.md) {
+                switch updater.phase {
+                case .idle:
+                    Button("检查更新") { updater.check() }
+                case .checking:
+                    ProgressView().controlSize(.small)
+                    Text("检查中…").font(.caption).foregroundStyle(.secondary)
+                case .upToDate:
+                    Text("已是最新版本").font(.caption).foregroundStyle(Theme.Status.positive)
+                    Button("再查一次") { updater.check() }
+                case .available(let v):
+                    Text("有新版 v\(v)").font(.caption).foregroundStyle(Theme.Status.attention)
+                    Button("更新并重启") { updater.install() }
+                        .buttonStyle(.borderedProminent)
+                case .downloading:
+                    ProgressView().controlSize(.small)
+                    Text("下载中…").font(.caption).foregroundStyle(.secondary)
+                case .installing:
+                    ProgressView().controlSize(.small)
+                    Text("安装中,即将重启…").font(.caption).foregroundStyle(.secondary)
+                case .failed(let msg):
+                    Text(msg).font(.caption).foregroundStyle(Theme.Status.error)
+                        .lineLimit(2).truncationMode(.middle)
+                    Button("重试") { updater.check() }
+                }
+            }
+        }
+        Text("从 GitHub Releases 获取最新版并原地替换;终端都活在 tmux 里,重启不丢会话。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 }
 
