@@ -78,6 +78,30 @@ final class ConnectionSession: Identifiable {
     @ObservationIgnored private var finishedResetTask: Task<Void, Never>?
     /// Seconds of no %output after which an output burst counts as finished.
     static let outputIdleGap: Double = 1.2
+    /// When the current output burst began — burst-finished notifications require a minimum duration
+    /// so a short prompt echo doesn't ping the user.
+    @ObservationIgnored private var burstStartedAt: Date?
+    /// The dsh-style "reported" bit: a background terminal posts at most ONE completion notification
+    /// until the user views it again (cleared in `markViewed`), so a chatty agent that pauses between
+    /// bursts can't spam Notification Center.
+    @ObservationIgnored private(set) var notifiedSinceViewed = false
+    /// A burst shorter than this never posts a system notification (still plays the sidebar effect).
+    static let notifyMinBurstSeconds: Double = 5
+
+    // MARK: Shell integration (OSC 133)
+
+    /// The shell's integration-reported phase (`~/.tfa/shell-integration.sh`): precise at-prompt /
+    /// running signal, replacing the activity heuristic when known. `.unknown` without integration.
+    private(set) var shellPhase: ShellPhase = .unknown
+    /// Exit code of the last finished foreground command (integration shells only).
+    private(set) var lastCommandExit: Int?
+    /// The command line reported by the private 7770 mark (zsh preexec) — pairs with the next D.
+    @ObservationIgnored private var lastCommandText: String?
+    /// Invoked when an integration shell finishes a foreground command — with its exit code (when
+    /// parseable), duration, and whether the terminal was being viewed. AppModel notifies for long
+    /// background commands.
+    @ObservationIgnored var onCommandFinished: ((_ exit: Int?, _ seconds: Double, _ wasViewing: Bool) -> Void)?
+    @ObservationIgnored private var shellScanner = ShellIntegrationScanner()
 
     /// Invoked on the main actor ONLY when the connection is finalized as gone (set by AppModel) —
     /// i.e. after reconnect was either impossible or exhausted. Drives sidebar removal + the toast.
@@ -156,6 +180,13 @@ final class ConnectionSession: Identifiable {
         return nil
     }
 
+    /// The active pane's most recent text (visible screen + a little history) — dispatch uses it to
+    /// verify a sent line actually echoed in the terminal. Empty when not connected.
+    func recentText(lines: Int = 40) async -> String {
+        guard let pane = controller.primaryPane?.id else { return "" }
+        return await controller.capturePaneText(pane, historyLines: lines)
+    }
+
     /// Launch-stable key for persisting group membership across relaunch (session name, plus host
     /// for ssh). Used by `AppModel`'s session groups.
     var groupKey: String {
@@ -208,6 +239,7 @@ final class ConnectionSession: Identifiable {
             // Flag background activity (idempotent — only mutate on a real change to avoid churn).
             if !self.isViewing, !self.hasUnseenOutput { self.hasUnseenOutput = true }
             self.scanForAttention(data) // bell / OSC 9·777·99 → "needs you" (background only)
+            self.scanShellMarks(data)   // OSC 133 → precise at-prompt/running + command exit codes
             self.noteOutputActivity()
         }
         controller.onPaneRemoved = { [weak self] paneID in
@@ -228,7 +260,37 @@ final class ConnectionSession: Identifiable {
         isViewing = true
         if hasUnseenOutput { hasUnseenOutput = false }
         if needsAttention { needsAttention = false; attentionMessage = nil } // looking at it = handled
+        notifiedSinceViewed = false // viewing re-arms the (at most one) completion notification
     }
+
+    /// Consume shell-integration marks from a raw output chunk (always on — unlike the attention
+    /// scanner this must track phase even while viewed, since dispatch reads it). Finished commands
+    /// are appended to the terminal's ProcessLog (its「过程记录」timeline).
+    private func scanShellMarks(_ data: Data) {
+        for event in shellScanner.scan(data) {
+            switch event {
+            case .prompt:
+                shellPhase = .atPrompt
+            case .commandStart:
+                shellPhase = .running(since: Date())
+                lastCommandText = nil // the 7770 text for THIS command follows immediately
+            case .commandText(let text):
+                lastCommandText = text
+            case .commandEnd(let exit):
+                lastCommandExit = exit
+                if case .running(let since) = shellPhase {
+                    let seconds = Date().timeIntervalSince(since)
+                    ProcessLog.append(stableID, ProcessEvent(
+                        at: Date(), kind: "command", text: lastCommandText, exit: exit, seconds: seconds))
+                    onCommandFinished?(exit, seconds, isViewing)
+                }
+                // The A mark that follows settles the phase at the prompt.
+            }
+        }
+    }
+
+    /// Mark that a completion notification was posted — suppresses further ones until viewed.
+    func noteNotified() { notifiedSinceViewed = true }
 
     /// Scan a chunk of raw pane output for an attention signal: a terminal BELL (0x07) or an
     /// OSC 9 / OSC 777 / OSC 99 notification (`ESC ] <code> ; … (BEL|ST)`). Agents (Claude Code, Codex,
@@ -299,6 +361,7 @@ final class ConnectionSession: Identifiable {
             attnPendingOSC = false; attnCarry = []
             needsAttention = true
             attentionMessage = message
+            ProcessLog.append(stableID, ProcessEvent(at: Date(), kind: "attention", text: message))
             onNeedsAttention?(message)
         }
     }
@@ -334,13 +397,17 @@ final class ConnectionSession: Identifiable {
         guard !isViewing, !needsAttention else { return }
         needsAttention = true
         attentionMessage = message
+        ProcessLog.append(stableID, ProcessEvent(at: Date(), kind: "attention", text: message))
         onNeedsAttention?(message)
     }
 
     /// Called for every %output batch: enter the streaming phase and (re)arm the idle timer. When the
     /// timer fires (no output for `outputIdleGap`), the burst is finished → effect + notification hook.
     private func noteOutputActivity() {
-        if outputPhase != .streaming { outputPhase = .streaming }
+        if outputPhase != .streaming {
+            outputPhase = .streaming
+            burstStartedAt = Date()
+        }
         finishedResetTask?.cancel(); finishedResetTask = nil
         outputIdleTask?.cancel()
         outputIdleTask = Task { @MainActor in
@@ -349,6 +416,9 @@ final class ConnectionSession: Identifiable {
             self.outputFinished()
         }
     }
+
+    /// Seconds the just-finished (or current) burst has been running; 0 when none.
+    var burstSeconds: Double { burstStartedAt.map { Date().timeIntervalSince($0) } ?? 0 }
 
     private func outputFinished() {
         guard outputPhase == .streaming, !intentionalClose else { return }
@@ -374,6 +444,7 @@ final class ConnectionSession: Identifiable {
             isClosed = false
             applyEnvironment(freshCreate: freshCreate)
             hasEverConnected = true
+            ProcessLog.append(stableID, ProcessEvent(at: Date(), kind: "connected"))
             // Restored AI session: resume the real conversation once the fresh shell is up.
             if freshCreate, let cmd = restoreCommand, !restoreCommandSent {
                 restoreCommandSent = true
@@ -491,6 +562,7 @@ final class ConnectionSession: Identifiable {
         if connectError == nil {
             connectError = "Disconnected — the tmux session ended or is unreachable."
         }
+        ProcessLog.append(stableID, ProcessEvent(at: Date(), kind: "closed"))
         onClosed?()
     }
 

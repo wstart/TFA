@@ -22,9 +22,13 @@ protocol DispatchTerminal: AnyObject {
     var isConnected: Bool { get }
     /// 正在产出输出(此刻输入会被吞)— 派发只在空闲时落键。
     var isBusy: Bool { get }
+    /// 前台命令名(tmux pane_current_command)— 用来判断目标是不是裸 shell(没跑 agent)。
+    var currentCommand: String { get }
     func ensureConnected()
     func sendLine(_ line: String)
     func raiseAttention(message: String)
+    /// 最近的 pane 文本(送达验证:派发后在里面找任务短 id 的回显)。
+    func recentOutput() async -> String
 }
 
 @MainActor
@@ -48,6 +52,13 @@ final class DispatchCenter {
     private(set) var pendingLines: [(key: String, line: String)] = []
     /// 已经为「等待人」状态亮过铃铛的任务 — 入态只触发一次,离态复位。
     private(set) var surfacedAttention: Set<UUID> = []
+    /// 本进程内见过的终端(agentKey)。「终端死亡观察」只报告曾经见过的 — 首次观察不报警
+    /// (启动时终端列表是渐进填充的,冷启动一屏都"消失"是假象)。
+    private var seenAgents: Set<String> = []
+    /// 送达验证前的等待(给终端回显留时间);测试注入 0。
+    var deliveryCheckDelayNs: UInt64 = 2_000_000_000
+    /// 派发目标是这些前台命令时 = 裸 shell 没跑 agent,指令会被 shell 原样执行 → 暂缓排队。
+    static let plainShells: Set<String> = ["zsh", "bash", "fish", "sh", "dash", "tcsh", "csh", "ksh"]
 
     init(board: DispatchBoard) {
         self.board = board
@@ -79,7 +90,12 @@ final class DispatchCenter {
 
     // MARK: - 心跳(主循环每 tick 调一次)
 
-    /// ① 终端转闲 → 补发排队任务;② flush 排队行;③ 看板等待状态 → attention。
+    /// 目标可以落键:已连接、不忙、且前台在跑 agent(裸 shell 会把指令当命令执行 → 不算就绪)。
+    private static func ready(_ t: any DispatchTerminal) -> Bool {
+        t.isConnected && !t.isBusy && !plainShells.contains(t.currentCommand.lowercased())
+    }
+
+    /// ① 终端转闲 → 补发排队任务;② flush 排队行;③ 看板等待状态 → attention;④ 终端死亡观察。
     func tick() {
         for (taskID, agentID) in Array(pendingDispatch) {
             guard board.allTasks.contains(where: { $0.id == taskID }) else {
@@ -88,16 +104,33 @@ final class DispatchCenter {
             }
             let key = String(agentID.dropFirst("tfa:".count))
             guard let t = terminal(forKey: key) else { continue } // 终端暂时不在(关了/未发现)→ 留队
-            if t.isConnected, !t.isBusy { attemptDispatch(taskID, to: agentID, queueIfBusy: false) }
+            if Self.ready(t) { attemptDispatch(taskID, to: agentID, queueIfBusy: false) }
         }
         for i in pendingLines.indices.reversed() {
             let p = pendingLines[i]
-            if let t = terminal(forKey: p.key), t.isConnected, !t.isBusy {
+            if let t = terminal(forKey: p.key), Self.ready(t) {
                 t.sendLine(p.line)
                 pendingLines.remove(at: i)
             }
         }
         reconcileAttention()
+        observeVanishedTerminals()
+    }
+
+    /// 终端死亡观察(dsh:「TFA 观察到的事实」也要进 timeline):一个本进程见过的终端从列表里
+    /// 消失,而它名下还有「进行中」任务 → 看板记录一次。只报告见过的(首次观察不报警 —— 启动时
+    /// 列表渐进填充,冷启动的"消失"是假象);报告后即从 seen 移除,不会每 tick 重复。
+    private func observeVanishedTerminals() {
+        let current = Set(terminals().map(\.agentKey))
+        for gone in seenAgents.subtracting(current) {
+            let agentID = "tfa:\(gone)"
+            for t in board.allTasks where t.assignee == agentID && t.status == .doing {
+                board.addComment(t.id, by: "TFA",
+                                 text: "TFA 观察:执行终端已关闭/被移除,任务仍在「进行中」— 请检查结果或重新派发",
+                                 kind: "note")
+            }
+        }
+        seenAgents = current
     }
 
     // MARK: - internals
@@ -120,10 +153,13 @@ final class DispatchCenter {
             return
         }
         t.ensureConnected() // 幂等 — dormant 占位则现在开始连
-        if !t.isConnected || t.isBusy {
+        if !Self.ready(t) {
             if queueIfBusy, pendingDispatch[taskID] == nil {
                 pendingDispatch[taskID] = agentID
-                let why = t.isConnected ? "终端忙" : "终端连接中"
+                let why: String
+                if !t.isConnected { why = "终端连接中" }
+                else if t.isBusy { why = "终端忙" }
+                else { why = "目标没在跑 AI agent(前台:\(t.currentCommand))" } // 裸 shell 会把指令当命令执行
                 board.addComment(taskID, by: "TFA", text: "\(why),已排队 — 就绪后自动派发给 \(name)", kind: "note")
             }
             return
@@ -132,16 +168,34 @@ final class DispatchCenter {
         guard let task = board.allTasks.first(where: { $0.id == taskID }) else { return }
         t.sendLine(Self.dispatchLine(task))
         board.addComment(taskID, by: "TFA", text: "已派发给 \(name)", kind: "note")
+        verifyDelivery(taskID, terminal: t, name: name)
+    }
+
+    /// 送达验证(dsh:「已派发」≠「已送达」):落键后稍等,capture 目标 pane 找任务短 id 的回显;
+    /// 找不到就在看板响亮记录,而不是让「已派发」成为谎言。只告警,不改任务状态。
+    private func verifyDelivery(_ taskID: UUID, terminal: any DispatchTerminal, name: String) {
+        let short = String(taskID.uuidString.lowercased().prefix(8))
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: self.deliveryCheckDelayNs)
+            let text = await terminal.recentOutput()
+            guard self.board.allTasks.contains(where: { $0.id == taskID }) else { return }
+            if !text.contains("#\(short)") {
+                self.board.addComment(taskID, by: "TFA",
+                                      text: "⚠️ 派发后未在「\(name)」看到任务指令回显 — 可能被前台程序吞掉,请检查该终端,必要时重新派发",
+                                      kind: "note")
+            }
+        }
     }
 
     private func sendOrQueueLine(_ key: String, _ line: String) {
         guard let t = terminal(forKey: key) else { return }
         guard t.isLocal else { return } // 远程终端不推送(同派发硬门)
-        if !t.isConnected || t.isBusy {
+        if Self.ready(t) {
+            t.sendLine(line)
+        } else {
             pendingLines.append((key, line))
             t.ensureConnected()
-        } else {
-            t.sendLine(line)
         }
     }
 
@@ -202,7 +256,9 @@ final class TerminalAgentAdapter: DispatchTerminal {
     var isLocal: Bool { conn.host == nil }
     var isConnected: Bool { conn.state.connected }
     var isBusy: Bool { model.isWorking(conn) }
+    var currentCommand: String { conn.subtitle }
     func ensureConnected() { model.ensureConnected(conn.id) }
     func sendLine(_ line: String) { conn.sendLine(line) }
     func raiseAttention(message: String) { conn.raiseAttention(message: message) }
+    func recentOutput() async -> String { await conn.recentText() }
 }

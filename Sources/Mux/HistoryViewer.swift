@@ -137,30 +137,37 @@ struct HistoryViewerSheet: View {
     @State private var terminal: HistoryTerminal?
     @State private var loading = true
     @State private var empty = false
+    /// 「屏幕快照」= 只读终端(scrollback 抓取);「过程记录」= ProcessLog 时间线(dsh 式事件投影)。
+    @State private var mode: Mode = .snapshot
+    enum Mode: Hashable { case snapshot, timeline }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            ZStack {
-                Theme.terminalBackground
-                if let terminal {
-                    HistoryTerminalView(terminal: terminal)
-                }
-                if loading {
-                    ProgressView("正在读取历史…")
-                        .controlSize(.small)
-                        .padding(Theme.Space.lg)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
-                } else if empty {
-                    Text("这个终端还没有可显示的历史。")
-                        .font(Theme.Font.emptyBody)
-                        .foregroundStyle(.secondary)
+            if mode == .timeline {
+                ProcessTimelineView(stableID: connection.stableID)
+            } else {
+                ZStack {
+                    Theme.terminalBackground
+                    if let terminal {
+                        HistoryTerminalView(terminal: terminal)
+                    }
+                    if loading {
+                        ProgressView("正在读取历史…")
+                            .controlSize(.small)
+                            .padding(Theme.Space.lg)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+                    } else if empty {
+                        Text("这个终端还没有可显示的历史。")
+                            .font(Theme.Font.emptyBody)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
         .frame(minWidth: 820, idealWidth: 1040, minHeight: 540, idealHeight: 720)
-        .background(Theme.terminalBackground)
+        .background(mode == .timeline ? Theme.canvas : Theme.terminalBackground)
         .onExitCommand { appModel.closeHistoryViewer() }
         .task { await load() }
     }
@@ -171,8 +178,13 @@ struct HistoryViewerSheet: View {
             Text("历史 · \(connection.title)")
                 .font(Theme.Font.headerTitle)
                 .lineLimit(1)
+            Picker("", selection: $mode) {
+                Text("屏幕快照").tag(Mode.snapshot)
+                Text("过程记录").tag(Mode.timeline)
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
             Spacer(minLength: Theme.Space.md)
-            Text("滚轮 / 拖选 上翻 · Esc 关闭")
+            Text(mode == .snapshot ? "滚轮 / 拖选 上翻 · Esc 关闭" : "命令 · 退出码 · 耗时 · Esc 关闭")
                 .font(Theme.Font.headerMeta)
                 .foregroundStyle(.secondary)
             Button { appModel.closeHistoryViewer() } label: {
@@ -200,4 +212,116 @@ struct HistoryViewerSheet: View {
             term.load(data)
         }
     }
+}
+
+/// 「过程记录」时间线:该终端 ProcessLog 的只读投影(最新在上)。命令行 = 等宽 + 退出码着色;
+/// attention = 琥珀铃;连接/断开 = 安静的灰。数据只在打开时读一次(文件小,同步读)。
+private struct ProcessTimelineView: View {
+    let stableID: String
+    @State private var events: [ProcessEvent] = []
+    @State private var loaded = false
+
+    var body: some View {
+        Group {
+            if !loaded {
+                Color.clear
+            } else if events.isEmpty {
+                ContentUnavailableView("还没有过程记录", systemImage: "list.bullet.rectangle",
+                    description: Text("命令级记录需要 Shell 集成(设置 ⌘, → Shell 集成);\nattention 和连接事件会自动记录。"))
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: Theme.Space.xs) {
+                        ForEach(Array(events.enumerated()), id: \.offset) { _, e in
+                            row(e)
+                        }
+                    }
+                    .padding(Theme.Space.lg)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.canvas)
+        .onAppear {
+            guard !loaded else { return }
+            events = ProcessLog.load(stableID).reversed() // 最新在上
+            loaded = true
+        }
+    }
+
+    @ViewBuilder private func row(_ e: ProcessEvent) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.Space.md) {
+            Text(Self.time.string(from: e.at))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(Theme.textTertiary)
+                .frame(width: 96, alignment: .leading)
+            icon(e)
+                .frame(width: 16)
+            content(e)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .padding(.vertical, Theme.Space.sm)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.sm).stroke(Theme.border, lineWidth: 1))
+    }
+
+    @ViewBuilder private func icon(_ e: ProcessEvent) -> some View {
+        switch e.kind {
+        case "command":
+            let failed = (e.exit ?? 0) != 0
+            Image(systemName: failed ? "xmark.circle.fill" : "checkmark.circle.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(failed ? Theme.Status.error : Theme.Status.positive)
+        case "attention":
+            Image(systemName: "bell.fill").font(.system(size: 11)).foregroundStyle(Theme.Status.attention)
+        case "connected":
+            Image(systemName: "link").font(.system(size: 11)).foregroundStyle(Theme.Status.neutral)
+        case "closed":
+            Image(systemName: "link.badge.plus").font(.system(size: 11)).foregroundStyle(Theme.Status.neutral)
+                .symbolRenderingMode(.monochrome)
+        default:
+            Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(Theme.Status.neutral)
+        }
+    }
+
+    @ViewBuilder private func content(_ e: ProcessEvent) -> some View {
+        switch e.kind {
+        case "command":
+            HStack(spacing: Theme.Space.md) {
+                Text(e.text ?? "命令")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("\(e.exit.map { "exit \($0)" } ?? "exit ?") · \(Self.duration(e.seconds ?? 0))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(Theme.textTertiary)
+            }
+        case "attention":
+            Text(e.text?.isEmpty == false ? e.text! : "需要你的关注")
+                .font(.callout)
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(2)
+        case "connected":
+            Text("已连接").font(.callout).foregroundStyle(Theme.textTertiary)
+        case "closed":
+            Text("连接断开 / 会话结束").font(.callout).foregroundStyle(Theme.textTertiary)
+        default:
+            Text(e.text ?? e.kind).font(.callout).foregroundStyle(Theme.textTertiary)
+        }
+    }
+
+    private static func duration(_ s: Double) -> String {
+        let t = Int(s)
+        if t >= 3600 { return "\(t / 3600)时\((t % 3600) / 60)分" }
+        if t >= 60 { return "\(t / 60)分\(t % 60)秒" }
+        if t >= 1 { return "\(t)秒" }
+        return "<1秒"
+    }
+
+    private static let time: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm:ss"
+        return f
+    }()
 }

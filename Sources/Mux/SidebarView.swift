@@ -541,12 +541,8 @@ private struct TerminalRow: View {
         let status = TerminalStatus.of(conn)
         let showDot = conn.hasUnseenOutput && !isSelected
         HStack(spacing: Theme.Space.md) {
-            // Reserve a thin left "rail" on every row (clear when idle) so an accent appears without
-            // shifting the layout: amber = needs you, brand = actively working.
-            Capsule().fill(attention ? Self.amber : (working ? Theme.brand : Color.clear))
-                .frame(width: 2.5)
-                .frame(maxHeight: .infinity)
-
+            // ONE primary signal per row (dsh discipline): the icon tint + the single right-side
+            // glyph carry the state; no left rail, no colored subtitles duplicating them.
             Image(systemName: "terminal.fill")
                 .foregroundStyle(attention ? Self.amber : (working || status == .connected ? Theme.brand : Color.secondary))
             VStack(alignment: .leading, spacing: Theme.Space.xxs) {
@@ -602,9 +598,10 @@ private struct TerminalRow: View {
                 .foregroundStyle(Self.amber)
                 .lineLimit(1)
         } else if working, let line = liveLine, !line.isEmpty {
+            // Content changes, color stays quiet — the icon/equalizer already say "working".
             Text(line)
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(Theme.brand.opacity(0.9))
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
         } else if status == .dormant {

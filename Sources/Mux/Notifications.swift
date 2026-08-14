@@ -29,6 +29,27 @@ enum NotificationManager {
         UNUserNotificationCenter.current().add(request)
     }
 
+    /// Post a precise command-finished notification (shell integration / OSC 133): carries the exit
+    /// code and duration, e.g. "✓ 完成(exit 0 · 2分13秒)" — only for long background commands.
+    static func commandFinished(terminal: String, exit: Int?, seconds: Double) {
+        guard available else { return }
+        let content = UNMutableNotificationContent()
+        content.title = terminal
+        let mark = (exit ?? 0) == 0 ? "✓ 完成" : "✗ 失败"
+        let code = exit.map { "exit \($0)" } ?? "exit ?"
+        content.body = "\(mark)(\(code) · \(Self.duration(seconds)))"
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    private static func duration(_ s: Double) -> String {
+        let t = Int(s)
+        if t >= 3600 { return "\(t / 3600)时\((t % 3600) / 60)分" }
+        if t >= 60 { return "\(t / 60)分\(t % 60)秒" }
+        return "\(t)秒"
+    }
+
     /// Post a "<terminal> 需要你的关注" notification — an agent rang the bell / sent an OSC notification
     /// while in the background (it finished and is waiting). Carries the message text when present.
     static func needsAttention(terminal: String, message: String?) {

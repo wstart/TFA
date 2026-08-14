@@ -39,6 +39,10 @@ private struct GeneralSettingsPane: View {
                 UpdateRow()
             }
 
+            Section("Shell 集成 / Shell Integration") {
+                ShellIntegrationRow()
+            }
+
             Section("终端 / Terminal") {
                 LabeledContent("字号") {
                     HStack(spacing: Theme.Space.sm) {
@@ -109,6 +113,54 @@ private struct UpdateRow: View {
         Text("从 GitHub Releases 获取最新版并原地替换;终端都活在 tmux 里,重启不丢会话。")
             .font(.caption)
             .foregroundStyle(.secondary)
+    }
+}
+
+/// 「安装 Shell 集成」行:往 ~/.zshrc 幂等追加一行 source(脚本本体 ~/.tfa/shell-integration.sh
+/// 由 TFA 每次启动生成)。装上后 TFA 通过 OSC 133 精确知道 shell 在提示符还是在跑命令、以及每条
+/// 命令的退出码——侧栏忙闲、任务派发时机、后台命令完成通知都因此从「猜」变「知道」。
+private struct ShellIntegrationRow: View {
+    @State private var installed = ShellIntegrationInstall.isInstalled
+
+    var body: some View {
+        LabeledContent("精确的忙 / 闲与退出码") {
+            HStack(spacing: Theme.Space.md) {
+                if installed {
+                    Text("已安装到 ~/.zshrc").font(.caption).foregroundStyle(Theme.Status.positive)
+                } else {
+                    Button("安装到 ~/.zshrc") {
+                        ShellIntegrationInstall.install()
+                        installed = ShellIntegrationInstall.isInstalled
+                    }
+                }
+            }
+        }
+        Text(installed
+             ? "对新开的 shell 生效(已在跑的终端重启 shell 后生效)。移除:删掉 ~/.zshrc 里「# TFA shell integration」及其下一行。"
+             : "往 ~/.zshrc 追加一行 source(~/.tfa/shell-integration.sh,OSC 133 标记)。TFA 由此精确判断终端忙 / 闲、后台命令完成时通知并带退出码。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+}
+
+/// ~/.zshrc 的幂等安装器(独立小类型,便于测试与复用)。
+enum ShellIntegrationInstall {
+    static let marker = "# TFA shell integration"
+    static var zshrcURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".zshrc")
+    }
+
+    static var isInstalled: Bool {
+        (try? String(contentsOf: zshrcURL, encoding: .utf8))?.contains(marker) ?? false
+    }
+
+    /// Append the source line once (idempotent). Creates ~/.zshrc if missing.
+    static func install() {
+        guard !isInstalled else { return }
+        let existing = (try? String(contentsOf: zshrcURL, encoding: .utf8)) ?? ""
+        let sep = existing.isEmpty || existing.hasSuffix("\n") ? "" : "\n"
+        let block = "\(sep)\n\(marker)\n[ -f ~/.tfa/shell-integration.sh ] && source ~/.tfa/shell-integration.sh\n"
+        try? (existing + block).write(to: zshrcURL, atomically: true, encoding: .utf8)
     }
 }
 

@@ -145,6 +145,7 @@ final class AppModel {
         loadIdentities()
         loadGroups()
         loadTunnels()
+        loadCloudflaredTunnels()
         tunnelRunner.passwordFor = { [weak self] (id: UUID) in self?.hostPasswords["tunnel:\(id.uuidString)"] }
         loadHosts()
         loadEnvironments()
@@ -290,9 +291,23 @@ final class AppModel {
             }
             // Output-finished system notification — BACKGROUND terminals only (if you're viewing it,
             // you're already watching, so we don't interrupt). The in-app row effect fires for all.
+            // Two gates (dsh lessons): a minimum burst duration, so a short prompt echo never pings;
+            // and at most ONE notification until the terminal is viewed again (`notifiedSinceViewed`),
+            // so an agent that pauses between output bursts can't spam Notification Center.
             conn.onOutputFinished = { [weak conn] wasViewing in
-                guard let conn, !wasViewing else { return }
+                guard let conn, !wasViewing, !conn.notifiedSinceViewed,
+                      conn.burstSeconds >= ConnectionSession.notifyMinBurstSeconds else { return }
+                conn.noteNotified()
                 NotificationManager.outputFinished(terminal: conn.title)
+            }
+            // Shell integration (OSC 133): a long foreground command in a BACKGROUND shell finished —
+            // notify with its exit code. Shares the same once-until-viewed bit as the burst path
+            // (whichever fires first wins; the other stays quiet).
+            conn.onCommandFinished = { [weak conn] exit, seconds, wasViewing in
+                guard let conn, !wasViewing, !conn.notifiedSinceViewed,
+                      seconds >= Self.commandNotifyMinSeconds else { return }
+                conn.noteNotified()
+                NotificationManager.commandFinished(terminal: conn.title, exit: exit, seconds: seconds)
             }
             // An agent explicitly pinged (bell / OSC notification) while in the background → a stronger,
             // separate system notification carrying the message, so "it needs you" stands out from the
@@ -469,7 +484,23 @@ final class AppModel {
     /// True while a (local) terminal is actively producing output — sending keystrokes then would be
     /// swallowed; idle (sitting at a prompt / agent awaiting input) is safe to dispatch into. Single
     /// source of truth shared by the sidebar effects, the board cards, and dispatch.
+    /// A background shell command must run at least this long for its finish to notify (OSC 133 path).
+    static let commandNotifyMinSeconds: Double = 10
+
     func isWorking(_ conn: ConnectionSession) -> Bool {
+        // Shell integration (OSC 133) gives PRECISE answers where the activity heuristic guesses:
+        // at-prompt = idle even if output flowed seconds ago; a running non-AI foreground command =
+        // busy even while silent (a quiet compile must not get dispatch keystrokes). A running AI
+        // TUI (claude/codex) still falls through to the heuristic — the tool being open doesn't
+        // mean it's mid-turn (its own prompt accepts input).
+        switch conn.shellPhase {
+        case .atPrompt:
+            return false
+        case .running:
+            if !isAITerminal(command: conn.subtitle, cwd: nil) { return true }
+        case .unknown:
+            break
+        }
         if conn.host == nil { return activity.isWorking(name: conn.groupKey) || conn.outputPhase == .streaming }
         return conn.outputPhase == .streaming
     }
@@ -880,9 +911,57 @@ final class AppModel {
     }
 
     /// Launch-time: bring up every tunnel whose switch was left on. Called after Keychain passwords
-    /// have loaded (askpass needs them).
+    /// have loaded (askpass needs them; cloudflared needs nothing but shares the timing).
     private func autoStartTunnels() {
         for t in sshTunnels where t.enabled { tunnelRunner.start(t) }
+        for t in cloudflaredTunnels where t.enabled { cloudflaredRunner.start(t) }
+    }
+
+    // MARK: - Cloudflare 公网隧道(cloudflared quick tunnel)
+
+    /// 公网隧道(`cloudflared tunnel --url`)。配置持久化在 UserDefaults(无凭据);runner 管
+    /// 进程 + 重连 + 从日志解析公网地址;UI 观察 `cloudflaredTunnels` + `cloudflaredRunner`。
+    let cloudflaredRunner = CloudflaredRunner()
+    private static let cfTunnelsKey = "cloudflaredTunnels.v1"
+    private(set) var cloudflaredTunnels: [CloudflaredTunnel] = [] {
+        didSet { persistCloudflaredTunnels() }
+    }
+
+    func loadCloudflaredTunnels() {
+        guard let data = UserDefaults.standard.data(forKey: Self.cfTunnelsKey),
+              let decoded = try? JSONDecoder().decode([CloudflaredTunnel].self, from: data) else { return }
+        cloudflaredTunnels = decoded
+    }
+    private func persistCloudflaredTunnels() {
+        if let data = try? JSONEncoder().encode(cloudflaredTunnels) {
+            UserDefaults.standard.set(data, forKey: Self.cfTunnelsKey)
+        }
+    }
+
+    /// Create + (new tunnels default enabled) immediately start a public tunnel.
+    func addCloudflaredTunnel(name: String, localPort: Int) {
+        let t = CloudflaredTunnel(name: name, localPort: localPort, enabled: true)
+        cloudflaredTunnels.append(t)
+        cloudflaredRunner.start(t)
+    }
+
+    /// Apply edits; restarts if enabled (the public URL changes on restart).
+    func updateCloudflaredTunnel(_ t: CloudflaredTunnel) {
+        guard let i = cloudflaredTunnels.firstIndex(where: { $0.id == t.id }) else { return }
+        cloudflaredTunnels[i] = t
+        if t.enabled { cloudflaredRunner.restart(t) } else { cloudflaredRunner.stop(t.id) }
+    }
+
+    func removeCloudflaredTunnel(_ t: CloudflaredTunnel) {
+        cloudflaredRunner.stop(t.id)
+        cloudflaredTunnels.removeAll { $0.id == t.id }
+    }
+
+    /// Flip a public tunnel's remembered on/off switch and start/stop it accordingly.
+    func setCloudflaredEnabled(_ t: CloudflaredTunnel, _ on: Bool) {
+        guard let i = cloudflaredTunnels.firstIndex(where: { $0.id == t.id }) else { return }
+        cloudflaredTunnels[i].enabled = on
+        if on { cloudflaredRunner.start(cloudflaredTunnels[i]) } else { cloudflaredRunner.stop(t.id) }
     }
 
     /// Set when the Keychain read failed but an encrypted local backup is available — drives a
@@ -1369,6 +1448,7 @@ final class AppModel {
     func shutdown() {
         snapshotMetadataNow() // freshen the roster (cwd/command) so a clean quit restores accurately
         tunnelRunner.stopAll() // terminate ssh -R children so they don't orphan
+        cloudflaredRunner.stopAll() // …and cloudflared children likewise
         for conn in connections { conn.disconnect() }
         connections.removeAll()
     }

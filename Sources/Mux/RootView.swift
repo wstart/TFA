@@ -158,6 +158,9 @@ private struct SidebarDivider: View {
 private struct ActiveTerminalHeader: View {
     @Environment(AppModel.self) private var appModel
     let connection: ConnectionSession?
+    /// Grid chip visibility: shown for a few seconds after the grid actually changes, then fades.
+    @State private var showGrid = false
+    @State private var gridHideTask: Task<Void, Never>?
 
     var body: some View {
         HStack(spacing: Theme.Space.md) {
@@ -177,7 +180,9 @@ private struct ActiveTerminalHeader: View {
                     .layoutPriority(1)
 
                 if let host = conn.host { metaChip("network", host) }
-                if let g = conn.grid { metaChip("squareshape.split.2x2", "\(g.cols)×\(g.rows)") }
+                // Grid size only matters while it's changing — surface it briefly after a resize
+                // instead of announcing a constant nobody reads (dsh: on-demand, don't announce).
+                if let g = conn.grid, showGrid { metaChip("squareshape.split.2x2", "\(g.cols)×\(g.rows)") }
 
                 if let path = conn.currentPath { pathChip(displayPath(path, remote: conn.host != nil)) }
 
@@ -213,6 +218,21 @@ private struct ActiveTerminalHeader: View {
         .padding(.vertical, Theme.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.canvas)
+        .onChange(of: gridText) { _, new in
+            guard new != nil else { showGrid = false; return }
+            withAnimation(.easeInOut(duration: 0.15)) { showGrid = true }
+            gridHideTask?.cancel()
+            gridHideTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeInOut(duration: 0.3)) { showGrid = false }
+            }
+        }
+    }
+
+    /// The grid as a compare-friendly string (tuples aren't Equatable for onChange); nil = no grid.
+    private var gridText: String? {
+        connection?.grid.map { "\($0.cols)×\($0.rows)" }
     }
 
     /// The active pane's working directory, rendered as a flexible middle-truncating chip — the
