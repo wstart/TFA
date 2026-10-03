@@ -22,6 +22,15 @@ TFA 不是另写一个多路复用器，而是封装真实的 tmux：通过 tmux
 
 ## ✨ 核心理念
 
+### 项目工作区与 Agent 协作
+
+- 侧栏项目选择器旁的文件夹按钮管理工作区：添加项目目录、关联已有终端、编辑项目规则。选择项目后过滤终端与任务，新会话默认从该目录启动；选择「全部项目」查看全部内容。
+- 「待处理」入口汇总全部项目的终端错误、关注请求、待回复与受阻任务、等待派发队列，支持直达终端和回复。
+- 新建会话可选择普通终端、Codex 或 Claude Code；未检测到对应 CLI 时显示提示。
+- 在工作区管理中可为终端绑定 Codex 会话 UUID。未绑定时恢复打开会话选择器，避免同目录多个 Agent 恢复错对话。
+- Skills 显示来源和同名提示；Codex 同时读取个人与共享目录。依赖默认标为「未检测」，不代表全部外部服务已经配置。
+- 规则与 Skills 的未保存草稿在工具切换期间留在内存，正常退出会检查；强制结束进程无法保证保留草稿。
+
 - **一个终端 = 一个 tmux 会话**，每个终端有自己独立的 `tmux -CC` 连接，各自实时流动；切换
   只是换显示，不需要 `switch-client`。
 - **封装而非重写**：所有终端能力来自真实 tmux，TFA 只做可视化与管理。
@@ -42,7 +51,7 @@ TFA 不是另写一个多路复用器，而是封装真实的 tmux：通过 tmux
 - **退出保活**：退出 app 只 detach、不杀会话，下次启动恢复。
 - **会话持久化（重启 / `tmux kill-server` 后恢复对话）**：把每个本地终端的会话清单 + scrollback 定期存进
   SQLite（`~/.tfa/sessions.db`，按 `@tfa_id` 关联）。整机重启后 tmux 服务器清空,启动时把丢失的会话**重建为休眠占位**
-  （同名 → 同 `@tfa_id` → 环境变量/分组/看板指派自动回连、`cd` 回原目录）;**AI 终端首次打开自动 `claude --continue` 续接对话**,
+  （同名 → 同 `@tfa_id` → 环境变量/分组/看板指派自动回连、`cd` 回原目录）;**AI 终端首次打开进入恢复流程**（Claude Code: `claude --continue`；Codex: 恢复绑定 UUID，未绑定则打开会话选择器）,
   普通终端回放历史文本。保存:开机基线 + 每小时 + 优雅退出完整快照。
 - **每会话环境变量**：右键终端 →「环境变量…」为该会话单独设置环境变量（tmux `set-environment`），
   持久化、(重)连接时自动注入。可「保存并重启 shell」或右键「重启 session」让当前 shell 立即生效；
@@ -95,7 +104,7 @@ TFA 不是另写一个多路复用器，而是封装真实的 tmux：通过 tmux
 - **任务看板（Kanban）**：把任务当 issue **指派给一个终端「agent」并派发**——一行指令发进它的 tmux 会话让 agent 开干；
   卡片显示该终端的实时状态与**执行记录时间线**（步骤 / 提问 / 受阻，最新在上）。看板是**共享 SQLite**
   （`~/.tfa/board.db`），TFA、`tfa-task` CLI、各终端里的 agent 可并发读写、实时刷新。配套 **`tfa-task` 命令行 +
-  `tfa-task` skill**（启动自动装到 `~/.tfa/bin` 与 `~/.claude/skills`）让 agent **注册 / 认领 / 逐步回报 / 提问 /
+  `tfa-task` skill**（启动自动装到 `~/.tfa/bin`、`~/.claude/skills` 与 `~/.codex/skills`）让 agent **注册 / 认领 / 逐步回报 / 提问 /
   受阻 / 完成**。支持**按状态 / 按终端**分组、**待接管**标黄、详情**回复推送到终端**、派发遇忙**排队**空闲自动发。
   派发是可靠的:**送达验证**(派发后核对终端回显,吞键即告警)、**shell 目标闸门**(目标没跑 agent 时暂缓,启动后自动补发)、
   **终端死亡观察**(执行中任务的终端被关会记录在案)。
@@ -104,9 +113,9 @@ TFA 不是另写一个多路复用器，而是封装真实的 tmux：通过 tmux
   **断线指数退避自动重连**、**GatewayPorts(允许外网访问)开关**、**实时连接日志**。复用 SSH_ASKPASS 注入密码,退出回收子进程。
   另有 **Cloudflare 公网隧道**(cloudflared quick tunnel,免账号):填本地端口一键打通成公网
   `https://<random>.trycloudflare.com` 地址,行内点开 / 复制,启停·自启·重连·日志同上;拿到链接即可访问,地址每次重启会变。
-- **CLAUDE.md 规则编辑器**：直接编辑全局 `~/.claude/CLAUDE.md`，Markdown 语法高亮、⌘S 保存、
+- **Agent 全局规则编辑器**：可切换编辑 Claude Code 的 `~/.claude/CLAUDE.md` 与 Codex 的 `~/.codex/AGENTS.md`，Markdown 语法高亮、⌘S 保存、
   从磁盘重新加载，文件不存在则保存时自动创建。
-- **Skills 管理**：把 `~/.claude/skills` 当目录树浏览（宽松卡片式列表：名称 + 描述），编辑各 skill 的
+- **Skills 管理**：可切换浏览 `~/.claude/skills` 与 `~/.codex/skills`（宽松卡片式列表：名称 + 描述），编辑各 skill 的
   `SKILL.md` 及附带脚本（md / py / shell / json 语法高亮，自动解析符号链接 skill）；`SKILL.md` 默认**渲染预览**
   ——Markdown 表格画成对齐网格，「编辑 / 预览」一键切换；顶部**搜索框**按名称 / 描述实时过滤。
 - **🧪 实验室（Lab）**：实验功能的容器，目前包含：
@@ -183,7 +192,8 @@ Sources/
     AppModel.swift / ConnectionSession.swift / PaneTerminal.swift / TerminalPaneView.swift
     SearchView.swift / QuickSwitchView.swift / SettingsView.swift / Theme.swift
     Lab.swift（实验室：系统监控 / PTY 监控）/ Notifications.swift（输出完成通知）
-    ClaudeMd.swift（CLAUDE.md 编辑器）/ Skills.swift（Skills 管理 + 语法高亮编辑器）
+    ClaudeMd.swift（全局 / 项目规则）/ Skills.swift（Skills 管理 + 语法高亮编辑器）
+    Workspace.swift（项目工作区 / 待处理中心）/ EditorSafety.swift（编辑保护）
     CCUsage*.swift（Token 用量：ccusage 的 Swift 移植，Claude + Codex 两源）
 docs/
   tmux-control-protocol.md     # tmux 控制协议规格（编码依据）
@@ -250,7 +260,7 @@ open TFA.app
 - [x] **性能** — 懒加载 attach（按需连接）、tmux 流控（`pause-after` 背压）
 - [x] **输出特效 + 通知** — 输出中脉冲 / 结束闪 ✓ / 后台完成系统通知
 - [x] **每会话环境变量** — `set-environment` + 重启生效 + 会话间拷贝 / 粘贴 + 克隆 session
-- [x] **侧边栏工具区** — CLAUDE.md 规则编辑器 / Skills 管理（语法高亮编辑器 + 搜索）
+- [x] **侧边栏工具区** — Claude Code / Codex 全局规则编辑器 + 双目录 Skills 管理（语法高亮编辑器 + 搜索）
 - [x] **文件管理器** — 右键本地会话以其当前目录打开独立窗口，浏览 + 编辑（md / py 高亮）
 - [x] **侧边栏实时活动** — 每行实时显示是否在输出（覆盖未 attach 会话）+ 均衡器动效 / 最新输出行 / 当前文件夹
 - [x] **「需要关注」检测** — agent 停下等你时（响铃 / OSC 通知）侧栏标黄 + 系统通知，⌘] / ⌘⇧] 跳转
@@ -269,6 +279,8 @@ open TFA.app
 ## 📜 更新记录
 
 每版一句话，详细见 [`CHANGELOG.md`](CHANGELOG.md)。
+
+- **v0.18.0** — 项目工作区、Agent 启动器、待处理中心、Codex 会话绑定恢复，以及规则 / Skills 编辑保护与来源管理。
 
 - **v0.17.0** — **Cloudflare 公网隧道**(一键把本机端口打通成公网 HTTPS 地址);**Shell 集成**(OSC 133:精确忙/闲 + 命令完成通知带退出码);**过程记录**(⌘⇧H 每终端的命令级事件时间线);派发可靠性(送达验证 / shell 目标闸门 / 终端死亡观察);通知去重 + 界面信号减法。
 - **v0.16.3** — **应用内检查更新**(设置 → 一键对比 GitHub Releases,新版一键下载校验、原地替换并重启,tmux 会话无损)。

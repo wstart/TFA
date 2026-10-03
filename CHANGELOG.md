@@ -3,6 +3,23 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
+## [0.18.0] — 2026-10-03
+
+### 工作区体验
+- 项目工作区：文件夹入口、稳定终端关联、项目任务过滤、新会话继承项目目录、项目规则编辑。
+- 待处理中心：聚合终端连接失败、Agent 关注请求、待回复/受阻任务与派发队列，可直达终端或回复任务。
+- 新建会话选择普通终端、Codex 或 Claude Code，并显示 CLI 安装检测结果。
+- Skills 展示 Codex / Claude Code / 共享来源、同名提示和未检测依赖状态，支持直接预览与 Tab/Return 操作。
+- 编辑保存失败显示错误并保留草稿；切文件处理未保存编辑；工具切换保留内存草稿，正常退出检查；Skill 删除改为废纸篓。
+- Codex 恢复支持绑定明确会话 UUID，未绑定则打开选择器；不再自动猜测最近对话。
+
+### 新增
+- **Codex 双栈适配**：全局规则面板可切换 `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md`，Skills 面板可切换 Claude Code / Codex 目录，`tfa-task` skill 同时安装到两端。
+- 仓库新增精简 `AGENTS.md`，向 Codex 提供构建、分层和 tmux / PTY 高风险不变式。
+
+### 优化
+- Codex 会话恢复优先使用明确绑定的 UUID；未知会话由用户在 CLI 选择器中选择。
+
 ## [0.17.0] — 2026-08-14
 
 > 本版大量借鉴了 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) 的工程决策(送达≠接受、事件日志、精确就绪检测、通知去重)。

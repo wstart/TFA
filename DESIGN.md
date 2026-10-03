@@ -18,6 +18,16 @@ work for a Chinese-heavy, dense, long-running terminal UI.
 
 ---
 
+## Workspace interaction standard (2026-10)
+
+- Sidebar hierarchy: host → project selector → attention inbox → terminal filter → grouped terminals → tools.
+- Projects keep a local folder and stable terminal associations. New terminals inherit the selected folder; board tasks created in a project retain that project even before assignment. “全部项目” clears the filter.
+- Attention inbox is global: terminal errors/attention and unanswered, blocked or queued tasks remain visible across project filters. Viewing a terminal does not resolve an outstanding board question; replying records a task comment.
+- New-session sheet: ordinary shell / Codex / Claude Code; show CLI discovery status before creation. Never infer an exact conversation from “most recent”; use an explicitly bound UUID or the CLI picker.
+- Skills: show source and same-name markers, one-line purpose with full hover text; click opens SKILL.md, supporting files remain expandable. Tab/Return works on file rows. Dependency status must say “未检测” unless actually verified.
+- Editors: failed writes keep drafts and show the real error. File/agent switches offer save/discard/cancel; tool navigation retains in-memory buffers, and normal quit checks unsaved drafts. Skill removal uses Trash.
+- Keep SF/PingFang, quiet warm surfaces and the fixed-dark terminal. Status labels carry meaning; avoid adding decorative motion.
+
 ## 1. The surface model (TFA's defining decision)
 
 TFA is a **three-tier warm paper stack** in the light chrome, plus one fixed-dark terminal — every
@@ -200,9 +210,9 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   with a filled-charcoal square `+` (new terminal).
 - **Filter pill** — White capsule + Linen border, 9.6px; live-filters the list (distinct from ⌘F search).
 - **Sidebar terminal row** — White on Cream; `rowTitle` name + `rowSubtitle` (cwd / live line);
-  status glyph (§6); left accent rail (amber=needs-you, charcoal=working); active = charcoal wash.
+  status glyph (§6); a single primary activity signal per row; active = charcoal wash.
 - **Group folder** — disclosure row, `groupHeader`; drag-reorderable; drop targets highlight in accent.
-- **Tool dock** (任务 / 隧道 / CLAUDE / Skills / 实验室) — sidebar bottom; equal-width icon+label cells,
+- **Tool dock** (任务 / 隧道 / 规则 / Skills / 实验室) — sidebar bottom; equal-width icon+label cells,
   selected = filled charcoal cell with ivory glyph (mirrors a selected row).
 - **Status indicator** — shared spinner-or-glyph component; symbol + tint + VoiceOver label.
 - **Panel header bar** — Ivory canvas, `headerTitle`, sidebar-toggle + a leading accent icon.
