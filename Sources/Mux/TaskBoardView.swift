@@ -19,6 +19,14 @@ struct TaskBoardView: View {
     @FocusState private var draftFocused: Bool
 
     private var store: TaskBoardStore { appModel.taskBoard }
+    private var scopedTasks: [BoardTask] {
+        guard WorkspaceStore.shared.selected != nil else { return store.board.tasks }
+        let agents = Set(appModel.connections.filter { WorkspaceStore.shared.includes($0) }.map { "tfa:" + $0.stableID })
+        return store.board.tasks.filter {
+            WorkspaceStore.shared.taskProjects[$0.id.uuidString] == WorkspaceStore.shared.selectedID?.uuidString
+                || ($0.assignee.map { agents.contains($0) } ?? false)
+        }
+    }
     enum GroupMode: String, CaseIterable, Identifiable { case status = "按状态", agent = "按终端"; var id: String { rawValue } }
 
     /// One column on the board (a status or an agent).
@@ -75,6 +83,7 @@ struct TaskBoardView: View {
         HStack(spacing: Theme.Space.md) {
             Picker("", selection: $groupBy) { ForEach(GroupMode.allCases) { Text($0.rawValue).tag($0) } }
                 .pickerStyle(.segmented).fixedSize()
+            if let project = WorkspaceStore.shared.selected { Text(project.name).font(.caption).foregroundStyle(.secondary) }
             Spacer()
         }
         .padding(.horizontal, Theme.Space.lg).padding(.vertical, Theme.Space.sm)
@@ -86,12 +95,12 @@ struct TaskBoardView: View {
         switch groupBy {
         case .status:
             return TaskStatus.allCases.map { s in
-                Lane(id: "s:\(s.rawValue)", title: s.label, accent: accent(s), tasks: store.tasks(in: s),
+                Lane(id: "s:\(s.rawValue)", title: s.label, accent: accent(s), tasks: scopedTasks.filter { $0.status == s }.sorted { $0.order < $1.order },
                      onDrop: { id in animated { store.move(id, to: s) } },
-                     onAdd: { title in store.addTask(title: title); if s != .todo, let id = newestID() { store.move(id, to: s) } })
+                     onAdd: { title in addTask(title); if s != .todo, let id = newestID() { store.move(id, to: s) } })
             }
         case .agent:
-            let tasks = store.board.tasks
+            let tasks = scopedTasks
             // One lane per agent that has tasks, ordered by name; plus an Unassigned lane.
             let usedAgentIDs = Set(tasks.compactMap(\.assignee))
             var lanes = store.board.agents.filter { usedAgentIDs.contains($0.id) }
@@ -100,7 +109,7 @@ struct TaskBoardView: View {
                     Lane(id: "a:\(a.id)", title: a.name, accent: Theme.brand,
                          tasks: tasks.filter { $0.assignee == a.id }.sorted(by: Self.byStatusThenOrder),
                          onDrop: { id in animated { store.setAssignee(id, to: a.id) } },
-                         onAdd: { title in store.addTask(title: title); if let id = newestID() { store.setAssignee(id, to: a.id) } })
+                         onAdd: { title in addTask(title); if let id = newestID() { store.setAssignee(id, to: a.id) } })
                 }
             // Assignees whose agent row is GONE (closed terminal / legacy ext:) still get a lane —
             // otherwise their tasks fall into no lane at all and silently vanish from this view.
@@ -109,12 +118,12 @@ struct TaskBoardView: View {
                 lanes.append(Lane(id: "a:\(id)", title: appModel.assigneeLabel(id), accent: .secondary,
                                   tasks: tasks.filter { $0.assignee == id }.sorted(by: Self.byStatusThenOrder),
                                   onDrop: { tid in animated { store.setAssignee(tid, to: id) } },
-                                  onAdd: { title in store.addTask(title: title); if let nid = newestID() { store.setAssignee(nid, to: id) } }))
+                                  onAdd: { title in addTask(title); if let nid = newestID() { store.setAssignee(nid, to: id) } }))
             }
             lanes.append(Lane(id: "a:none", title: "未指派", accent: .secondary,
                               tasks: tasks.filter { $0.assignee == nil }.sorted(by: Self.byStatusThenOrder),
                               onDrop: { id in animated { store.setAssignee(id, to: nil) } },
-                              onAdd: { title in store.addTask(title: title) }))
+                              onAdd: { title in addTask(title) }))
             return lanes
         }
     }
@@ -124,6 +133,11 @@ struct TaskBoardView: View {
         return rank(a.status) != rank(b.status) ? rank(a.status) < rank(b.status) : a.order < b.order
     }
     private func newestID() -> UUID? { store.board.tasks.max(by: { $0.createdAt < $1.createdAt })?.id }
+    private func addTask(_ title: String) {
+        let before = Set(store.board.tasks.map(\.id))
+        store.addTask(title: title)
+        if let task = store.board.tasks.first(where: { !before.contains($0.id) }) { WorkspaceStore.shared.associateTask(task.id) }
+    }
     private func animated(_ change: () -> Void) {
         withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.82)) { change() }
     }

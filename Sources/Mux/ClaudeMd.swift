@@ -1,25 +1,34 @@
 import SwiftUI
 import AppKit
 
-/// A dedicated editor for the global user rules file `~/.claude/CLAUDE.md` — the instructions Claude
-/// Code applies to every project. Reuses the Markdown-highlighting `CodeEditor`; saves keep a one-time
-/// `.bak`. The file is created on first save if it doesn't exist yet.
+/// Edits the global rules file for Claude Code or Codex. Reuses the Markdown-highlighting
+/// `CodeEditor`; saves keep a one-time `.bak`. Missing files are created on first save.
 struct ClaudeMdView: View {
+    var projectDirectory: URL? = nil
+    @State private var platform: AgentPlatform = .claude
     @State private var text = ""
     @State private var savedText = ""
     @State private var dirty = false
     @State private var savedFlash = false
     @State private var existed = true
     @State private var confirmReload = false
+    @State private var loadError: String?
 
-    private var url: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/CLAUDE.md")
-    }
+    private var url: URL { projectDirectory?.appendingPathComponent(platform.rulesFileName) ?? platform.rulesURL }
     private var home: String { FileManager.default.homeDirectoryForCurrentUser.path }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: Theme.Space.sm) {
+                Picker("Agent", selection: Binding(get: { platform }, set: { next in
+                    if EditorSafety.mayLeave(url) { platform = next }
+                })) {
+                    ForEach(AgentPlatform.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help(dirty ? "请先保存或重新加载当前改动" : "选择要编辑的 Agent 全局规则")
                 Text(url.path.replacingOccurrences(of: home, with: "~"))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 if !existed {
@@ -37,16 +46,20 @@ struct ClaudeMdView: View {
             }
             .padding(Theme.Space.sm)
             Divider()
+            if let error = loadError { Text(error).font(.caption).foregroundStyle(Theme.Status.error).padding(8) }
             CodeEditor(text: $text, syntax: .markdown)
+                .disabled(loadError != nil)
                 .onChange(of: text) {
                     dirty = (text != savedText)
+                    EditorSafety.drafts[url] = dirty ? text : nil
                     if dirty { savedFlash = false }
                 }
         }
         .background(Theme.canvas)
         .onAppear(perform: load)
+        .onChange(of: platform) { load() }
         .alert("放弃未保存的改动？", isPresented: $confirmReload) {
-            Button("重新加载", role: .destructive) { load() }
+            Button("重新加载", role: .destructive) { EditorSafety.drafts[url] = nil; load() }
             Button("取消", role: .cancel) { }
         } message: {
             Text("当前有未保存的编辑，从磁盘重新加载会丢失这些改动。")
@@ -54,31 +67,31 @@ struct ClaudeMdView: View {
     }
 
     private func load() {
+        loadError = nil
         existed = FileManager.default.fileExists(atPath: url.path)
-        let content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        savedText = content
-        text = content
-        dirty = false
+        do {
+            let content = existed ? try String(contentsOf: url, encoding: .utf8) : ""
+            savedText = content
+            text = EditorSafety.drafts[url] ?? content
+            dirty = text != content
+        } catch {
+            loadError = error.localizedDescription
+            savedText = ""; text = ""; dirty = false
+        }
         savedFlash = false
     }
 
     private func save() {
-        // Keep a one-time backup of the original before the first overwrite.
-        let bak = url.appendingPathExtension("bak")
-        if existed, !FileManager.default.fileExists(atPath: bak.path),
-           let cur = try? String(contentsOf: url, encoding: .utf8) {
-            try? cur.write(to: bak, atomically: true, encoding: .utf8)
-        }
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
-            try text.write(to: url, atomically: true, encoding: .utf8)
+            try EditorSafety.save(text, to: url)
             savedText = text
             existed = true
             dirty = false
             savedFlash = true
         } catch {
-            NSSound.beep()
+            EditorSafety.report(error)
         }
     }
 }

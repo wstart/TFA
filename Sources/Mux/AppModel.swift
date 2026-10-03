@@ -203,10 +203,19 @@ final class AppModel {
 
     /// Create a LOCAL session with a user-chosen name, starting in `startDirectory` (`new-session -c`).
     /// Called by the「新建会话」sheet once the name is validated.
-    func createLocalSession(name: String, startDirectory: String?) {
+    func createLocalSession(name: String, startDirectory: String?, agent: AgentPlatform? = nil) {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !n.isEmpty else { return }
-        openLocal(sessionName: n, startDirectory: startDirectory)
+        if let agent, agent.executablePath == nil { lastError = "未找到 \(agent.title)，请安装后重试。"; return }
+        let connection = TmuxConnection(endpoint: .local, sessionName: n, startDirectory: startDirectory)
+        guard let session = open(connection, connect: false) else { return }
+        if let agent {
+            guard let executable = agent.executablePath else { lastError = "未找到 \(agent.title)，请安装后重试。"; return }
+            session.restoreCommand = AgentPlatform.shellQuote(executable)
+            UserDefaults.standard.set(agent.rawValue, forKey: "agentPlatform." + session.stableID)
+        }
+        WorkspaceStore.shared.associate(session.stableID)
+        selectedConnectionID = session.id
     }
 
     /// The default name proposed in the「新建会话」sheet (lowest unused "mux-N").
@@ -590,7 +599,8 @@ final class AppModel {
                                       startDirectory: r.cwd.isEmpty ? nil : r.cwd)
             guard let session = open(conn, connect: false) else { continue }
             if r.isAI {
-                session.restoreCommand = r.command.contains("codex") ? "codex resume" : "claude --continue --dangerously-skip-permissions"
+                // Restore an explicitly bound Codex UUID, otherwise let the user select a session.
+                session.restoreCommand = AgentPlatform.recoveryCommand(command: r.command, stableID: r.tfaID)
             } else if !r.scrollback.isEmpty {
                 session.restorePreamble = Data(r.scrollback.utf8)
             }

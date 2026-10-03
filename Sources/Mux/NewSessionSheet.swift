@@ -11,6 +11,7 @@ struct NewSessionSheet: View {
     @State private var name = ""
     @State private var folder = FileManager.default.homeDirectoryForCurrentUser.path
     @State private var taken: Set<String> = []
+    @State private var agent = "shell"
     @FocusState private var nameFocused: Bool
 
     private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -23,11 +24,19 @@ struct NewSessionSheet: View {
         if taken.contains(trimmed) { return "已有同名会话" }
         return nil
     }
-    private var canCreate: Bool { !trimmed.isEmpty && nameError == nil }
+    private var canCreate: Bool { !trimmed.isEmpty && nameError == nil && (agent == "shell" || AgentPlatform(rawValue: agent)?.executablePath != nil) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
             Text("新建会话").font(Theme.Font.headerTitle)
+            Picker("启动方式", selection: $agent) {
+                Text("普通终端").tag("shell")
+                ForEach(AgentPlatform.allCases) { Text($0.title).tag($0.rawValue) }
+            }.pickerStyle(.segmented)
+            if let selected = AgentPlatform(rawValue: agent) {
+                Text(selected.executablePath.map { "已安装 · \($0)" } ?? "未找到 \(selected.title)，请先安装 CLI；或选择普通终端。")
+                    .font(.caption).foregroundStyle(selected.executablePath == nil ? Theme.Status.error : Theme.textSecondary)
+            }
 
             VStack(alignment: .leading, spacing: Theme.Space.xs) {
                 Text("名字").font(.caption).foregroundStyle(.secondary)
@@ -66,6 +75,7 @@ struct NewSessionSheet: View {
         .padding(Theme.Space.xl)
         .frame(width: 420)
         .onAppear {
+            if let project = WorkspaceStore.shared.selected { folder = project.path }
             if name.isEmpty { name = appModel.suggestedLocalSessionName() }
             taken = appModel.takenLocalSessionNames()
             nameFocused = true
@@ -92,7 +102,7 @@ struct NewSessionSheet: View {
 
     private func create() {
         guard canCreate else { return }
-        appModel.createLocalSession(name: trimmed, startDirectory: folder)
+        appModel.createLocalSession(name: trimmed, startDirectory: folder, agent: AgentPlatform(rawValue: agent))
         dismiss()
     }
 }

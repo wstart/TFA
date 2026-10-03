@@ -55,6 +55,7 @@ struct SidebarView: View {
                 onNewGroup: { startNewGroup() }
             )
 
+            WorkspaceControls()
             FilterField(text: $filter)
 
             List(selection: Binding(
@@ -148,7 +149,7 @@ struct SidebarView: View {
     @ViewBuilder
     private func groupTree(_ group: AppModel.TerminalGroup) -> some View {
         let members = filtered(appModel.visibleTerminals(in: group))
-        if filter.isEmpty || !members.isEmpty {
+        if (filter.isEmpty && WorkspaceStore.shared.selected == nil) || !members.isEmpty {
             groupHeaderRow(group)
                 // One drop target, two payloads: a folder token → reorder before this folder; a
                 // terminal's groupKey → file that terminal into this group (#8). (The folder's OWN
@@ -167,10 +168,10 @@ struct SidebarView: View {
                     dropTargetGroup = hovering ? group.id
                         : (dropTargetGroup == group.id ? nil : dropTargetGroup)
                 }
-            if groupExpanded(group.id) {
+            if groupExpanded(group.id) && !members.isEmpty {
                 ForEach(members) { row($0).padding(.leading, Theme.Space.lg) } // indent under the folder
                 if members.isEmpty {
-                    Text("Empty — right-click a terminal to add")
+                    Text("暂无终端 · 右键终端可加入分组")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .padding(.leading, Theme.Space.lg)
@@ -311,6 +312,7 @@ struct SidebarView: View {
     // MARK: - Helpers
 
     private func filtered(_ list: [ConnectionSession]) -> [ConnectionSession] {
+        let list = list.filter { WorkspaceStore.shared.includes($0) }
         let q = filter.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return list }
         return list.filter { ($0.title + " " + $0.subtitle).lowercased().contains(q) }
@@ -433,7 +435,7 @@ private struct HeaderButton: View {
     }
 }
 
-/// Bottom-of-sidebar entry into the global CLAUDE.md rules editor.
+/// Bottom-of-sidebar entry into the Claude Code / Codex global rules editor.
 /// v2 tool dock: the five tool panes as an equal-width icon+label row pinned to the sidebar bottom.
 /// Selected = a filled charcoal cell (mirrors a selected terminal row), per DESIGN.md v2.
 private struct ToolDock: View {
@@ -451,7 +453,7 @@ private struct ToolDock: View {
         [
             Tool(id: "tasks",   title: "任务",   icon: "checklist",                          selected: appModel.tasksSelected)   { appModel.openTasks() },
             Tool(id: "tunnels", title: "隧道",   icon: "network.badge.shield.half.filled",   selected: appModel.tunnelsSelected) { appModel.openTunnels() },
-            Tool(id: "claude",  title: "CLAUDE", icon: "text.book.closed",                   selected: appModel.claudeMdSelected){ appModel.openClaudeMd() },
+            Tool(id: "rules",   title: "规则",    icon: "text.book.closed",                   selected: appModel.claudeMdSelected){ appModel.openClaudeMd() },
             Tool(id: "skills",  title: "Skills", icon: "wand.and.stars",                     selected: appModel.skillsSelected)  { appModel.openSkills() },
             Tool(id: "lab",     title: "实验室", icon: "flask",                              selected: appModel.labSelected)     { appModel.openLab() },
         ]
@@ -499,7 +501,7 @@ private struct FilterField: View {
             Image(systemName: "line.3.horizontal.decrease")
                 .foregroundStyle(.secondary)
                 .font(.system(size: 12, weight: .medium))
-            TextField("Filter terminals", text: $text)
+            TextField("筛选终端", text: $text)
                 .textFieldStyle(.plain)
                 .font(Theme.Font.rowSubtitle)
             if !text.isEmpty {

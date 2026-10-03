@@ -11,35 +11,48 @@ struct SkillNode: Identifiable, Hashable {
     var name: String          // display name (skill name for roots, file name otherwise)
     var subtitle: String?     // SKILL.md description — only set on skill roots
     var isRoot: Bool          // true for a top-level skill folder
+    var source: String = ""
     var children: [SkillNode]?
     var id: String { url.path }
 }
 
 // MARK: - Store
 
-/// Scans / loads / saves skills under ~/.claude/skills. Each skill is a *folder* (`<name>/SKILL.md`
-/// + any extra scripts/docs); we expose the whole folder as a browsable tree.
+/// Scans / loads / saves skills for the selected agent. Each skill is a *folder*
+/// (`<name>/SKILL.md` + any extra scripts/docs); we expose the whole folder as a browsable tree.
 @MainActor @Observable
 final class SkillsStore {
     private(set) var tree: [SkillNode] = []
+    var platform: AgentPlatform = .claude
+    var scanError: String?
 
-    var skillsDir: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/skills") }
+    var skillsDir: URL { platform.skillsDirectory }
 
     var isEmpty: Bool { tree.isEmpty }
 
     func reload() {
         let fm = FileManager.default
         var roots: [SkillNode] = []
-        if let subs = try? fm.contentsOfDirectory(at: skillsDir, includingPropertiesForKeys: [.isDirectoryKey]) {
+        scanError = nil
+        let directories = platform == .codex
+            ? [(skillsDir, "Codex"), (fm.homeDirectoryForCurrentUser.appendingPathComponent(".agents/skills"), "共享")]
+            : [(skillsDir, "Claude Code")]
+        var seen: Set<String> = []
+        for (directory, source) in directories {
+        guard fm.fileExists(atPath: directory.path) else { continue }
+        do {
+        let subs = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles)
             for sub in subs {
                 var isDir: ObjCBool = false
                 guard fm.fileExists(atPath: sub.path, isDirectory: &isDir), isDir.boolValue else { continue }
                 let md = sub.appendingPathComponent("SKILL.md")
                 guard fm.fileExists(atPath: md.path) else { continue }   // a skill must have SKILL.md
+                guard seen.insert(sub.resolvingSymlinksInPath().path).inserted else { continue }
                 let (name, desc) = Self.frontmatter(md, fallback: sub.lastPathComponent)
                 roots.append(SkillNode(url: sub, isDirectory: true, name: name, subtitle: desc,
-                                       isRoot: true, children: Self.children(of: sub)))
+                                       isRoot: true, source: source, children: Self.children(of: sub)))
             }
+        } catch { scanError = error.localizedDescription }
         }
         tree = roots.sorted { $0.name.lowercased() < $1.name.lowercased() }
     }
@@ -62,7 +75,7 @@ final class SkillsStore {
             fm.fileExists(atPath: item.path, isDirectory: &isDir)
             if isDir.boolValue {
                 nodes.append(SkillNode(url: item, isDirectory: true, name: leaf, subtitle: nil,
-                                       isRoot: false, children: children(of: item, depth: depth + 1)))
+                                       isRoot: false, children: nil))
             } else {
                 nodes.append(SkillNode(url: item, isDirectory: false, name: leaf, subtitle: nil,
                                        isRoot: false, children: nil))
@@ -76,6 +89,18 @@ final class SkillsStore {
 
     /// Find a node anywhere in the tree by its id (path).
     func node(id: String) -> SkillNode? { Self.find(id, in: tree) }
+    func expand(_ id: String) {
+        func fill(_ nodes: inout [SkillNode]) {
+            for i in nodes.indices {
+                if nodes[i].id == id, nodes[i].isDirectory {
+                    nodes[i].children = Self.children(of: nodes[i].url)
+                    return
+                }
+                if nodes[i].children != nil { fill(&nodes[i].children!) }
+            }
+        }
+        fill(&tree)
+    }
     private static func find(_ id: String, in nodes: [SkillNode]) -> SkillNode? {
         for n in nodes {
             if n.id == id { return n }
@@ -107,16 +132,11 @@ final class SkillsStore {
         return (name.isEmpty ? fallback : name, desc)
     }
 
-    func content(of url: URL) -> String { (try? String(contentsOf: url, encoding: .utf8)) ?? "" }
+    func content(of url: URL) throws -> String { try String(contentsOf: url, encoding: .utf8) }
 
     /// Save a file, keeping a one-time `.bak` of the original.
     func save(_ content: String, to url: URL) throws {
-        let bak = url.appendingPathExtension("bak")
-        if !FileManager.default.fileExists(atPath: bak.path),
-           let cur = try? String(contentsOf: url, encoding: .utf8) {
-            try? cur.write(to: bak, atomically: true, encoding: .utf8)
-        }
-        try content.write(to: url, atomically: true, encoding: .utf8)
+        try EditorSafety.save(content, to: url)
         reload()
     }
 
@@ -124,21 +144,24 @@ final class SkillsStore {
     @discardableResult
     func create(name raw: String) -> URL? {
         let name = raw.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty, !name.contains("/") else { return nil }
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\n") else { return nil }
         let dir = skillsDir.appendingPathComponent(name)
         let md = dir.appendingPathComponent("SKILL.md")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        do {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: md.path) {
             let template = "---\nname: \(name)\ndescription: \n---\n\n# \(name)\n\n"
-            try? template.write(to: md, atomically: true, encoding: .utf8)
+            try template.write(to: md, atomically: true, encoding: .utf8)
         }
+        } catch { EditorSafety.report(error); return nil }
         reload()
         return md
     }
 
     /// Delete the whole skill directory.
     func delete(_ node: SkillNode) {
-        try? FileManager.default.removeItem(at: node.url)
+        do { try FileManager.default.trashItem(at: node.url, resultingItemURL: nil) }
+        catch { EditorSafety.report(error) }
         reload()
     }
 }
@@ -154,6 +177,7 @@ struct SkillsView: View {
     @State private var fileURL: URL?
     @State private var text = ""
     @State private var dirty = false
+    @State private var savedText = ""
     @State private var savedFlash = false
     @State private var showNew = false
     @State private var newName = ""
@@ -168,10 +192,25 @@ struct SkillsView: View {
         HSplitView {
             // Left: search + skill directory tree
             VStack(spacing: 0) {
+                HStack {
+                    Picker("Agent", selection: Binding(
+                        get: { store.platform },
+                        set: { switchPlatform(to: $0) }
+                    )) {
+                        ForEach(AgentPlatform.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .help("选择要管理的 Agent Skills 目录")
+                    Spacer()
+                }
+                .padding(Theme.Space.sm)
+                Divider()
+                if let error = store.scanError { Text(error).font(.caption).foregroundStyle(Theme.Status.error).padding(8) }
                 if !store.isEmpty { searchField; Divider() }
                 if store.isEmpty {
                     ContentUnavailableView("没有 Skill", systemImage: "wand.and.stars",
-                        description: Text("~/.claude/skills 下没有带 SKILL.md 的目录。点下方「新建」创建一个。"))
+                        description: Text("\(displayPath(store.skillsDir)) 下没有带 SKILL.md 的目录。点下方「新建」创建一个。"))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     let rows = visibleRows()
@@ -193,7 +232,7 @@ struct SkillsView: View {
                 }
                 Divider()
                 HStack {
-                    Button { newName = ""; showNew = true } label: { Label("新建", systemImage: "plus") }
+                    Button { if EditorSafety.mayLeave(fileURL) { newName = ""; showNew = true } } label: { Label("新建", systemImage: "plus") }
                         .buttonStyle(.borderless)
                     Spacer()
                     Text("\(store.tree.count) 个 skill").font(.caption).foregroundStyle(.tertiary)
@@ -236,7 +275,10 @@ struct SkillsView: View {
                             MarkdownPreviewView(text: text)
                         } else {
                             CodeEditor(text: $text, syntax: Syntax.from(url))
-                                .onChange(of: text) { dirty = true; savedFlash = false }
+                                .onChange(of: text) {
+                                    dirty = text != savedText; savedFlash = false
+                                    EditorSafety.drafts[url] = dirty ? text : nil
+                                }
                         }
                     }
                 } else {
@@ -254,7 +296,7 @@ struct SkillsView: View {
             Button("创建") {
                 if let md = store.create(name: newName) {
                     expanded.insert(md.deletingLastPathComponent().path)   // reveal its SKILL.md
-                    selectedID = md.path
+                    selectFile(md.path)
                 }
                 newName = ""
             }
@@ -263,19 +305,38 @@ struct SkillsView: View {
         .alert("删除 Skill?", isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } })) {
             Button("删除", role: .destructive) {
                 if let t = deleteTarget {
-                    if let f = fileURL, f.path.hasPrefix(t.url.path) { selectedID = nil }
+                    guard EditorSafety.mayLeave(fileURL) else { return }
+                    if let f = fileURL, f.path.hasPrefix(t.url.resolvingSymlinksInPath().path + "/") { selectedID = nil }
                     store.delete(t)
                 }
                 deleteTarget = nil
             }
             Button("取消", role: .cancel) { deleteTarget = nil }
         } message: {
-            Text("将删除整个 skill 目录，不可恢复（编辑过的文件留有 .bak 备份）。")
+            Text("将移到废纸篓，可在 Finder 中恢复。符号链接只移除入口。")
         }
     }
 
     /// A flattened tree row: a node plus its indentation depth.
     private struct VisibleRow: Identifiable { let node: SkillNode; let depth: Int; var id: String { node.id } }
+
+    private func displayPath(_ url: URL) -> String {
+        url.path.replacingOccurrences(of: home, with: "~")
+    }
+
+    private func switchPlatform(to platform: AgentPlatform) {
+        guard platform != store.platform else { return }
+        guard EditorSafety.mayLeave(fileURL) else { return }
+        selectedID = nil
+        fileURL = nil
+        text = ""
+        dirty = false
+        savedFlash = false
+        expanded.removeAll()
+        search = ""
+        store.platform = platform
+        store.reload()
+    }
 
     /// Search box: filters the top-level skills by name / description (live).
     private var searchField: some View {
@@ -310,7 +371,7 @@ struct SkillsView: View {
     }
 
     private func toggle(_ id: String) {
-        if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
+        if expanded.contains(id) { expanded.remove(id) } else { store.expand(id); expanded.insert(id) }
     }
 
     // Self-drawn tree row. We do NOT use `List(children:)` / `Button`-in-`List`: on some macOS
@@ -335,9 +396,11 @@ struct SkillsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(node.name).font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Theme.textPrimary).lineLimit(1)
+                Text(node.source + (store.tree.filter { $0.name == node.name }.count > 1 ? " · 同名来源" : "") + " · 依赖未检测")
+                    .font(.caption2).foregroundStyle(.secondary)
                 if let s = node.subtitle, !s.isEmpty {
                     Text(s).font(Theme.Font.rowSubtitle).foregroundStyle(.secondary)
-                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(1).help(s)
                 }
             }
             Spacer(minLength: 0)
@@ -347,8 +410,15 @@ struct SkillsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(isOpen ? Theme.surface2 : Color.clear, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
         .contentShape(Rectangle())
-        .onTapGesture { toggle(node.id) }
-        .contextMenu { folderMenu(node) }
+        .onTapGesture { selectFile(node.url.resolvingSymlinksInPath().appendingPathComponent("SKILL.md").path); expanded.insert(node.id) }
+        .accessibilityAddTraits(.isButton)
+        .focusable()
+        .onKeyPress(.return) {
+            selectFile(node.url.resolvingSymlinksInPath().appendingPathComponent("SKILL.md").path)
+            expanded.insert(node.id)
+            return .handled
+        }
+        .contextMenu { Button("展开 / 收起附带文件") { toggle(node.id) }; folderMenu(node) }
         .padding(.top, isFirst ? 0 : Theme.Space.md)   // gap between skills
     }
 
@@ -374,7 +444,10 @@ struct SkillsView: View {
         .background(isSelected ? Theme.brand.opacity(0.16) : Color.clear,
                     in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
-        .onTapGesture { if node.isDirectory { toggle(node.id) } else { selectedID = node.id } }
+        .onTapGesture { if node.isDirectory { toggle(node.id) } else { selectFile(node.id) } }
+        .focusable()
+        .accessibilityAddTraits(.isButton)
+        .onKeyPress(.return) { if node.isDirectory { toggle(node.id) } else { selectFile(node.id) }; return .handled }
         .contextMenu { node.isDirectory ? AnyView(folderMenu(node)) : AnyView(fileMenu(node)) }
     }
 
@@ -405,16 +478,26 @@ struct SkillsView: View {
         guard let id = selectedID, let node = store.node(id: id), !node.isDirectory else {
             fileURL = nil; text = ""; dirty = false; savedFlash = false; return
         }
-        fileURL = node.url
-        text = store.content(of: node.url)
-        dirty = false; savedFlash = false
+        do {
+            savedText = try store.content(of: node.url)
+            fileURL = node.url
+            text = EditorSafety.drafts[node.url] ?? savedText
+            dirty = text != savedText; savedFlash = false
+        } catch { fileURL = nil; EditorSafety.report(error) }
         preview = Syntax.from(node.url) == .markdown   // open docs in the readable preview by default
     }
 
     private func saveCurrent() {
         guard let url = fileURL else { return }
-        try? store.save(text, to: url)
-        dirty = false; savedFlash = true
+        do {
+            try store.save(text, to: url)
+            savedText = text; dirty = false; savedFlash = true
+        } catch { EditorSafety.report(error) }
+    }
+
+    private func selectFile(_ id: String) {
+        guard selectedID != id, EditorSafety.mayLeave(fileURL) else { return }
+        selectedID = id
     }
 }
 

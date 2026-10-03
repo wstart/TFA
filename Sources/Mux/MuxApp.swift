@@ -188,6 +188,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// so "save on quit" really saves the conversation, not just metadata. Bounded so quit never hangs;
     /// SIGTERM/`pkill` skip this (they exit immediately, relying on the hourly/baseline snapshot).
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        for url in Array(EditorSafety.drafts.keys) {
+            if !EditorSafety.mayLeave(url) { return .terminateCancel }
+        }
         guard let appModel else { return .terminateNow }
         Task { @MainActor in
             await appModel.snapshotSessionsOnQuit()

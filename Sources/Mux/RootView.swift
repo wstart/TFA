@@ -179,6 +179,12 @@ private struct ActiveTerminalHeader: View {
                     .lineLimit(1)
                     .layoutPriority(1)
 
+                let command = conn.subtitle.lowercased()
+                if command.contains("codex") { metaChip("terminal", "Codex") }
+                else if command.contains("claude") { metaChip("terminal", "Claude Code") }
+                if conn.needsAttention { Text("需要回复").font(.caption).foregroundStyle(Theme.Status.attention) }
+                else if appModel.isWorking(conn) { Text("执行中").font(.caption).foregroundStyle(.secondary) }
+
                 if let host = conn.host { metaChip("network", host) }
                 // Grid size only matters while it's changing — surface it briefly after a resize
                 // instead of announcing a constant nobody reads (dsh: on-demand, don't announce).
@@ -199,7 +205,7 @@ private struct ActiveTerminalHeader: View {
 
                 if TerminalStatus.of(conn) == .failed {
                     Button { conn.retry() } label: {
-                        Label("Reconnect", systemImage: "arrow.clockwise")
+                        Label("重新连接", systemImage: "arrow.clockwise")
                     }
                     .controlSize(.small)
                     .accessibilityLabel("Reconnect terminal")
@@ -208,7 +214,7 @@ private struct ActiveTerminalHeader: View {
                 Circle()
                     .fill(Color.secondary.opacity(0.35))
                     .frame(width: 9, height: 9)
-                Text("No terminal")
+                Text("未选择终端")
                     .font(Theme.Font.headerTitle)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
@@ -367,7 +373,7 @@ private struct TasksHeaderBar: View {
     }
 }
 
-/// Slim header for the CLAUDE.md detail pane — mirrors `LabHeaderBar`'s chrome.
+/// Slim header for the Claude Code / Codex rules detail pane.
 private struct ClaudeMdHeaderBar: View {
     @Environment(AppModel.self) private var appModel
 
@@ -381,7 +387,7 @@ private struct ClaudeMdHeaderBar: View {
             .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
 
             Image(systemName: "text.book.closed").foregroundStyle(Theme.brand)
-            Text("CLAUDE.md · 全局规则").font(Theme.Font.headerTitle).lineLimit(1)
+            Text("Agent 全局规则").font(Theme.Font.headerTitle).lineLimit(1)
             Spacer()
         }
         .padding(.horizontal, Theme.Space.lg)

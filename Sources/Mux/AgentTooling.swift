@@ -3,13 +3,12 @@ import Foundation
 /// Drops the two artifacts that let agents running INSIDE terminals talk to the task board:
 ///  • `~/.tfa/bin/tfa-task` — a small shell CLI that reads/writes the SQLite board (`~/.tfa/board.db`)
 ///    via the system `sqlite3`. Agents call it to register, claim, comment, and complete tasks.
-///  • `~/.claude/skills/tfa-task/SKILL.md` — a Claude Code skill teaching an agent the workflow.
+///  • `<agent-home>/skills/tfa-task/SKILL.md` — installed for both Claude Code and Codex.
 /// Both are regenerated on every launch (generated artifacts owned by TFA). Idempotent.
 enum AgentTooling {
     static func install() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let binDir = home.appendingPathComponent(".tfa/bin", isDirectory: true)
-        let skillDir = home.appendingPathComponent(".claude/skills/tfa-task", isDirectory: true)
 
         // The CLI lives under ~/.tfa (our own dir). Write only when changed.
         let cli = binDir.appendingPathComponent("tfa-task")
@@ -20,14 +19,20 @@ enum AgentTooling {
         // (re)generated; SOURCING it from ~/.zshrc is opt-in via 设置 (ShellIntegrationInstall).
         let tfaDir = home.appendingPathComponent(".tfa", isDirectory: true)
         writeIfChanged(shellIntegrationScript, to: tfaDir.appendingPathComponent("shell-integration.sh"), createDir: tfaDir)
-        // The skill lives under ~/.claude (Claude Code's data) — on macOS Sequoia, WRITING there
-        // triggers the "access other apps' data" privacy prompt. Only touch it when the content
-        // actually differs, so an unchanged launch never writes (no needless prompt).
-        writeIfChanged(skillDoc, to: skillDir.appendingPathComponent("SKILL.md"), createDir: skillDir)
+        // Install the same portable Agent Skill for both supported agents. Writes into another
+        // app's data directory can trigger macOS privacy prompts, so unchanged files are untouched.
+        for platform in AgentPlatform.allCases {
+            // Preserve the existing Claude behavior, but do not create a Codex home for users who
+            // have never installed or run Codex.
+            if platform == .codex,
+               !FileManager.default.fileExists(atPath: platform.homeDirectory.path) { continue }
+            let skillDir = platform.skillsDirectory.appendingPathComponent("tfa-task", isDirectory: true)
+            writeIfChanged(skillDoc, to: skillDir.appendingPathComponent("SKILL.md"), createDir: skillDir)
+        }
     }
 
     /// Write `content` to `url` only if the file is missing or differs — avoids needless writes (and,
-    /// for ~/.claude, the macOS privacy prompt that every write would otherwise raise). Returns whether
+    /// for agent data directories, the macOS privacy prompt that every write may raise). Returns whether
     /// a write happened. Creating the parent dir + reading to compare don't trip the WRITE prompt.
     @discardableResult
     private static func writeIfChanged(_ content: String, to url: URL, createDir: URL) -> Bool {
