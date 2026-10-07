@@ -64,7 +64,7 @@ final class AppModel {
 
     /// Session persistence (~/.tfa/sessions.db) — a disk snapshot of each local terminal so sessions
     /// (and AI conversations) survive a reboot / `tmux kill-server`, which wipe the in-memory server.
-    let sessionStore = SessionStore()
+    var sessionStore = SessionStore()
 
     /// Per-session right-click menu state — shared by the sidebar row and the terminal area so both
     /// surfaces offer the same actions; its sheets/alerts are hosted once at the root.
@@ -338,9 +338,17 @@ final class AppModel {
     /// Called whenever a terminal becomes selected (sidebar / ⌘K / ⌘1–9 / reveal all funnel through
     /// `selectedConnectionID`). Idempotent — already connecting/connected terminals are skipped.
     func ensureConnected(_ id: UUID) {
-        guard let conn = connection(id), conn.isDormant else { return }
+        // An ended record is restored only by an explicit 恢复 (restoreEnded) — never by selection.
+        guard let conn = connection(id), conn.isDormant, !conn.isEnded else { return }
         conn.beginConnecting() // synchronous → the UI shows a connecting state immediately
         Task { @MainActor in
+            // A discovered placeholder whose session vanished meanwhile (tmux server crashed) would
+            // only fail to attach — show it as a recoverable ended record instead.
+            if conn.host == nil, conn.controller.connection.attachOnly {
+                let name = conn.controller.connection.sessionName
+                let alive = await Task.detached(priority: .userInitiated) { TmuxServer.listLocalSessions().contains(name) }.value
+                if !alive { self.convertToEnded(conn); return }
+            }
             await conn.connect()
             if let err = conn.connectError { self.lastError = "\(conn.title): \(err)" }
             await self.reconcileIdentity(conn) // adopt/stamp @tfa_id in the session env
@@ -530,6 +538,7 @@ final class AppModel {
                 if taskBoard.watchFast || n % 3 == 0 { taskBoard.tickIfChanged() }
                 dispatch.tick()
                 if n == 40 || (n > 0 && n % 2400 == 0) { await snapshotSessions() } // baseline ~1 min, then hourly
+                else if n % 40 == 20 { await snapshotLiveMetadata() } // name + folder of every session, ~each minute
                 n &+= 1
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
             }
@@ -588,23 +597,43 @@ final class AppModel {
     /// `tmux kill-server`). Each is recreated as a DORMANT placeholder under its saved name → same
     /// `@tfa_id` → its env / group / board assignments reconnect automatically. Opening it connects
     /// a fresh session in the saved cwd, then replays history (or resumes the AI conversation).
-    private func restoreMissingSessions(liveLocalNames: Set<String>) {
-        let existing = Set(connections.compactMap { $0.host == nil ? $0.controller.connection.sessionName : nil })
-        let cutoff = Date().timeIntervalSince1970 - 14 * 86_400 // don't resurrect sessions idle > 14 days
-        for r in sessionStore.roster()
-        where !liveLocalNames.contains(r.name) && !existing.contains(r.name) && r.updatedAt >= cutoff {
-            seedIdentity(name: r.name, id: r.tfaID) // ensure the restored placeholder keeps its UUID
-            let conn = TmuxConnection(endpoint: .local, sessionName: r.name,
-                                      attachOnly: false,            // create-or-attach on first open
-                                      startDirectory: r.cwd.isEmpty ? nil : r.cwd)
-            guard let session = open(conn, connect: false) else { continue }
-            if r.isAI {
-                // Restore an explicitly bound Codex UUID, otherwise let the user select a session.
-                session.restoreCommand = AgentPlatform.recoveryCommand(command: r.command, stableID: r.tfaID)
-            } else if !r.scrollback.isEmpty {
-                session.restorePreamble = Data(r.scrollback.utf8)
-            }
+    ///
+    /// No age cutoff: a lost terminal stays findable until the user removes it. Each comes back as an
+    /// ENDED record (not auto-recreated on selection), so a reboot never mass-launches agents.
+    func restoreMissingSessions(liveLocalNames: Set<String>) {
+        var existing = Set(connections.compactMap { $0.host == nil ? $0.controller.connection.sessionName : nil })
+        for r in sessionStore.roster() where !liveLocalNames.contains(r.name) && !existing.contains(r.name) {
+            existing.insert(r.name) // roster is newest-first: an older row reusing a name stays hidden
+            makeEndedPlaceholder(from: r)
         }
+    }
+
+    /// An ENDED record for a saved roster row: a dormant placeholder that, once explicitly restored,
+    /// creates its session in the saved folder (home if the folder is gone) and resumes the AI
+    /// conversation or replays the saved history. Appended to `connections`.
+    @discardableResult
+    private func makeEndedPlaceholder(from r: SessionRecord) -> ConnectionSession? {
+        seedIdentity(name: r.name, id: r.tfaID) // ensure the placeholder keeps its UUID
+        var isDir: ObjCBool = false
+        let folderExists = !r.cwd.isEmpty && FileManager.default.fileExists(atPath: r.cwd, isDirectory: &isDir) && isDir.boolValue
+        let conn = TmuxConnection(endpoint: .local, sessionName: r.name,
+                                  attachOnly: false,            // create-or-attach on restore
+                                  startDirectory: folderExists ? r.cwd : nil)
+        guard let session = open(conn, connect: false) else { return nil }
+        session.isEnded = true
+        session.savedPath = r.cwd.isEmpty ? nil : r.cwd
+        session.endedAt = r.updatedAt > 0 ? Date(timeIntervalSince1970: r.updatedAt) : nil
+        if !r.scrollback.isEmpty {
+            session.endedPreview = r.scrollback.split(separator: "\n", omittingEmptySubsequences: false)
+                .suffix(12).joined(separator: "\n")
+        }
+        if r.isAI || isAITerminal(command: r.command, cwd: nil) {
+            // Restore an explicitly bound Codex UUID, otherwise let the user select a session.
+            session.restoreCommand = AgentPlatform.recoveryCommand(command: r.command, stableID: r.tfaID)
+        } else if !r.scrollback.isEmpty {
+            session.restorePreamble = Data(r.scrollback.utf8)
+        }
+        return session
     }
 
     /// A terminal is an AI agent session if it's (was) running claude/codex. Detection is by the
@@ -614,7 +643,28 @@ final class AppModel {
     /// as something else just falls back to scrollback replay instead of `claude --continue`.
     private func isAITerminal(command: String, cwd: String?) -> Bool {
         let c = command.lowercased()
-        return c.contains("claude") || c.contains("codex")
+        return c.contains("claude") || c.contains("codex") || Self.isClaudeVersionTitle(c)
+    }
+
+    /// Claude Code retitles its process to its bare VERSION (e.g. `2.1.289`), so tmux's
+    /// `pane_current_command` reports that instead of "claude".
+    static func isClaudeVersionTitle(_ command: String) -> Bool {
+        command.range(of: #"^\d+\.\d+\.\d+$"#, options: .regularExpression) != nil
+    }
+
+    /// Cheap metadata-only snapshot of EVERY live local session — attached or not — so a terminal's
+    /// name + folder are on disk within a minute of it existing, before a server crash can take it.
+    /// One `list-panes -a` off the main actor; scrollback stays with the hourly full snapshot.
+    private func snapshotLiveMetadata() async {
+        let rows = await Task.detached(priority: .utility) { TmuxServer.localPaneMetadata() }.value
+        guard !rows.isEmpty else { return }
+        let byName = Dictionary(rows.map { ($0.session, $0) }, uniquingKeysWith: { a, _ in a })
+        for conn in connections where conn.host == nil && !conn.isEnded && !conn.stableID.isEmpty {
+            let name = conn.controller.connection.sessionName
+            guard let m = byName[name] else { continue }
+            sessionStore.upsertMeta(tfaID: conn.stableID, name: name, cwd: m.path, command: m.command,
+                                    isAI: isAITerminal(command: m.command, cwd: nil))
+        }
     }
 
     /// Switching to a tool pane (Lab / Skills / CLAUDE.md): no terminal is on screen, so stop flagging
@@ -635,6 +685,7 @@ final class AppModel {
         var out: [ConnectionSession] = []
         for g in currentGroups { out.append(contentsOf: visibleTerminals(in: g)) }
         out.append(contentsOf: visibleUngroupedTerminals)
+        out.append(contentsOf: visibleEndedUngroupedTerminals)
         return out
     }
 
@@ -738,6 +789,7 @@ final class AppModel {
     /// launch) and remove the terminal from the app. This is what ⌘W and the row's primary
     /// "Close" do. Surfaces a toast (with Undo) so detach reads differently from Kill (destroy).
     func detachTerminal(_ conn: ConnectionSession) {
+        guard !conn.isEnded else { return } // nothing attached; an ended record leaves only via 移除
         // Remember how to re-attach (the session is still alive) so the toast can offer Undo.
         var reattach = conn.controller.connection
         reattach.attachOnly = true
@@ -767,6 +819,10 @@ final class AppModel {
     /// Destructive: kill the terminal's tmux session and remove it from the app.
     func closeTerminal(_ conn: ConnectionSession) {
         sessionStore.remove(tfaID: conn.stableID) // user explicitly destroyed it → don't ever restore it
+        if conn.isEnded {
+            removeConnection(conn) // nothing is running — just forget the record
+            return
+        }
         if conn.isDormant {
             // A never-connected placeholder has no live -CC client to send `kill-session` on, so
             // briefly connect, then kill. The sidebar row is removed immediately regardless.
@@ -781,11 +837,75 @@ final class AppModel {
         removeConnection(conn)
     }
 
-    /// A connection finalized as gone (reconnect was impossible or exhausted): surface a
-    /// non-blocking toast with the reason, then drop it from the sidebar.
+    /// A connection finalized as gone (reconnect was impossible or exhausted). A LOCAL terminal is
+    /// never dropped: its folder, command and last screen are saved, and the row stays in place (same
+    /// group) as a recoverable ended record. Remote terminals keep the old toast + removal.
     func handleConnectionClosed(_ conn: ConnectionSession) {
-        if let err = conn.connectError { lastError = "\(conn.title): \(err)" }
-        removeConnection(conn)
+        guard conn.host == nil, !conn.stableID.isEmpty else {
+            if let err = conn.connectError { lastError = "\(conn.title): \(err)" }
+            removeConnection(conn)
+            return
+        }
+        let name = conn.controller.attachedSession?.name ?? conn.controller.connection.sessionName
+        let cwd = conn.currentPath ?? ""
+        let ai = isAITerminal(command: conn.subtitle, cwd: nil)
+        if let text = conn.finalScrollback, !text.isEmpty {
+            sessionStore.upsert(SessionRecord(tfaID: conn.stableID, name: name, cwd: cwd, command: conn.subtitle,
+                                              isAI: ai, scrollback: text, updatedAt: 0))
+        } else {
+            sessionStore.upsertMeta(tfaID: conn.stableID, name: name, cwd: cwd, command: conn.subtitle, isAI: ai)
+        }
+        lastError = "「\(conn.title)」的会话已断开 — 已移到「已断开」，可随时恢复"
+        convertToEnded(conn)
+    }
+
+    /// Swap a terminal for an ended record built from its saved row, IN PLACE (same slot, same
+    /// @tfa_id → same group / env / board assignee), keeping it selected if it was. Falls back to
+    /// removal only if there's no record to rebuild from.
+    func convertToEnded(_ conn: ConnectionSession) {
+        guard let record = sessionStore.roster().first(where: { $0.tfaID == conn.stableID }) else {
+            removeConnection(conn); return
+        }
+        conn.disconnect() // quiet teardown of whatever is left (idempotent on a dead connection)
+        guard let placeholder = makeEndedPlaceholder(from: record) else { removeConnection(conn); return }
+        replace(conn, with: placeholder)
+    }
+
+    /// Put `new` (just appended by `open`) into `old`'s slot and drop `old`, carrying the selection.
+    private func replace(_ old: ConnectionSession, with new: ConnectionSession) {
+        connections.removeAll { $0.id == new.id }
+        guard let index = connections.firstIndex(where: { $0.id == old.id }) else {
+            connections.append(new); return
+        }
+        let wasSelected = selectedConnectionID == old.id
+        connections[index] = new
+        if wasSelected { selectedConnectionID = new.id } // didSet: ended → shows its page, no reconnect
+    }
+
+    /// Restore an ended record: if its tmux session is somehow alive again, just attach to it (never
+    /// re-run a resume command or respawn the pane inside a live session); otherwise create it in the
+    /// saved folder and replay its history / resume its AI conversation.
+    func restoreEnded(_ conn: ConnectionSession) {
+        guard conn.isEnded else { return }
+        let name = conn.controller.connection.sessionName
+        Task { @MainActor in
+            let alive = await Task.detached(priority: .userInitiated) { TmuxServer.listLocalSessions().contains(name) }.value
+            guard self.connection(conn.id) != nil else { return } // removed while we checked
+            if alive {
+                guard let live = self.open(TmuxConnection(endpoint: .local, sessionName: name, attachOnly: true),
+                                           connect: false) else { return }
+                self.replace(conn, with: live)
+                self.activateTerminal(live.id)
+            } else {
+                conn.isEnded = false
+                self.activateTerminal(conn.id) // → ensureConnected → create-or-attach in the saved folder
+            }
+        }
+    }
+
+    /// Forget every ended record on the current host (the「已断开」section's bulk remove).
+    func removeAllEnded() {
+        for conn in connections where conn.isEnded && matchesCurrentHost(conn) { closeTerminal(conn) }
     }
 
     /// Remove a terminal and reselect the first remaining one if it was selected. Idempotent:
@@ -1312,7 +1432,12 @@ final class AppModel {
         terminals(in: group).filter { matchesCurrentHost($0) }
     }
     var visibleUngroupedTerminals: [ConnectionSession] {
-        ungroupedTerminals.filter { matchesCurrentHost($0) }
+        ungroupedTerminals.filter { matchesCurrentHost($0) && !$0.isEnded }
+    }
+    /// Ungrouped ended records — listed in their own「已断开」section below the live terminals.
+    /// (Grouped ones stay inside their folder.)
+    var visibleEndedUngroupedTerminals: [ConnectionSession] {
+        ungroupedTerminals.filter { matchesCurrentHost($0) && $0.isEnded }
     }
 
     // MARK: - Per-session environment variables (方案 A: tmux set-environment)

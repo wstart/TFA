@@ -169,13 +169,14 @@ else is monochrome ink/stone. Never add a fourth status color.
 
 | Domain | neutral | pending | positive | active | attention | error |
 |--------|---------|---------|----------|--------|-----------|-------|
-| **Connection** | dormant | connecting · reconnecting | connected | — | — | failed |
+| **Connection** | dormant · ended | connecting · reconnecting | connected | — | — | failed |
 | **Tunnel** | stopped | connecting | running | — | retrying | — |
 | **Task board** | todo | — | done | doing | needs-takeover | blocked |
 | **Activity** | idle | — | — | working (equalizer) | needs-you (bell) | — |
 
 Glyphs stay distinct so meaning survives without color: `checkmark.circle.fill` (positive),
-`exclamationmark.triangle.fill` (error), `moon.zzz` (dormant), spinner (pending), bell (attention).
+`exclamationmark.triangle.fill` (error), `moon.zzz` (dormant), `arrow.counterclockwise.circle` (ended —
+session gone, kept as a recoverable record), spinner (pending), bell (attention).
 Unseen background output is a small ink dot. A healthy connected row stays visually quiet.
 
 ---

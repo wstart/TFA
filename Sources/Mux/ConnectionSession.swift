@@ -45,6 +45,21 @@ final class ConnectionSession: Identifiable {
     /// so launching / switching host with many sessions stays instant and cheap.
     private(set) var isDormant = true
 
+    /// RECOVERABLE RECORD: this terminal's tmux session is gone (crashed server, killed, rebooted) but
+    /// TFA kept the row — in its group, with its folder — so the user can find it and restore it.
+    /// Unlike a plain dormant placeholder, selecting it does NOT recreate the session; only an
+    /// explicit 恢复 does (AppModel.restoreEnded). Always dormant while set.
+    var isEnded = false
+    /// When the session was last known alive (the record's timestamp) — shown on the ended page.
+    var endedAt: Date?
+    /// The tail of its saved history, previewed on the ended page so the user recognises it.
+    var endedPreview: String?
+    /// The folder this terminal was last in, for rows with no live pane to ask (ended / restored).
+    var savedPath: String?
+    /// The pane's text as rendered locally, captured the moment the connection dropped for good — the
+    /// tmux side is already gone then, so this is the only copy of what was on screen.
+    @ObservationIgnored private(set) var finalScrollback: String?
+
     /// True when a NON-foreground terminal has produced output the user hasn't seen yet — drives the
     /// sidebar activity dot. Cleared when the terminal becomes the one being viewed.
     var hasUnseenOutput = false
@@ -144,7 +159,7 @@ final class ConnectionSession: Identifiable {
     /// The active pane's current working directory (nil until known) — shown in the header.
     var currentPath: String? {
         let p = controller.primaryPane?.currentPath ?? ""
-        return p.isEmpty ? nil : p
+        return p.isEmpty ? savedPath : p
     }
 
     /// The primary pane's shell pid (nil until known) — used to find this terminal's listening ports.
@@ -474,6 +489,7 @@ final class ConnectionSession: Identifiable {
     /// or it's an unexpected drop → try to reconnect, and only give up (toast + sidebar removal)
     /// once the session is provably gone or retries are exhausted.
     private func handleUnderlyingClose() {
+        if !intentionalClose { finalScrollback = localScrollbackText() } // before the panes are dropped
         terminals.removeAll() // every PaneTerminal referenced the now-dead controller
 
         if intentionalClose {
@@ -488,6 +504,16 @@ final class ConnectionSession: Identifiable {
         } else {
             finalizeClosed()
         }
+    }
+
+    /// The primary pane's normal-screen text (scrollback + screen) from the LOCAL SwiftTerm buffer,
+    /// trailing blank lines trimmed, newest `maxLines` kept. nil when there's no pane or no text.
+    private func localScrollbackText(maxLines: Int = 3000) -> String? {
+        guard let pane = controller.primaryPane?.id, let term = terminals[pane] else { return nil }
+        let data = term.view.getTerminal().getBufferAsData(kind: .normal)
+        var lines = String(decoding: data, as: UTF8.self).components(separatedBy: "\n")
+        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
+        return lines.isEmpty ? nil : lines.suffix(maxLines).joined(separator: "\n")
     }
 
     /// Reconnect is worth attempting only if the session might still be there. For local we can

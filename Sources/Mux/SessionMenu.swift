@@ -29,6 +29,22 @@ struct SessionMenuItems: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        if conn.isEnded { endedItems } else { liveItems }
+    }
+
+    /// An ended record has no session to act on: restore it, find its folder, file it, or forget it.
+    @ViewBuilder private var endedItems: some View {
+        Button("恢复会话") { appModel.restoreEnded(conn) }
+        Button("在 Finder 中打开文件夹") {
+            if let p = conn.currentPath { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
+        }
+        .disabled(conn.currentPath.map { !FileManager.default.fileExists(atPath: $0) } ?? true)
+        groupMenu(appModel.sessionMenu)
+        Divider()
+        Button("移除…", role: .destructive) { appModel.sessionMenu.killTarget = conn }
+    }
+
+    @ViewBuilder private var liveItems: some View {
         let menu = appModel.sessionMenu
         Button("重命名…") { menu.renameText = conn.title; menu.renameTarget = conn }
         Divider()
@@ -51,20 +67,7 @@ struct SessionMenuItems: View {
         .disabled(conn.host != nil || conn.currentPath == nil || VSCode.appURL == nil)
         .help(VSCode.appURL == nil ? "未检测到 VS Code" : (conn.host != nil ? "暂不支持远程会话" : ""))
 
-        Menu("分组") {
-            ForEach(appModel.currentGroups) { g in
-                Button {
-                    appModel.assign(conn, toGroup: g.id)
-                } label: {
-                    appModel.group(for: conn)?.id == g.id ? Label(g.name, systemImage: "checkmark") : Label(g.name, systemImage: "")
-                }
-            }
-            if !appModel.currentGroups.isEmpty { Divider() }
-            Button("新建分组…") { menu.newGroupName = ""; menu.newGroupConn = conn; menu.newGroupShown = true }
-            if appModel.group(for: conn) != nil {
-                Button("移出分组") { appModel.removeFromGroups(conn) }
-            }
-        }
+        groupMenu(menu)
         Divider()
 
         Button("环境变量…") { menu.envTarget = conn }
@@ -82,6 +85,23 @@ struct SessionMenuItems: View {
 
         Button("关闭") { appModel.detachTerminal(conn) }                    // detach — session survives
         Button("结束 session…", role: .destructive) { menu.killTarget = conn } // kill — confirmed
+    }
+
+    private func groupMenu(_ menu: SessionMenu) -> some View {
+        Menu("分组") {
+            ForEach(appModel.currentGroups) { g in
+                Button {
+                    appModel.assign(conn, toGroup: g.id)
+                } label: {
+                    appModel.group(for: conn)?.id == g.id ? Label(g.name, systemImage: "checkmark") : Label(g.name, systemImage: "")
+                }
+            }
+            if !appModel.currentGroups.isEmpty { Divider() }
+            Button("新建分组…") { menu.newGroupName = ""; menu.newGroupConn = conn; menu.newGroupShown = true }
+            if appModel.group(for: conn) != nil {
+                Button("移出分组") { appModel.removeFromGroups(conn) }
+            }
+        }
     }
 }
 
@@ -107,14 +127,17 @@ private struct SessionMenuHostModifier: ViewModifier {
                 }
                 Button("取消", role: .cancel) { menu.renameTarget = nil }
             }
-            .alert("结束 session?", isPresented: optBinding(\.killTarget)) {
-                Button("结束 session", role: .destructive) {
+            .alert(menu.killTarget?.isEnded == true ? "移除已断开的终端?" : "结束 session?",
+                   isPresented: optBinding(\.killTarget)) {
+                Button(menu.killTarget?.isEnded == true ? "移除" : "结束 session", role: .destructive) {
                     if let conn = menu.killTarget { appModel.closeTerminal(conn) }
                     menu.killTarget = nil
                 }
                 Button("取消", role: .cancel) { menu.killTarget = nil }
             } message: {
-                Text("永久结束该 tmux 会话，下次启动不再恢复。")
+                Text(menu.killTarget?.isEnded == true
+                     ? "从侧栏和恢复记录中删除，之后无法再恢复。不影响磁盘上的文件夹和文件。"
+                     : "永久结束该 tmux 会话，下次启动不再恢复。")
             }
             .alert("重启 session?", isPresented: optBinding(\.restartTarget)) {
                 Button("重启", role: .destructive) {

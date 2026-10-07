@@ -45,6 +45,12 @@ struct SidebarView: View {
     @State private var dropTargetGroup: UUID?
     @State private var ungroupedDropTargeted = false
 
+    /// Top tab: live terminals vs ended (crashed / lost) records, plus the bulk-remove confirmation.
+    @State private var showEnded = false
+    /// Collapse state of the built-in「未分组」folder that holds ungrouped terminals.
+    @AppStorage("defaultGroupCollapsed") private var defaultCollapsed = false
+    @State private var confirmRemoveAllEnded = false
+
     var body: some View {
         @Bindable var model = appModel
         VStack(spacing: 0) {
@@ -57,6 +63,17 @@ struct SidebarView: View {
 
             WorkspaceControls()
             FilterField(text: $filter)
+            let endedCount = appModel.visibleConnections.filter(\.isEnded).count
+            if endedCount > 0 {
+                Picker("", selection: $showEnded) {
+                    Text("在线 \(appModel.visibleConnections.count - endedCount)").tag(false)
+                    Text("已断开 \(endedCount)").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, Theme.Space.md)
+                .padding(.bottom, Theme.Space.sm)
+            }
 
             List(selection: Binding(
                 // While a tool pane (Tasks / Lab / Skills / CLAUDE.md) is showing, no terminal is on
@@ -70,12 +87,20 @@ struct SidebarView: View {
                 ForEach(appModel.currentGroups) { group in
                     groupTree(group)
                 }
-                let ungrouped = filtered(appModel.visibleUngroupedTerminals)
+                let ungrouped = filtered(showEnded ? appModel.visibleEndedUngroupedTerminals
+                                                   : appModel.visibleUngroupedTerminals)
                 // The top-level (ungrouped) area also accepts drops: dropping a grouped terminal here
                 // pulls it back out of its folder (#8, "drag out to ungrouped"). Wrapped in a Section
                 // so the drop target spans the loose rows rather than a single row.
                 Section {
-                    ForEach(ungrouped) { row($0) }
+                    // Ungrouped terminals live under a built-in「未分组」folder (not a real group:
+                    // no note, no reorder, not deletable). Filtering force-expands it.
+                    if !ungrouped.isEmpty {
+                        defaultHeaderRow(count: ungrouped.count)
+                        if defaultCollapsed == false || !filter.trimmingCharacters(in: .whitespaces).isEmpty {
+                            ForEach(ungrouped) { row($0).padding(.leading, Theme.Space.lg) }
+                        }
+                    }
                 } header: {
                     if ungroupedDropTargeted {
                         Text("松手 → 移出分组")
@@ -94,6 +119,12 @@ struct SidebarView: View {
                     ungroupedDropTargeted = false; dropTargetGroup = nil
                     return true
                 } isTargeted: { ungroupedDropTargeted = $0 }
+                if showEnded && endedCount > 0 {
+                    Button("全部移除…", role: .destructive) { confirmRemoveAllEnded = true }
+                        .buttonStyle(.plain)
+                        .font(Theme.Font.rowSubtitle)
+                        .foregroundStyle(.secondary)
+                }
                 if appModel.isDiscoveringSessions {
                     HStack(spacing: Theme.Space.sm) {
                         ProgressView().controlSize(.small)
@@ -118,6 +149,14 @@ struct SidebarView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.chrome)
+        // Keep the selected row on screen: selecting (or ⌘-navigating to) an ended record shows the
+        // 已断开 tab; restoring it, or the last record going away, brings back 在线.
+        .onChange(of: appModel.selectedConnection?.isEnded) { _, ended in
+            if let ended { showEnded = ended }
+        }
+        .onChange(of: appModel.visibleConnections.contains(where: \.isEnded)) { _, any in
+            if !any { showEnded = false }
+        }
         .alert(groupRenameID == nil ? "New Group" : "Rename Group", isPresented: $groupAlertShown) {
             TextField("Group name", text: $groupAlertName)
             Button(groupRenameID == nil ? "Create" : "Rename") { confirmGroupAlert() }
@@ -133,6 +172,12 @@ struct SidebarView: View {
             }
         }
         .sheet(isPresented: $showServerSheet) { ServerListView() }
+        .alert("移除全部已断开的终端?", isPresented: $confirmRemoveAllEnded) {
+            Button("全部移除", role: .destructive) { appModel.removeAllEnded() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("从侧栏和恢复记录中删除，之后无法再恢复。不影响磁盘上的文件夹和文件。")
+        }
     }
 
     // MARK: - Sections
@@ -148,8 +193,9 @@ struct SidebarView: View {
     /// force-expands so matches are never hidden inside a folded group.
     @ViewBuilder
     private func groupTree(_ group: AppModel.TerminalGroup) -> some View {
-        let members = filtered(appModel.visibleTerminals(in: group))
-        if (filter.isEmpty && WorkspaceStore.shared.selected == nil) || !members.isEmpty {
+        let members = tabMembers(group)
+        // The 已断开 tab lists only folders that hold ended records; 在线 keeps empty folders as drop targets.
+        if (filter.isEmpty && WorkspaceStore.shared.selected == nil && !showEnded) || !members.isEmpty {
             groupHeaderRow(group)
                 // One drop target, two payloads: a folder token → reorder before this folder; a
                 // terminal's groupKey → file that terminal into this group (#8). (The folder's OWN
@@ -178,6 +224,11 @@ struct SidebarView: View {
                 }
             }
         }
+    }
+
+    /// A group's members on the current tab (live or ended), after the filter text.
+    private func tabMembers(_ group: AppModel.TerminalGroup) -> [ConnectionSession] {
+        filtered(appModel.visibleTerminals(in: group).filter { $0.isEnded == showEnded })
     }
 
     /// Whether a group is expanded, backed by the persisted `collapsedRaw` set. Filtering
@@ -224,7 +275,7 @@ struct SidebarView: View {
                 .onTapGesture { toggleGroup(group.id) }
             // Name (icon → count stretch) = open this group's Markdown note in the detail area.
             sectionHeaderLabel(group.name, icon: "folder.fill",
-                               count: appModel.visibleTerminals(in: group).count)
+                               count: appModel.visibleTerminals(in: group).filter { $0.isEnded == showEnded }.count)
                 .contentShape(Rectangle())
                 .onTapGesture { appModel.openGroupNote(group) }
             // Dedicated drag handle: the ONLY draggable bit, so the tap-to-toggle area never fights the
@@ -284,6 +335,29 @@ struct SidebarView: View {
             let beforeID = j + 1 < ids.count ? ids[j + 1] : nil
             appModel.moveGroup(id, before: beforeID)
         }
+    }
+
+    /// Header of the built-in「未分组」folder: same chevron + label as a group folder, tap anywhere
+    /// to fold. No note / drag handle — it isn't a real group.
+    private func defaultHeaderRow(count: Int) -> some View {
+        let expanded = !defaultCollapsed || !filter.trimmingCharacters(in: .whitespaces).isEmpty
+        return HStack(spacing: Theme.Space.xs) {
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .rotationEffect(.degrees(expanded ? 90 : 0))
+                .frame(width: 20, height: 20)
+            sectionHeaderLabel("未分组", icon: "folder.fill", count: count)
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onTapGesture { defaultCollapsed.toggle() }
+        .help("未分组的终端 · 点击折叠/展开")
+        .animation(.easeInOut(duration: 0.15), value: expanded)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Ungrouped, \(expanded ? "expanded" : "collapsed")")
+        .accessibilityAction { defaultCollapsed.toggle() }
     }
 
     /// Shared prominent section header: a brand-tinted icon, a LARGE full-strength title (so a group
@@ -550,6 +624,7 @@ private struct TerminalRow: View {
             VStack(alignment: .leading, spacing: Theme.Space.xxs) {
                 Text(conn.title)
                     .font(Theme.Font.rowTitle)
+                    .foregroundStyle(status == .ended ? .secondary : .primary)
                     .lineLimit(1)
                 subtitle(status)
             }
@@ -606,6 +681,13 @@ private struct TerminalRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+        } else if status == .ended {
+            // Ended record: say so, and WHERE it lived — the folder is how you recognise it.
+            Text(folderLabel.map { "已断开 · \($0)" } ?? "已断开 · 可恢复")
+                .font(Theme.Font.rowSubtitle)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
         } else if status == .dormant {
             Text("未连接 · 点击打开")
                 .font(Theme.Font.rowSubtitle)

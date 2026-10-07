@@ -128,9 +128,11 @@ enum TerminalStatus: Equatable {
     case reconnecting        // dropped; auto-retrying
     case connected
     case failed              // connectError set and not (yet) recovering
+    case ended               // session gone (crash / kill / reboot) — kept as a recoverable record
 
     @MainActor
     static func of(_ conn: ConnectionSession) -> TerminalStatus {
+        if conn.isEnded { return .ended }                        // recoverable record, nothing running
         if conn.isDormant { return .dormant }                    // not attached yet (lazy)
         if conn.isReconnecting { return .reconnecting }          // actively recovering wins
         if conn.connectError != nil, !conn.state.connected { return .failed }
@@ -150,6 +152,7 @@ enum TerminalStatus: Equatable {
         case .reconnecting: return "arrow.triangle.2.circlepath"
         case .connecting: return "circle.dotted"
         case .dormant: return "moon.zzz"
+        case .ended: return "arrow.counterclockwise.circle"
         }
     }
 
@@ -160,6 +163,7 @@ enum TerminalStatus: Equatable {
         case .reconnecting: return Theme.Status.pending
         case .connecting: return Theme.Status.pending
         case .dormant: return Theme.Status.neutral
+        case .ended: return Theme.Status.neutral
         }
     }
 
@@ -171,6 +175,7 @@ enum TerminalStatus: Equatable {
         case .reconnecting: return "Reconnecting"
         case .connecting: return "Connecting"
         case .dormant: return "Idle — select to connect"
+        case .ended: return "已断开 — 可恢复"
         }
     }
 }

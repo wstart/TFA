@@ -187,6 +187,43 @@ public enum TmuxServer {
         }.value
     }
 
+    /// One session's active pane: where it is and what it runs.
+    public struct PaneMetadata: Sendable, Equatable {
+        public let session: String
+        public let path: String
+        public let command: String
+    }
+
+    /// Working directory + running command of EVERY local session's active pane, in one
+    /// `list-panes -a` call — including sessions TFA never attached. Lets the app remember where each
+    /// terminal lives before the server can lose it. Best-effort: `[]` on any failure.
+    public static func localPaneMetadata(tmuxPath: String? = nil, socketName: String? = nil) -> [PaneMetadata] {
+        guard let tmux = tmuxPath ?? TmuxLocator.find() else { return [] }
+        var args: [String] = []
+        if let socket = socketName { args += ["-L", socket] }
+        // US-separated; path LAST so nothing it contains can shift the earlier fields.
+        args += ["-u", "list-panes", "-a", "-F",
+                 "#{window_active}#{pane_active}\u{1f}#{session_name}\u{1f}#{pane_current_command}\u{1f}#{pane_current_path}"]
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tmux)
+        process.arguments = args
+        process.environment = utf8Environment()
+        let stdout = Pipe(); process.standardOutput = stdout; process.standardError = Pipe()
+        do { try process.run() } catch { return [] }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return [] }
+
+        var out: [PaneMetadata] = []
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+            let f = line.split(separator: "\u{1f}", maxSplits: 3, omittingEmptySubsequences: false)
+            guard f.count == 4, f[0] == "11" else { continue } // the active pane of the active window
+            out.append(PaneMetadata(session: String(f[1]), path: String(f[3]), command: String(f[2])))
+        }
+        return out
+    }
+
     /// Split a `#{session_name}`-per-line tmux output blob into trimmed, non-empty names.
     private static func parseSessionNames(_ data: Data) -> [String] {
         String(decoding: data, as: UTF8.self)

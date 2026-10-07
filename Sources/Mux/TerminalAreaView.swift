@@ -22,7 +22,9 @@ private struct TerminalContent: View {
     let conn: ConnectionSession
 
     var body: some View {
-        if conn.isAuthenticating, let login = conn.loginTerminal {
+        if conn.isEnded {
+            EndedSessionView(connection: conn)
+        } else if conn.isAuthenticating, let login = conn.loginTerminal {
             // ssh login phase — an interactive terminal so you can type the password / answer prompts.
             LoginView(connection: conn, login: login)
         } else if let pane = conn.primaryPane, !conn.isReconnecting {
@@ -153,6 +155,97 @@ private struct ConnectionFailureView: View {
         .padding(Theme.Space.xxxl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.canvas)
+    }
+}
+
+/// A terminal whose tmux session is gone (crash / kill / reboot), kept as a recoverable record: where
+/// it lived, what was last on screen, and an explicit 恢复 — selecting it never recreates it by itself.
+private struct EndedSessionView: View {
+    @Environment(AppModel.self) private var appModel
+    let connection: ConnectionSession
+
+    var body: some View {
+        VStack(spacing: Theme.Space.lg) {
+            Image(systemName: "arrow.counterclockwise.circle")
+                .font(.system(size: 34))
+                .foregroundStyle(Theme.Status.neutral)
+            Text("会话已断开")
+                .font(Theme.Font.emptyTitle)
+            VStack(spacing: Theme.Space.xs) {
+                if let path = connection.savedPath {
+                    Label(displayPath(path), systemImage: "folder")
+                        .font(Theme.Font.emptyBody)
+                        .textSelection(.enabled)
+                    if !folderExists(path) {
+                        Text("该文件夹已不存在，恢复后将在主目录启动")
+                            .font(Theme.Font.rowSubtitle)
+                            .foregroundStyle(Theme.Status.attention)
+                    }
+                }
+                Text(detail)
+                    .font(Theme.Font.rowSubtitle)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            if let preview = connection.endedPreview, !preview.isEmpty {
+                ScrollView {
+                    Text(preview)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.terminalForeground.opacity(0.7))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxWidth: 560, maxHeight: 180)
+                .padding(Theme.Space.md)
+                .background(Theme.terminalBackground, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+                .accessibilityLabel("断开前最后的输出")
+            }
+            HStack(spacing: Theme.Space.md) {
+                Button {
+                    appModel.restoreEnded(connection)
+                } label: {
+                    Label("恢复会话", systemImage: "arrow.counterclockwise")
+                }
+                .controlSize(.large)
+                .keyboardShortcut("r", modifiers: .command)
+                if let path = connection.savedPath, folderExists(path) {
+                    Button {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                    } label: {
+                        Label("在 Finder 中打开", systemImage: "folder")
+                    }
+                    .controlSize(.large)
+                }
+                Button(role: .destructive) {
+                    appModel.sessionMenu.killTarget = connection
+                } label: {
+                    Label("移除", systemImage: "trash")
+                }
+                .controlSize(.large)
+            }
+        }
+        .padding(Theme.Space.xxxl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.canvas)
+    }
+
+    /// What 恢复 will do, plus when it was last seen alive.
+    private var detail: String {
+        let action = connection.restoreCommand.map { "恢复时将在原文件夹新建会话并执行 \($0) 续接对话。" }
+            ?? (connection.restorePreamble != nil ? "恢复时将在原文件夹新建会话，并回放之前的历史。"
+                                                   : "恢复时将在原文件夹新建同名会话。")
+        guard let at = connection.endedAt else { return action }
+        return "最后记录于 \(at.formatted(date: .abbreviated, time: .shortened))。" + action
+    }
+
+    private func displayPath(_ p: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return p == home ? "~" : p.replacingOccurrences(of: home, with: "~")
+    }
+
+    private func folderExists(_ p: String) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: p, isDirectory: &isDir) && isDir.boolValue
     }
 }
 
