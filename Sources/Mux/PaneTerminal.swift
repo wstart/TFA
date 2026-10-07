@@ -19,7 +19,7 @@ import TmuxKit
 @MainActor
 final class PaneTerminal {
     let paneID: TmuxPaneID
-    let view: TerminalView
+    let view: ScrollCoalescingTerminalView
 
     private weak var controller: TmuxController?
     private let coordinator: Coordinator
@@ -52,7 +52,7 @@ final class PaneTerminal {
         self.controller = controller
         self.historyPreamble = historyPreamble
 
-        let tv = TerminalView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
+        let tv = ScrollCoalescingTerminalView(frame: NSRect(x: 0, y: 0, width: 480, height: 320))
         // Bounded local scrollback (决议 #6): 10k lines instead of SwiftTerm's 500-line default —
         // deep history for search/scroll, but still a hard cap so a day-long `tail -f` can't grow
         // memory without bound. tmux keeps its own history regardless.
@@ -99,7 +99,7 @@ final class PaneTerminal {
         if hydrating {
             pending.append(data)
         } else {
-            view.feed(byteArray: ArraySlice(data))
+            view.feedCoalescingScroll(ArraySlice(data))
             noteOutput(data)
         }
     }
@@ -183,14 +183,14 @@ final class PaneTerminal {
             let snapshot = await snapshotTask
             let cursor = await cursorTask
             if !snapshot.isEmpty {
-                view.feed(byteArray: ArraySlice(snapshot))
+                view.feedCoalescingScroll(ArraySlice(snapshot))
             }
             if let cursor {
                 view.feed(byteArray: ArraySlice(Self.cup(x: cursor.x, y: cursor.y)))
             }
             // Flush anything that arrived live while we were capturing (continues from the cursor).
             if !pending.isEmpty {
-                view.feed(byteArray: ArraySlice(pending))
+                view.feedCoalescingScroll(ArraySlice(pending))
                 pending.removeAll(keepingCapacity: false)
             }
             hydrating = false
@@ -381,5 +381,34 @@ final class PaneTerminal {
         }
         func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+    }
+}
+
+/// A `TerminalView` that coalesces SwiftTerm's per-line `scrolled` callback into one per feed.
+///
+/// While output streams at the live tail, SwiftTerm calls `scrolled` on EVERY linefeed, and each
+/// call updates the NSScroller and our delegate (`handleScroll` → SwiftUI scroll state) — measured
+/// at ~40% of main-thread feed cost under heavy output (`yes`, big logs). Inside a feed we only note
+/// that a scroll happened, then deliver ONE `scrolled` with the final position once the bytes are in.
+/// Scrolls outside a feed (wheel, drag, `scroll(toPosition:)`) pass straight through.
+final class ScrollCoalescingTerminalView: TerminalView {
+    private var feeding = false
+    private var scrolledDuringFeed = false
+
+    override func scrolled(source terminal: Terminal, yDisp: Int) {
+        if feeding { scrolledDuringFeed = true; return }
+        super.scrolled(source: terminal, yDisp: yDisp)
+    }
+
+    /// `feed(byteArray:)` with scroll notifications collapsed into a single trailing `scrolled`.
+    func feedCoalescingScroll(_ bytes: ArraySlice<UInt8>) {
+        feeding = true
+        feed(byteArray: bytes)
+        feeding = false
+        if scrolledDuringFeed {
+            scrolledDuringFeed = false
+            let terminal = getTerminal()
+            super.scrolled(source: terminal, yDisp: terminal.buffer.yDisp)
+        }
     }
 }

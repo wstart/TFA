@@ -60,7 +60,9 @@ public final class TmuxController {
         try await refreshAll()
         // Enable flow control so a flooding pane (e.g. `yes`) can't grow an unbounded backlog or
         // swamp the main actor — tmux pauses + buffers instead. Best-effort: old tmux ignores it.
-        client.setFlowControl(pauseAfter: 1)
+        // 3s, not 1s: a paused pane's output is DISCARDED by tmux, and with 1s several terminals
+        // flooding at once lost ~70% of their output to momentary read stalls (measured: 8× `seq`).
+        client.setFlowControl(pauseAfter: 3)
         state.connected = true
     }
 
