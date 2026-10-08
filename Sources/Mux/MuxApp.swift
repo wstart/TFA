@@ -7,7 +7,10 @@ struct MuxApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
-        WindowGroup("TFA") {
+        // A single-instance `Window`, not a `WindowGroup`: every terminal is ONE SwiftTerm NSView, which
+        // can live in only one window. A second main window (⌘N, or macOS restoring two) would steal the
+        // views, leaving the other window's terminals blank and swallowing keystrokes.
+        Window("TFA", id: "main") {
             RootView()
                 .environment(appModel)
                 .frame(minWidth: 900, minHeight: 560)
