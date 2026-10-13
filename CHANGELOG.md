@@ -3,7 +3,7 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
-## [Unreleased]
+## [0.20.0] — 2026-10-14
 
 ### 新增
 - **axis-claude**：内置的命令行编程助手（随 TFA.app 一起分发，不依赖 Node / Python），用本机 axis-model 大模型读写代码、执行命令，不需要账号和联网。支持流式回复、Read / Write / Edit / Bash / Glob / Grep / LS 工具、默认自动授权（`--ask` 改为修改前逐次询问）、自动读取 `CLAUDE.md` / `AGENTS.md`、对话自动保存（`--continue` 续接）、`-p` 一次性模式。系统提示保持稳定，命中 axis-model 前缀缓存。
