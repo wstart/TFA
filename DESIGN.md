@@ -37,7 +37,7 @@ styling choice respects which tier it's in. The tiers must stay visibly distinct
 | World | Background | Foreground | Where | Why |
 |-------|-----------|-----------|-------|-----|
 | **Chrome** (cream) | Cream `#f4f2ea` | Ink `#141413` | Sidebar, titlebar, tool dock, quiet chips | One tier warmer than canvas — frames the workspace |
-| **Chrome** (canvas) | Ivory `#faf9f5` | Ink `#141413` | Main content: terminal header, task board, tunnels, lab | The neutral working ground |
+| **Chrome** (canvas) | Ivory `#faf9f5` | Ink `#141413` | Main content: terminal header, model panel, tunnels, lab | The neutral working ground |
 | **Chrome** (cards) | White `#ffffff` | Ink `#141413` | Cards, inputs, list rows, host pill, sheets | Elevated surfaces floating on canvas |
 | **Terminal** (fixed dark) | `#1D2026` | `#DBDEE5` | The terminal pane only | ANSI/TUI palettes are tuned for dark; a cream terminal makes `ls` colors, vim, claude TUIs illegible |
 
@@ -146,7 +146,7 @@ Terminal text is monospaced (SwiftTerm, persisted font size via `AppModel.fontSi
 ## 6. Status & activity language — the state-color standard
 
 One semantic **state-intent palette** (`Theme.Status`) is THE standard; every domain (connection,
-activity, tunnels, task board) maps onto it. Communicated **shape-first, color-second** (color-blind
+activity, tunnels, model service) maps onto it. Communicated **shape-first, color-second** (color-blind
 safe, quiet in a long list). Guiding rule: **color signals "needs your eye"** — idle stays neutral
 gray, in-progress leans on the spinner *shape*, "all good" gets one restrained sage, and only the two
 alerts are warm.
@@ -171,7 +171,7 @@ else is monochrome ink/stone. Never add a fourth status color.
 |--------|---------|---------|----------|--------|-----------|-------|
 | **Connection** | dormant · ended | connecting · reconnecting | connected | — | — | failed |
 | **Tunnel** | stopped | connecting | running | — | retrying | — |
-| **Task board** | todo | — | done | doing | needs-takeover | blocked |
+| **Model service** | stopped · not installed | starting · stopping | running | — | standby (no model loaded) | — |
 | **Activity** | idle | — | — | working (equalizer) | needs-you (bell) | — |
 
 Glyphs stay distinct so meaning survives without color: `checkmark.circle.fill` (positive),
@@ -213,12 +213,12 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
 - **Sidebar terminal row** — White on Cream; `rowTitle` name + `rowSubtitle` (cwd / live line);
   status glyph (§6); a single primary activity signal per row; active = charcoal wash.
 - **Group folder** — disclosure row, `groupHeader`; drag-reorderable; drop targets highlight in accent.
-- **Tool dock** (任务 / 隧道 / 规则 / Skills / 实验室) — sidebar bottom; equal-width icon+label cells,
+- **Tool dock** (模型 / 隧道 / 规则 / Skills / 实验室) — sidebar bottom; equal-width icon+label cells,
   selected = filled charcoal cell with ivory glyph (mirrors a selected row).
 - **Status indicator** — shared spinner-or-glyph component; symbol + tint + VoiceOver label.
 - **Panel header bar** — Ivory canvas, `headerTitle`, sidebar-toggle + a leading accent icon.
-- **Task board card** — White, Linen border, 16px radius; status chip, agent label, latest-record line;
-  blocked = brick wash, needs-takeover = amber wash.
+- **Model panel card** — White, Linen border, 16px radius; a status dot + title header above, then
+  control / stats (mono values) / model list cards.
 - **Tunnel row** — White card, 16px radius; status dot (running=slate, retrying=amber, stopped=stone),
   name + endpoint, a Cream port-mapping chip (mono), enable switch, log/edit/delete.
 - **Sheets / forms** (SSH host, tunnel, environment editor) — White, Linen border, `headerTitle` title,

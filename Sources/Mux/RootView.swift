@@ -41,10 +41,10 @@ struct RootView: View {
                                 onUndo: { model.undoDetach() },
                                 onDismiss: { model.dismissDetachNotice() })
                 }
-                if appModel.tasksSelected {
-                    TasksHeaderBar()
+                if appModel.axisSelected {
+                    AxisHeaderBar()
                     Divider()
-                    TaskBoardView()
+                    AxisModelView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.claudeMdSelected {
                     ClaudeMdHeaderBar()
@@ -335,44 +335,6 @@ private struct ErrorBanner: View {
     }
 }
 
-/// Slim header for the task board detail pane.
-private struct TasksHeaderBar: View {
-    @Environment(AppModel.self) private var appModel
-
-    var body: some View {
-        HStack(spacing: Theme.Space.md) {
-            Button { appModel.toggleSidebar() } label: {
-                Image(systemName: "sidebar.left")
-            }
-            .buttonStyle(.borderless)
-            .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
-            .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
-
-            Image(systemName: "checklist").foregroundStyle(Theme.brand)
-            Text("任务看板").font(Theme.Font.headerTitle).lineLimit(1)
-            // Glance stats live HERE (the board view no longer repeats a title row).
-            let tasks = appModel.taskBoard.board.tasks
-            let doing = tasks.filter { $0.status == .doing }.count
-            let blocked = tasks.filter { $0.status == .blocked }.count
-            let waiting = tasks.filter { $0.comments.last?.kind == "question" }.count
-            if doing > 0 { headerStat("进行中", doing, Theme.brand) }
-            if blocked > 0 { headerStat("受阻", blocked, Theme.Status.error) }
-            if waiting > 0 { headerStat("待回复", waiting, Theme.Status.attention) }
-            Spacer()
-            if !tasks.isEmpty { Text("共 \(tasks.count)").font(.caption).foregroundStyle(.tertiary).monospacedDigit() }
-        }
-        .padding(.horizontal, Theme.Space.lg)
-        .padding(.vertical, Theme.Space.sm)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.canvas)
-    }
-
-    private func headerStat(_ label: String, _ n: Int, _ tint: Color) -> some View {
-        (Text("\(label) ").font(.caption).foregroundStyle(.secondary) + Text("\(n)").font(.caption.weight(.bold)).foregroundStyle(tint))
-            .monospacedDigit()
-    }
-}
-
 /// Slim header for the Claude Code / Codex rules detail pane.
 private struct ClaudeMdHeaderBar: View {
     @Environment(AppModel.self) private var appModel
@@ -438,6 +400,30 @@ private struct LabHeaderBar: View {
 
             Image(systemName: "flask").foregroundStyle(Theme.brand)
             Text("实验室 · 系统监控").font(Theme.Font.headerTitle).lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, Theme.Space.lg)
+        .padding(.vertical, Theme.Space.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.canvas)
+    }
+}
+
+/// Slim header for the axis-model (local model backend) pane.
+private struct AxisHeaderBar: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        HStack(spacing: Theme.Space.md) {
+            Button { appModel.toggleSidebar() } label: {
+                Image(systemName: "sidebar.left")
+            }
+            .buttonStyle(.borderless)
+            .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
+            .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
+
+            Image(systemName: "cpu").foregroundStyle(Theme.brand)
+            Text("模型 · axis-model").font(Theme.Font.headerTitle).lineLimit(1)
             Spacer()
         }
         .padding(.horizontal, Theme.Space.lg)

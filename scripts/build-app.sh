@@ -49,6 +49,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 # Bundle executable is named after the app (CFBundleExecutable=TFA), copied from the Mux binary.
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
+# The bundled axis-claude CLI lives next to it; TFA launches it from there.
+if [[ -x "$BIN_DIR/axis-claude" ]]; then
+  cp "$BIN_DIR/axis-claude" "$APP/Contents/MacOS/axis-claude"
+fi
 
 # App icon: build AppIcon.icns from Icon.png (repo root) into Resources, if present. The standard
 # macOS iconset needs 16/32/128/256/512 at @1x and @2x; sips downscales the single source PNG to
@@ -111,6 +115,10 @@ if [[ -n "$SIGN_ID" ]] && security find-identity -v -p codesigning 2>/dev/null |
       codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$nb"
     fi
   done < <(find "$APP/Contents/Resources" -name "*.bundle" -print0)
+  # Helper executables are signed on their own (hardened runtime) before the app seals them.
+  if [[ -f "$APP/Contents/MacOS/axis-claude" ]]; then
+    codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP/Contents/MacOS/axis-claude"
+  fi
   codesign --force --options runtime --timestamp \
     --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$APP"
   codesign --verify --strict --verbose=2 "$APP"

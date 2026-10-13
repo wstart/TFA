@@ -79,7 +79,7 @@ struct SidebarView: View {
                 // While a tool pane (Tasks / Lab / Skills / CLAUDE.md) is showing, no terminal is on
                 // screen — so don't keep a terminal row highlighted (avoids a confusing double-selection).
                 // selectedConnectionID is preserved underneath, so returning to a terminal restores it.
-                get: { (model.tasksSelected || model.labSelected || model.skillsSelected || model.claudeMdSelected || model.tunnelsSelected || model.groupNoteSelected) ? nil : model.selectedConnectionID },
+                get: { (model.axisSelected || model.labSelected || model.skillsSelected || model.claudeMdSelected || model.tunnelsSelected || model.groupNoteSelected) ? nil : model.selectedConnectionID },
                 set: { if let id = $0 { model.activateTerminal(id) } } // robust to re-selecting the same row while a tool pane is open
             )) {
                 // Tree: group folders (expandable) with their sessions indented underneath, then
@@ -465,8 +465,13 @@ private struct SidebarHeader: View {
 
             Spacer(minLength: Theme.Space.sm)  // push the trailing actions to the right edge
 
-            // New terminal — a filled charcoal square (v2 primary action); opens the「新建会话」sheet.
-            Button { appModel.newTerminal() } label: {
+            // New terminal — a filled charcoal square (v2 primary action); a menu of the two launch
+            // kinds, each opening the「新建会话」sheet. axis-claude runs against the LOCAL model only.
+            Menu {
+                Button { appModel.newTerminal() } label: { Label("启动终端", systemImage: "terminal") }
+                Button { appModel.newTerminal(axisClaude: true) } label: { Label("启动 axis-claude", systemImage: "cpu") }
+                    .disabled(appModel.currentHost != .local)
+            } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(Theme.canvas)
@@ -474,7 +479,9 @@ private struct SidebarHeader: View {
                     .background(Theme.brand, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
                     .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
             }
-            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
             .help("New terminal on \(appModel.currentHost.label) (⌘T)")
             .accessibilityLabel("新建终端")
 
@@ -525,7 +532,7 @@ private struct ToolDock: View {
 
     private var tools: [Tool] {
         [
-            Tool(id: "tasks",   title: "任务",   icon: "checklist",                          selected: appModel.tasksSelected)   { appModel.openTasks() },
+            Tool(id: "axis",    title: "模型",   icon: "cpu",                                selected: appModel.axisSelected)    { appModel.openAxis() },
             Tool(id: "tunnels", title: "隧道",   icon: "network.badge.shield.half.filled",   selected: appModel.tunnelsSelected) { appModel.openTunnels() },
             Tool(id: "rules",   title: "规则",    icon: "text.book.closed",                   selected: appModel.claudeMdSelected){ appModel.openClaudeMd() },
             Tool(id: "skills",  title: "Skills", icon: "wand.and.stars",                     selected: appModel.skillsSelected)  { appModel.openSkills() },

@@ -50,6 +50,7 @@ enum AgentPlatform: String, CaseIterable, Identifiable {
     static func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
     static func recoveryCommand(command: String, stableID: String) -> String {
+        if command.lowercased().contains("axis-claude"), let axis = AxisClaude.command(resume: true) { return axis }
         if command.lowercased().contains("codex") {
             let executable = AgentPlatform.codex.executablePath.map(shellQuote) ?? "codex"
             let id = UserDefaults.standard.string(forKey: "codexSession." + stableID) ?? ""

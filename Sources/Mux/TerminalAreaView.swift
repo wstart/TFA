@@ -61,7 +61,7 @@ private struct EmptyTerminalView: View {
                 .foregroundStyle(Theme.brand)
             Text("还没有打开终端")
                 .font(Theme.Font.emptyTitle)
-            Text("新建本地终端，或通过 ssh 连接远程主机。\n每个终端都是一个真实的 tmux 会话——关掉 App 也不丢；\n在里面跑 AI agent，再用任务看板（⌘⇧T）派活、盯进度。")
+            Text("新建本地终端，或通过 ssh 连接远程主机。\n每个终端都是一个真实的 tmux 会话——关掉 App 也不丢；\n在里面跑 axis-claude，用本地模型写代码。")
                 .font(Theme.Font.emptyBody)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -71,7 +71,7 @@ private struct EmptyTerminalView: View {
             }
             .controlSize(.large)
             .keyboardShortcut("t", modifiers: .command)
-            ShortcutHints(pairs: [("⌘T", "新建"), ("⌘K", "切换"), ("⌘⇧T", "任务看板"), ("⌘]", "有动静的终端")])
+            ShortcutHints(pairs: [("⌘T", "新建"), ("⌘K", "切换"), ("⌘]", "有动静的终端")])
                 .padding(.top, Theme.Space.xs)
         }
         .padding(Theme.Space.xxxl)

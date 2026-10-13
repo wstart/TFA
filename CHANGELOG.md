@@ -3,6 +3,17 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
+## [Unreleased]
+
+### 新增
+- **axis-claude**：内置的命令行编程助手（随 TFA.app 一起分发，不依赖 Node / Python），用本机 axis-model 大模型读写代码、执行命令，不需要账号和联网。支持流式回复、Read / Write / Edit / Bash / Glob / Grep / LS 工具、默认自动授权（`--ask` 改为修改前逐次询问）、自动读取 `CLAUDE.md` / `AGENTS.md`、对话自动保存（`--continue` 续接）、`-p` 一次性模式。系统提示保持稳定，命中 axis-model 前缀缓存。
+- **「模型」面板**：管理本机 [axis-model](https://github.com/wstart/axis-model)。没装时一键安装（下载到 `~/axis-model`，在新终端里运行 `install.sh`）；装好后显示运行状态，可启动 / 停止 / 重启服务、切换模型，查看每分钟请求与 token、缓存命中率、内存，落后新版本时一键更新。
+- 侧栏「+」改为「启动终端」/「启动 axis-claude」两项；axis-claude 终端崩溃后恢复时执行 `axis-claude --continue`。
+
+### 移除
+- 任务看板（含 ⌘⇧T、派发队列、`tfa-task` 命令行与 skill 自动安装、待处理中心里的任务项）。`~/.tfa/board.db` 等已有数据未删除。
+- 新建会话里的 Claude Code / Codex 启动选项（已有的 Claude / Codex 会话照常显示和恢复）。
+
 ## [0.19.1] — 2026-10-08
 
 ### 修复

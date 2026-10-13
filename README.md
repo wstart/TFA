@@ -24,9 +24,9 @@ TFA 不是另写一个多路复用器，而是封装真实的 tmux：通过 tmux
 
 ### 项目工作区与 Agent 协作
 
-- 侧栏项目选择器旁的文件夹按钮管理工作区：添加项目目录、关联已有终端、编辑项目规则。选择项目后过滤终端与任务，新会话默认从该目录启动；选择「全部项目」查看全部内容。
-- 「待处理」入口汇总全部项目的终端错误、关注请求、待回复与受阻任务、等待派发队列，支持直达终端和回复。
-- 新建会话可选择普通终端、Codex 或 Claude Code；未检测到对应 CLI 时显示提示。
+- 侧栏项目选择器旁的文件夹按钮管理工作区：添加项目目录、关联已有终端、编辑项目规则。选择项目后过滤终端，新会话默认从该目录启动；选择「全部项目」查看全部内容。
+- 「待处理」入口汇总全部项目的终端错误和关注请求，支持直达终端。
+- 侧栏「+」可「启动终端」或「启动 axis-claude」（内置的命令行编程助手，用本机 axis-model 大模型，不需要账号和联网）。
 - 在工作区管理中可为终端绑定 Codex 会话 UUID。未绑定时恢复打开会话选择器，避免同目录多个 Agent 恢复错对话。
 - Skills 显示来源和同名提示；Codex 同时读取个人与共享目录。依赖默认标为「未检测」，不代表全部外部服务已经配置。
 - 规则与 Skills 的未保存草稿在工具切换期间留在内存，正常退出会检查；强制结束进程无法保证保留草稿。
@@ -53,7 +53,7 @@ TFA 不是另写一个多路复用器，而是封装真实的 tmux：通过 tmux
   SQLite（`~/.tfa/sessions.db`，按 `@tfa_id` 关联）。终端的会话**意外没了**(tmux 服务器崩溃、被 kill、重启电脑)时,
   侧栏这一行**原地保留**为「已断开」——还在原分组里、显示原文件夹,断开那一刻的屏幕历史立即存档;侧栏顶部的
   「在线 / 已断开」切换可单独查看。选中只显示结束页(原文件夹 + 最后输出预览),点**恢复会话**(⌘R)才在原文件夹重建同名会话
-  （同 `@tfa_id` → 环境变量/分组/看板指派自动回连）:**AI 终端续接对话**（Claude Code: `claude --continue`；Codex: 恢复绑定 UUID，未绑定则打开会话选择器）,
+  （同 `@tfa_id` → 环境变量/分组自动回连）:**AI 终端续接对话**（axis-claude / Claude Code: `--continue`；Codex: 恢复绑定 UUID，未绑定则打开会话选择器）,
   普通终端回放历史文本。记录永久保留,直到右键「移除」。保存:每分钟记录全部会话的名字 + 文件夹,开机基线 + 每小时 + 优雅退出完整快照。
 - **每会话环境变量**：右键终端 →「环境变量…」为该会话单独设置环境变量（tmux `set-environment`），
   持久化、(重)连接时自动注入。可「保存并重启 shell」或右键「重启 session」让当前 shell 立即生效；
@@ -99,17 +99,24 @@ TFA 不是另写一个多路复用器，而是封装真实的 tmux：通过 tmux
 - **设置（⌘,）**：键入特效开关、字号，附快捷键速查表；**应用内检查更新**——一键对比 GitHub Releases，
   新版一键下载（公证包，codesign + bundle id 校验，失败自动回滚）原地替换并重启，tmux 会话无损。
 
+**🤖 axis-claude（内置命令行编程助手）**
+
+TFA 自带一个精简版的终端编程助手 `axis-claude`（`TFA.app/Contents/MacOS/axis-claude`），后端是本机 axis-model，
+适合不能使用 Claude Code 的环境。侧栏「+」→「启动 axis-claude」即可新建。
+
+- 工具：Read / Write / Edit / Bash / Glob / Grep / LS；默认自动授权，不逐次询问；加 `--ask` 则 Write / Edit / Bash 执行前询问（`y` 是 / `a` 本会话总是允许 / `n` 否）
+- 自动读取 `~/.claude/CLAUDE.md`、项目 `CLAUDE.md` / `AGENTS.md`；系统提示保持稳定，命中 axis-model 前缀缓存
+- 对话保存在 `~/.axis-claude/sessions/`，`axis-claude --continue` 续接；`-p "<提示>"` 一次性执行
+- Ctrl-C 中断当前回复或命令，提示符下连按两次或 Ctrl-D 退出；`/clear` 新对话、`/help`、`/exit`
+- 环境变量：`AXIS_BASE_URL`（默认 `http://127.0.0.1:1234`）、`AXIS_MODEL`（默认 `axis_model`）
+
 **🧰 侧边栏工具区**
 
 侧边栏底部互斥入口，各自在详情区打开一个工具面板：
 
-- **任务看板（Kanban）**：把任务当 issue **指派给一个终端「agent」并派发**——一行指令发进它的 tmux 会话让 agent 开干；
-  卡片显示该终端的实时状态与**执行记录时间线**（步骤 / 提问 / 受阻，最新在上）。看板是**共享 SQLite**
-  （`~/.tfa/board.db`），TFA、`tfa-task` CLI、各终端里的 agent 可并发读写、实时刷新。配套 **`tfa-task` 命令行 +
-  `tfa-task` skill**（启动自动装到 `~/.tfa/bin`、`~/.claude/skills` 与 `~/.codex/skills`）让 agent **注册 / 认领 / 逐步回报 / 提问 /
-  受阻 / 完成**。支持**按状态 / 按终端**分组、**待接管**标黄、详情**回复推送到终端**、派发遇忙**排队**空闲自动发。
-  派发是可靠的:**送达验证**(派发后核对终端回显,吞键即告警)、**shell 目标闸门**(目标没跑 agent 时暂缓,启动后自动补发)、
-  **终端死亡观察**(执行中任务的终端被关会记录在案)。
+- **模型（axis-model）**：管理本机的 [axis-model](https://github.com/wstart/axis-model) 推理服务（Apple Silicon 上跑 MLX 大模型）。
+  没装时「一键安装」：把仓库下载到 `~/axis-model` 并在新终端里运行 `install.sh`，过程可见。装好后显示运行状态（运行中 / 待命 / 已停止），
+  可启动 / 停止 / 重启服务、切换模型，查看每分钟请求与 token、缓存命中率、内存；落后新版本时提示并一键更新。
 - **隧道（SSH 反向端口转发）**：把本机端口通过 `ssh -N -R` **反向暴露到远程服务器**——服务器访问「远程端口」即打到本机「本地端口」。
   多条配置(IP / 账号 / 密码 / 登录端口 / 远程端口 / 本地端口),密码进**钥匙串**;每条有**启停开关**、**开机自动拉起**、
   **断线指数退避自动重连**、**GatewayPorts(允许外网访问)开关**、**实时连接日志**。复用 SSH_ASKPASS 注入密码,退出回收子进程。
@@ -189,6 +196,7 @@ Sources/
     Transport.swift / ControlProtocol.swift / ControlClient.swift
     TmuxController.swift / TmuxState(Models.swift) / LayoutParser.swift
     TmuxServer.swift / Connection.swift / PTY.swift / Errors.swift
+  AxisClaude/         # axis-claude 命令行编程助手（只依赖 Foundation）
   Mux/                # SwiftUI 应用
     MuxApp.swift / RootView.swift / SidebarView.swift / TerminalAreaView.swift
     AppModel.swift / ConnectionSession.swift / PaneTerminal.swift / TerminalPaneView.swift
@@ -196,6 +204,7 @@ Sources/
     Lab.swift（实验室：系统监控 / PTY 监控）/ Notifications.swift（输出完成通知）
     ClaudeMd.swift（全局 / 项目规则）/ Skills.swift（Skills 管理 + 语法高亮编辑器）
     Workspace.swift（项目工作区 / 待处理中心）/ EditorSafety.swift（编辑保护）
+    AxisModel.swift（模型面板：axis-model 安装 / 状态 / 控制）
     CCUsage*.swift（Token 用量：ccusage 的 Swift 移植，Claude + Codex 两源）
 docs/
   tmux-control-protocol.md     # tmux 控制协议规格（编码依据）
@@ -230,7 +239,7 @@ open TFA.app
 | ⌘W | 关闭（detach，会话保活） | | ⌘K | 快速切换面板 |
 | ⌘1–9 | 选第 N 个终端 | | ⌘] | 跳到下一个需要你的终端（待处理优先） |
 | ⌘⌥← / → | 上一个 / 下一个终端 | | ⌘⇧] | 跳到下一个待处理（等待 / 受阻）终端 |
-| ⌘⇧T | 任务看板 ↔ 终端 切换 | | ⌘\ | 折叠 / 展开侧边栏 |
+| ⌘\ | 折叠 / 展开侧边栏 | | | |
 | ⌘ + / − / 0 | 字号 增 / 减 / 重置 | | ⌘, | 设置（含快捷键速查） |
 | ⌘S | 编辑器内保存（CLAUDE.md / SKILL.md） | | ⌘R | 失败态重试连接 |
 
@@ -267,14 +276,14 @@ open TFA.app
 - [x] **侧边栏实时活动** — 每行实时显示是否在输出（覆盖未 attach 会话）+ 均衡器动效 / 最新输出行 / 当前文件夹
 - [x] **「需要关注」检测** — agent 停下等你时（响铃 / OSC 通知）侧栏标黄 + 系统通知，⌘] / ⌘⇧] 跳转
 - [x] **可重排分组** — 拖文件夹头 / 右键上移下移，按 host 持久化
-- [x] **任务看板** — Kanban 指派给终端 agent + 派发；共享 SQLite 看板 + `tfa-task` CLI/skill 让 agent 回报；按状态/终端分组、待接管、回复推送、⌘⇧T 看板↔终端互跳
-- [x] **稳定终端身份** — `@tfa_id` 永久 UUID 为键，改名 / 重启不丢环境变量 · 分组 · 看板指派
-- [x] **关窗驻留菜单栏** — 关主窗口不退出，任务调度 / 待接管提醒常驻后台
+- [x] **本地模型** — 「模型」面板管理 axis-model（一键安装 / 启停 / 切模型 / 运行数据）+ 内置 axis-claude 命令行编程助手
+- [x] **稳定终端身份** — `@tfa_id` 永久 UUID 为键，改名 / 重启不丢环境变量 · 分组
+- [x] **关窗驻留菜单栏** — 关主窗口不退出，活动检测 / 待接管提醒常驻后台
 - [x] **会话持久化** — 重启 / `tmux kill-server` 后恢复会话 + scrollback（SQLite），AI 终端自动续接对话
 - [x] **SSH 反向端口转发** — 「隧道」面板:多配置、开机自启、断线重连、GatewayPorts、连接日志
 - [x] **设计系统** — 按 DESIGN.md 全面换肤(暖色凸版浅色外壳 + 固定深色终端 + 统一状态色标准)
 - [x] **实验室** — 系统监控 / Token 用量（ccusage 移植）/ PTY · 进程监控
-- [ ] **下一步** — 远程 agent 双向回报通道、实验室更多实验、输出合并 feed 优化
+- [ ] **下一步** — axis-claude 更多工具（MCP / 子任务）、实验室更多实验
 
 ---
 

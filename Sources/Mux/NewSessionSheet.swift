@@ -3,7 +3,8 @@ import SwiftUI
 
 /// New-session dialog: the user NAMES the session (required) and picks the FOLDER it starts in — the
 /// session binds to that directory via tmux `new-session -c`. Replaces the old "instantly create
-/// mux-N", so every local terminal gets an intentional name and a home folder.
+/// mux-N", so every local terminal gets an intentional name and a home folder. Launches either a
+/// plain shell or axis-claude (chosen from the sidebar「+」menu).
 struct NewSessionSheet: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
@@ -11,7 +12,7 @@ struct NewSessionSheet: View {
     @State private var name = ""
     @State private var folder = FileManager.default.homeDirectoryForCurrentUser.path
     @State private var taken: Set<String> = []
-    @State private var agent = "shell"
+    @State private var axis = AxisModelService.shared
     @FocusState private var nameFocused: Bool
 
     private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -24,18 +25,23 @@ struct NewSessionSheet: View {
         if taken.contains(trimmed) { return "已有同名会话" }
         return nil
     }
-    private var canCreate: Bool { !trimmed.isEmpty && nameError == nil && (agent == "shell" || AgentPlatform(rawValue: agent)?.executablePath != nil) }
+    private var launchesAxisClaude: Bool { appModel.newSessionLaunchesAxisClaude }
+    private var canCreate: Bool { !trimmed.isEmpty && nameError == nil && (!launchesAxisClaude || AxisClaude.executablePath != nil) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
-            Text("新建会话").font(Theme.Font.headerTitle)
-            Picker("启动方式", selection: $agent) {
-                Text("普通终端").tag("shell")
-                ForEach(AgentPlatform.allCases) { Text($0.title).tag($0.rawValue) }
-            }.pickerStyle(.segmented)
-            if let selected = AgentPlatform(rawValue: agent) {
-                Text(selected.executablePath.map { "已安装 · \($0)" } ?? "未找到 \(selected.title)，请先安装 CLI；或选择普通终端。")
-                    .font(.caption).foregroundStyle(selected.executablePath == nil ? Theme.Status.error : Theme.textSecondary)
+            Text(launchesAxisClaude ? "启动 axis-claude" : "启动终端").font(Theme.Font.headerTitle)
+            if launchesAxisClaude {
+                if AxisClaude.executablePath == nil {
+                    Text("未找到内置的 axis-claude，请重新安装 TFA。").font(.caption).foregroundStyle(Theme.Status.error)
+                } else if axis.status != .running {
+                    // Still creatable: axis-claude itself reports the missing backend, and the user
+                    // may start the service right after.
+                    Text("axis-model 服务\(axis.status.label)。可在侧栏「模型」面板启动或安装后再对话。")
+                        .font(.caption).foregroundStyle(Theme.Status.attention)
+                } else {
+                    Text("使用本机 axis-model · \(axis.currentModelName)").font(.caption).foregroundStyle(Theme.textSecondary)
+                }
             }
 
             VStack(alignment: .leading, spacing: Theme.Space.xs) {
@@ -80,6 +86,7 @@ struct NewSessionSheet: View {
             taken = appModel.takenLocalSessionNames()
             nameFocused = true
         }
+        .task { if launchesAxisClaude { await axis.refresh() } }
     }
 
     private var displayFolder: String {
@@ -102,7 +109,8 @@ struct NewSessionSheet: View {
 
     private func create() {
         guard canCreate else { return }
-        appModel.createLocalSession(name: trimmed, startDirectory: folder, agent: AgentPlatform(rawValue: agent))
+        appModel.createLocalSession(name: trimmed, startDirectory: folder,
+                                    command: launchesAxisClaude ? AxisClaude.command(resume: false) : nil)
         dismiss()
     }
 }

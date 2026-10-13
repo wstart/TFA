@@ -69,13 +69,13 @@ struct WorkspaceControls: View {
             }
             TimelineView(.periodic(from: .now, by: 2)) { _ in
             Button { showAttention = true } label: {
-                Label("待处理 \(model.connections.filter { $0.needsAttention || $0.connectError != nil }.count + model.taskBoard.board.tasks.filter { $0.status != .done && ($0.status == .blocked || $0.comments.last?.kind == "question" || model.dispatch.pendingDispatch[$0.id] != nil) }.count)", systemImage: "tray")
+                Label("待处理 \(model.connections.filter { $0.needsAttention || $0.connectError != nil }.count)", systemImage: "tray")
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }.buttonStyle(.borderless).help("查看需要回复、连接失败和等待派发的任务")
+            }.buttonStyle(.borderless).help("查看请求关注或连接失败的终端")
             }
         }.padding(8)
         .onChange(of: store.selectedID) {
-            guard !model.tasksSelected && !model.skillsSelected && !model.claudeMdSelected else { return }
+            guard !model.axisSelected && !model.skillsSelected && !model.claudeMdSelected else { return }
             if let connection = model.connections.first(where: { store.includes($0) }) {
                 model.goToTerminal(connection.id)
             } else { model.selectedConnectionID = nil }
@@ -100,7 +100,7 @@ struct WorkspaceManager: View {
                 Button("添加文件夹") { store.addFolder() }
                 Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
             }
-            Text("选择项目后，侧栏与任务看板按项目过滤；新会话默认使用项目目录。")
+            Text("选择项目后，侧栏按项目过滤；新会话默认使用项目目录。")
                 .font(.caption).foregroundStyle(.secondary)
             List {
                 ForEach(store.projects) { project in
@@ -153,8 +153,6 @@ struct WorkspaceManager: View {
 struct AttentionCenter: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @State private var reply = ""
-    @State private var replying: BoardTask?
     var body: some View {
         TimelineView(.periodic(from: .now, by: 2)) { _ in
             VStack(alignment: .leading, spacing: 12) {
@@ -174,31 +172,8 @@ struct AttentionCenter: View {
                             }
                         }
                     }
-                    Section("待回复 / 受阻 / 等待派发") {
-                        let tasks = model.taskBoard.board.tasks.filter {
-                            $0.status != .done && ($0.status == .blocked || $0.comments.last?.kind == "question" || model.dispatch.pendingDispatch[$0.id] != nil)
-                        }
-                        if tasks.isEmpty { Text("暂无待处理任务").foregroundStyle(.secondary) }
-                        ForEach(tasks) { task in
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(task.title)
-                                    Text(model.dispatch.pendingDispatch[task.id] != nil ? "等待终端连接、空闲或启动 Agent" : task.comments.last?.text ?? "任务受阻")
-                                        .font(.caption).foregroundStyle(.secondary).lineLimit(3)
-                                }
-                                Spacer()
-                                Button("回复") { reply = ""; replying = task }
-                            }
-                        }
-                    }
                 }
             }.padding(20)
         }.frame(width: 720, height: 500)
-        .alert("回复任务", isPresented: Binding(get: { replying != nil }, set: { if !$0 { replying = nil } })) {
-            TextField("回复内容", text: $reply)
-            Button("发送") { if let task = replying { model.pushReply(task.id, text: reply) }; replying = nil }
-                .disabled(reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            Button("取消", role: .cancel) { replying = nil }
-        } message: { Text("回复将记入任务记录，并按现有派发队列发送到关联终端。") }
     }
 }

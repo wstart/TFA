@@ -40,9 +40,6 @@ struct MuxApp: App {
                 Button("新建终端") { appModel.newTerminal() }
                     .keyboardShortcut("t")
 
-                Button(appModel.tasksSelected ? "返回终端" : "任务看板") { appModel.toggleTasks() }
-                    .keyboardShortcut("t", modifiers: [.command, .shift])
-
                 Button(appModel.sidebarCollapsed ? "显示侧栏" : "隐藏侧栏") {
                     appModel.toggleSidebar()
                 }
@@ -144,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// Closing the main window hides it instead — the app drops to a menu-bar accessory and the
-    /// scheduler (dispatch queue, attention, board watch) keeps running. Other windows (file
+    /// scheduler (activity, attention, session snapshots) keeps running. Other windows (file
     /// manager, settings) close normally.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard sender === mainWindow else { return true }

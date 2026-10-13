@@ -18,6 +18,11 @@ var targets: [Target] = [
         ],
         swiftSettings: [.swiftLanguageMode(.v5)]
     ),
+    // axis-claude: terminal coding agent for the local axis-model server. Foundation only.
+    .executableTarget(
+        name: "AxisClaude",
+        swiftSettings: [.swiftLanguageMode(.v5)]
+    ),
 ]
 
 // Local-only tests: the `Tests/` directory is gitignored (kept out of the public repo), so a fresh
@@ -42,6 +47,13 @@ if FileManager.default.fileExists(atPath: "Tests/MuxTests") {
         swiftSettings: [.swiftLanguageMode(.v5)]
     ))
 }
+if FileManager.default.fileExists(atPath: "Tests/AxisClaudeTests") {
+    targets.append(.testTarget(
+        name: "AxisClaudeTests",
+        dependencies: ["AxisClaude"],
+        swiftSettings: [.swiftLanguageMode(.v5)]
+    ))
+}
 
 let package = Package(
     name: "Mux",
@@ -51,6 +63,7 @@ let package = Package(
     products: [
         .library(name: "TmuxKit", targets: ["TmuxKit"]),
         .executable(name: "Mux", targets: ["Mux"]),
+        .executable(name: "axis-claude", targets: ["AxisClaude"]),
     ],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm", from: "1.13.0"),

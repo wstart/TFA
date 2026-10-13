@@ -23,8 +23,8 @@ final class AppModel {
     var skillsSelected = false
     /// True when the global CLAUDE.md rules editor is shown in the detail area instead of a terminal.
     var claudeMdSelected = false
-    /// True when the task board (Kanban) is shown in the detail area instead of a terminal.
-    var tasksSelected = false
+    /// True when the axis-model (local LLM backend) panel is shown in the detail area instead of a terminal.
+    var axisSelected = false
     /// True when the SSH reverse-tunnel manager is shown in the detail area instead of a terminal.
     var tunnelsSelected = false
     /// True when a group's Markdown note is shown in the detail area (which group = `groupNoteID`).
@@ -59,9 +59,6 @@ final class AppModel {
     /// sessions this app hasn't attached. Drives the sidebar's real-time activity effects.
     let activity = TerminalActivityMonitor()
 
-    /// The shared task board (~/.tfa/board.db) — Kanban of tasks dispatched to terminal "agents".
-    let taskBoard = TaskBoardStore()
-
     /// Session persistence (~/.tfa/sessions.db) — a disk snapshot of each local terminal so sessions
     /// (and AI conversations) survive a reboot / `tmux kill-server`, which wipe the in-memory server.
     var sessionStore = SessionStore()
@@ -93,6 +90,8 @@ final class AppModel {
     /// Drives the「新建会话」sheet — a LOCAL new terminal is named + folder-bound there before it's
     /// created (instead of auto-spawning mux-N).
     var isShowingNewSession = false
+    /// What the「新建会话」sheet launches: a plain shell, or axis-claude inside it.
+    var newSessionLaunchesAxisClaude = false
 
     /// Whether the playful per-keystroke typing-combo effect is shown. Persisted; toggled in Settings.
     var typingEffectsEnabled: Bool = (UserDefaults.standard.object(forKey: "typingEffectsEnabled") as? Bool) ?? false {
@@ -150,14 +149,14 @@ final class AppModel {
         loadHosts()
         loadEnvironments()
         migrateLegacyKeysIfNeeded() // one-time: name-keyed env/groups/assignees → UUID keys
-        startScheduler() // ONE heartbeat: activity sampling + board watch + dispatch/attention
+        startScheduler() // ONE heartbeat: activity sampling + session snapshots
         activity.captureEnabled = !sidebarCollapsed
         Task { @MainActor in self.tmuxMissing = await Task.detached(priority: .utility) { TmuxLocator.find() == nil }.value }
         // Discover existing local tmux sessions OFF the main thread: `tmux list-sessions` is a
         // synchronous subprocess (fork/exec + waitUntilExit) that would otherwise block the first
         // frame. The window shows instantly; dormant placeholder rows appear a beat later (they don't
         // spawn `-CC` until selected, so there's no functional cost to populating them async).
-        guard connections.isEmpty else { syncBoardAgents(); return }
+        guard connections.isEmpty else { return }
         Task { @MainActor in
             let existing = await Task.detached(priority: .userInitiated) { TmuxServer.listLocalSessions() }.value
             guard self.connections.isEmpty else { return } // user may have created one while we waited
@@ -174,10 +173,6 @@ final class AppModel {
             let lastID = UserDefaults.standard.string(forKey: Self.lastActiveStableIDKey)
             self.selectedConnectionID = self.connections.first(where: { $0.stableID == lastID })?.id
                 ?? self.connections.first?.id
-            // Register the discovered terminals as assignable agents only NOW — syncing before
-            // discovery would wipe the agents table with an empty list, leaving every task's
-            // assignee dangling (the board showed cards with no 指派 until it was reopened).
-            self.syncBoardAgents()
         }
     }
 
@@ -189,10 +184,11 @@ final class AppModel {
 
     /// New terminal on the CURRENTLY-SELECTED host (rebuild.md #2): local → a fresh local session;
     /// ssh → a fresh session on that host (reusing the host's authenticated ssh master).
-    func newTerminal() {
+    func newTerminal(axisClaude: Bool = false) {
         switch currentHost {
         case .local:
             // Local terminals are named + folder-bound in the「新建会话」sheet before they're created.
+            newSessionLaunchesAxisClaude = axisClaude
             isShowingNewSession = true
         case .ssh(let host, let args):
             open(TmuxConnection(endpoint: .ssh(host: host, sshArgs: args),
@@ -202,20 +198,25 @@ final class AppModel {
     }
 
     /// Create a LOCAL session with a user-chosen name, starting in `startDirectory` (`new-session -c`).
-    /// Called by the「新建会话」sheet once the name is validated.
-    func createLocalSession(name: String, startDirectory: String?, agent: AgentPlatform? = nil) {
+    /// Called by the「新建会话」sheet once the name is validated. `command` runs once the fresh shell
+    /// is up (e.g. axis-claude).
+    func createLocalSession(name: String, startDirectory: String?, command: String? = nil) {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !n.isEmpty else { return }
-        if let agent, agent.executablePath == nil { lastError = "未找到 \(agent.title)，请安装后重试。"; return }
         let connection = TmuxConnection(endpoint: .local, sessionName: n, startDirectory: startDirectory)
         guard let session = open(connection, connect: false) else { return }
-        if let agent {
-            guard let executable = agent.executablePath else { lastError = "未找到 \(agent.title)，请安装后重试。"; return }
-            session.restoreCommand = AgentPlatform.shellQuote(executable)
-            UserDefaults.standard.set(agent.rawValue, forKey: "agentPlatform." + session.stableID)
-        }
+        session.restoreCommand = command
         WorkspaceStore.shared.associate(session.stableID)
         selectedConnectionID = session.id
+    }
+
+    /// Run a setup command (axis-model install / update) in a NEW visible terminal in the home folder,
+    /// so its progress and any error are right there. Named `name`, or `name-2`… if taken.
+    func runSetupCommand(name: String, _ command: String) {
+        let taken = takenLocalSessionNames()
+        var n = name, i = 2
+        while taken.contains(n) { n = "\(name)-\(i)"; i += 1 }
+        createLocalSession(name: n, startDirectory: FileManager.default.homeDirectoryForCurrentUser.path, command: command)
     }
 
     /// The default name proposed in the「新建会话」sheet (lowest unused "mux-N").
@@ -368,7 +369,7 @@ final class AppModel {
     /// pane + re-show the terminal explicitly.
     func activateTerminal(_ id: UUID) {
         if selectedConnectionID == id {
-            let onTool = tasksSelected || labSelected || skillsSelected || claudeMdSelected || tunnelsSelected || groupNoteSelected
+            let onTool = axisSelected || labSelected || skillsSelected || claudeMdSelected || tunnelsSelected || groupNoteSelected
             clearToolPanes()
             if onTool, let c = connection(id) { c.markViewed() } // returning to it counts as viewed again
             ensureConnected(id)
@@ -382,7 +383,7 @@ final class AppModel {
     /// Clear every tool-pane flag in ONE place — so adding a pane (like the group note) can't leave a
     /// stale flag set behind the newly-opened one. Each `open*` calls this, then sets its own flag.
     private func clearToolPanes() {
-        tasksSelected = false; labSelected = false; skillsSelected = false
+        axisSelected = false; labSelected = false; skillsSelected = false
         claudeMdSelected = false; tunnelsSelected = false; groupNoteSelected = false
     }
 
@@ -403,10 +404,9 @@ final class AppModel {
         leaveTerminals()
     }
 
-    /// Show the task board (Kanban). Mutually exclusive with the other tool panes / a terminal.
-    func openTasks() {
-        clearToolPanes(); tasksSelected = true
-        syncBoardAgents()
+    /// Show the axis-model panel. Mutually exclusive with the other tool panes / a terminal.
+    func openAxis() {
+        clearToolPanes(); axisSelected = true
         leaveTerminals()
     }
 
@@ -442,12 +442,6 @@ final class AppModel {
             .appendingPathComponent("\(id.uuidString).md")
     }
 
-    /// ⌘⇧T: flip between the task board and the terminal you were on — the board/terminal round-trip
-    /// is the heart of the dispatch loop, so it gets a single dedicated key.
-    func toggleTasks() {
-        if tasksSelected { backToTerminal() } else { openTasks() }
-    }
-
     /// Open the read-only history viewer for the active terminal (no-op without a live pane). Lets the
     /// user scroll back through scrollback even when the live pane is on the alternate screen.
     func showHistoryViewer() {
@@ -469,34 +463,13 @@ final class AppModel {
         }
     }
 
-    /// Jump from a board card straight into its agent's terminal (the other half of the dispatch
-    /// loop: dispatch on the board, watch in the terminal).
+    /// Jump straight into a terminal from outside the sidebar (the 待处理 center).
     func goToTerminal(_ id: UUID) {
         clearToolPanes()
         reveal(id) // switches host if needed; the didSet marks viewed when the id changes
         if let c = connection(id) { c.markViewed() } // and when it doesn't, mark it here
         ensureConnected(id)
     }
-
-    /// Register every LOCAL terminal as an assignable board agent (id `tfa:<stableID>`). Remote (ssh)
-    /// terminals are excluded by design — their agents can't reach the local board.db, so the
-    /// dispatch→report loop would silently break (决议 #2). Cheap; called when the board is opened
-    /// or terminals change.
-    func syncBoardAgents() {
-        let managed = connections.filter { $0.host == nil }.map { c in
-            BoardAgent(id: "tfa:" + c.stableID, name: c.title,
-                       kind: c.subtitle.isEmpty ? "shell" : c.subtitle,
-                       session: c.stableID, cwd: c.currentPath ?? "")
-        }
-        taskBoard.syncManagedAgents(managed)
-    }
-
-    /// The dispatch domain (queueing, retries, attention reconcile) — extracted so it's unit-testable
-    /// against fake terminals/boards (决议 #4). Wired with live adapters in `start()`.
-    @ObservationIgnored private(set) lazy var dispatch = DispatchCenter(board: taskBoard)
-
-    func dispatchTask(_ taskID: UUID, to agentID: String) { dispatch.dispatchTask(taskID, to: agentID) }
-    func pushReply(_ taskID: UUID, text: String) { dispatch.pushReply(taskID, text: text) }
 
     /// True while a (local) terminal is actively producing output — sending keystrokes then would be
     /// swallowed; idle (sitting at a prompt / agent awaiting input) is safe to dispatch into. Single
@@ -523,20 +496,13 @@ final class AppModel {
     }
 
     /// THE app heartbeat (决议 #5): one loop drives all periodic work in a guaranteed order —
-    /// ① sample activity (tmux poll, skipped while occluded) → ② board change-check (fast while the
-    /// board is shown, every 3rd tick otherwise) → ③ dispatch queue + attention reconcile. One timer
-    /// instead of three: fewer wakeups, and "dispatch sees fresh activity" by construction.
+    /// ① sample activity (tmux poll, skipped while occluded) → ② session snapshots. One timer instead
+    /// of several: fewer wakeups.
     private func startScheduler() {
-        dispatch.terminals = { [weak self] in
-            guard let self else { return [] }
-            return self.connections.map { TerminalAgentAdapter($0, model: self) }
-        }
         Task { @MainActor in
             var n = 0
             while !Task.isCancelled {
                 await activity.tick()
-                if taskBoard.watchFast || n % 3 == 0 { taskBoard.tickIfChanged() }
-                dispatch.tick()
                 if n == 40 || (n > 0 && n % 2400 == 0) { await snapshotSessions() } // baseline ~1 min, then hourly
                 else if n % 40 == 20 { await snapshotLiveMetadata() } // name + folder of every session, ~each minute
                 n &+= 1
@@ -782,7 +748,6 @@ final class AppModel {
         // Data is keyed by the permanent @tfa_id, so NOTHING migrates — only the name→UUID
         // bootstrap entry moves, and the board shows the new title.
         renameIdentity(from: oldKey, to: conn.groupKey)
-        syncBoardAgents()
     }
 
     /// Non-destructive close: detach from the tmux session (it SURVIVES and resumes on next
@@ -915,7 +880,6 @@ final class AppModel {
         if selectedConnectionID == conn.id {
             selectedConnectionID = connections.first?.id
         }
-        if tasksSelected { syncBoardAgents() } // keep the board's agent list current while it's shown
     }
 
     // MARK: - Hosts (rebuild.md #2)
@@ -1299,12 +1263,6 @@ final class AppModel {
         persistEnvironments()
         for i in groups.indices {
             groups[i].memberKeys = Set(groups[i].memberKeys.map { isUUID($0) ? $0 : identity(for: $0) })
-        }
-        for t in taskBoard.board.tasks {
-            if let a = t.assignee, a.hasPrefix("tfa:") {
-                let suffix = String(a.dropFirst(4))
-                if !isUUID(suffix) { taskBoard.migrateAssignee(from: a, to: "tfa:" + identity(for: suffix)) }
-            }
         }
         UserDefaults.standard.set(true, forKey: flag)
     }

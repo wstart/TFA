@@ -94,7 +94,7 @@ final class SessionStore {
         run("DELETE FROM sessions WHERE tfa_id=?", [.t(tfaID)])
     }
 
-    // MARK: tiny SQLite helpers(同 TaskBoardStore 风格)
+    // MARK: tiny SQLite helpers
 
     private enum Bind { case t(String), i(Int64), d(Double) }
 
