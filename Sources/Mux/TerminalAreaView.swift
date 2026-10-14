@@ -206,6 +206,7 @@ private struct EndedSessionView: View {
                 } label: {
                     Label("恢复会话", systemImage: "arrow.counterclockwise")
                 }
+                .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .keyboardShortcut("r", modifiers: .command)
                 if let path = connection.savedPath, folderExists(path) {
@@ -283,22 +284,21 @@ private struct LoginView: View {
     }
 }
 
-/// A large, light, non-interactive watermark of the terminal's session name, scaled to fill the
-/// pane — an at-a-glance identity cue when juggling many terminals (see DESIGN.md). Drawn faintly
-/// on top of the opaque terminal so live text stays legible; never intercepts input.
+/// A faint, non-interactive watermark of the session name in the terminal's bottom-right corner —
+/// an at-a-glance identity cue when juggling many terminals (see DESIGN.md). Kept small and quiet so
+/// it never competes with live output; never intercepts input.
 private struct SessionWatermark: View {
     let name: String
 
     var body: some View {
         GeometryReader { geo in
             Text(name)
-                .font(.system(size: max(geo.size.height * 0.46, 64), weight: .bold, design: .rounded))
-                .foregroundStyle(Theme.terminalForeground.opacity(0.08)) // faint on the DARK terminal
-
+                .font(.system(size: min(140, max(geo.size.height * 0.18, 48)), weight: .bold, design: .rounded))
+                .foregroundStyle(Theme.terminalForeground.opacity(0.05)) // faint on the DARK terminal
                 .lineLimit(1)
-                .minimumScaleFactor(0.04) // shrink long names to one line
-                .frame(width: geo.size.width * 0.9)
-                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                .minimumScaleFactor(0.2) // shrink long names to one line
+                .frame(maxWidth: geo.size.width * 0.8, alignment: .trailing)
+                .frame(width: geo.size.width - 28, height: geo.size.height - 16, alignment: .bottomTrailing)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)

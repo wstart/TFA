@@ -204,3 +204,74 @@ struct StatusIndicator: View {
         .help(status.label)
     }
 }
+
+/// What a terminal is running, for the sidebar's small kind badge and the header/footer label.
+/// Derived from the pane's current command (an ended record: from its restore command).
+enum TerminalKind {
+    case axisClaude, claude, codex, ssh, shell
+
+    @MainActor
+    static func of(_ conn: ConnectionSession) -> TerminalKind {
+        let command = (conn.isEnded ? conn.restoreCommand ?? "" : conn.subtitle).lowercased()
+        if command.contains("axis-claude") { return .axisClaude }
+        if command.contains("claude") { return .claude }
+        if command.contains("codex") { return .codex }
+        return conn.host != nil ? .ssh : .shell
+    }
+
+    /// Agents get the solid charcoal badge — the one place a row is "loud" by default.
+    var isAgent: Bool { self == .axisClaude || self == .claude || self == .codex }
+
+    var symbol: String {
+        switch self {
+        case .axisClaude: return "cpu"
+        case .claude: return "sparkle"
+        case .codex: return "chevron.left.forwardslash.chevron.right"
+        case .ssh: return "network"
+        case .shell: return "terminal"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .axisClaude: return "axis-claude"
+        case .claude: return "Claude Code"
+        case .codex: return "Codex"
+        case .ssh: return "ssh"
+        case .shell: return "终端"
+        }
+    }
+}
+
+/// The small rounded-square kind badge at the head of a terminal row: solid charcoal for agents,
+/// a quiet linen square for shells. Ended records fade.
+struct KindBadge: View {
+    let kind: TerminalKind
+    var dimmed = false
+
+    var body: some View {
+        Image(systemName: kind.symbol)
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(kind.isAgent ? Theme.canvas : Theme.textSecondary)
+            .frame(width: 22, height: 22)
+            .background(kind.isAgent ? Theme.brand : Theme.Colors.linen,
+                        in: RoundedRectangle(cornerRadius: 6))
+            .opacity(dimmed ? 0.45 : 1)
+            .accessibilityHidden(true)
+    }
+}
+
+/// A small state tag (运行中 / 需要你 / 空闲 …) for the terminal header.
+struct StateTag: View {
+    let text: String
+    let tint: Color
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+    }
+}

@@ -25,6 +25,7 @@ struct SidebarView: View {
 
     @State private var showHostSheet = false
     @State private var showServerSheet = false
+    @State private var showProjects = false
     @State private var sshHost: String = ""
     @State private var sshUser: String = ""
     @State private var sshPassword: String = ""
@@ -47,30 +48,35 @@ struct SidebarView: View {
 
     /// Top tab: live terminals vs ended (crashed / lost) records, plus the bulk-remove confirmation.
     @State private var showEnded = false
+    @State private var confirmRemoveAllEnded = false
     /// Collapse state of the built-in「未分组」folder that holds ungrouped terminals.
     @AppStorage("defaultGroupCollapsed") private var defaultCollapsed = false
-    @State private var confirmRemoveAllEnded = false
+    /// The folder header under the pointer — its drag grip shows only then.
+    @State private var hoveredGroup: UUID?
 
     var body: some View {
         @Bindable var model = appModel
         VStack(spacing: 0) {
             SidebarHeader(
-                onSearch: { appModel.isShowingSearch = true },
                 onAddHost: { sshHost = ""; sshUser = ""; sshPassword = ""; sshArgs = ""; showHostSheet = true },
                 onManageServers: { showServerSheet = true },
-                onNewGroup: { startNewGroup() }
+                onManageProjects: { showProjects = true }
             )
 
-            WorkspaceControls()
-            FilterField(text: $filter)
+            // Filter field, with the cross-pane search (⌘F) and new-group actions beside it.
+            HStack(spacing: Theme.Space.xs) {
+                FilterField(text: $filter)
+                HeaderButton(system: "magnifyingglass", help: "Search across all panes (⌘F)") { appModel.isShowingSearch = true }
+                HeaderButton(system: "folder.badge.plus", help: "New group") { startNewGroup() }
+            }
+            .padding(.horizontal, Theme.Space.md)
+            .padding(.bottom, Theme.Space.sm)
             let endedCount = appModel.visibleConnections.filter(\.isEnded).count
             if endedCount > 0 {
-                Picker("", selection: $showEnded) {
-                    Text("在线 \(appModel.visibleConnections.count - endedCount)").tag(false)
-                    Text("已断开 \(endedCount)").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                SegmentedBar(selection: $showEnded, options: [
+                    (false, "在线 \(appModel.visibleConnections.count - endedCount)"),
+                    (true, "已断开 \(endedCount)"),
+                ])
                 .padding(.horizontal, Theme.Space.md)
                 .padding(.bottom, Theme.Space.sm)
             }
@@ -82,23 +88,19 @@ struct SidebarView: View {
                 get: { (model.axisSelected || model.labSelected || model.skillsSelected || model.claudeMdSelected || model.tunnelsSelected || model.groupNoteSelected) ? nil : model.selectedConnectionID },
                 set: { if let id = $0 { model.activateTerminal(id) } } // robust to re-selecting the same row while a tool pane is open
             )) {
-                // Tree: group folders (expandable) with their sessions indented underneath, then
-                // loose (ungrouped) sessions at the top level. Scoped to the current host.
-                ForEach(appModel.currentGroups) { group in
-                    groupTree(group)
-                }
+                // Ungrouped terminals live in a built-in「未分组」folder pinned above the group folders
+                // (not a real group: no note, no reorder, not deletable). Scoped to the current host.
                 let ungrouped = filtered(showEnded ? appModel.visibleEndedUngroupedTerminals
                                                    : appModel.visibleUngroupedTerminals)
-                // The top-level (ungrouped) area also accepts drops: dropping a grouped terminal here
-                // pulls it back out of its folder (#8, "drag out to ungrouped"). Wrapped in a Section
-                // so the drop target spans the loose rows rather than a single row.
+                // The folder also accepts drops: dropping a grouped terminal here pulls it back out of
+                // its folder (#8, "drag out to ungrouped"); dropping a folder here moves it to the
+                // front. Wrapped in a Section so the drop target spans the whole folder.
                 Section {
-                    // Ungrouped terminals live under a built-in「未分组」folder (not a real group:
-                    // no note, no reorder, not deletable). Filtering force-expands it.
                     if !ungrouped.isEmpty {
                         defaultHeaderRow(count: ungrouped.count)
-                        if defaultCollapsed == false || !filter.trimmingCharacters(in: .whitespaces).isEmpty {
-                            ForEach(ungrouped) { row($0).padding(.leading, Theme.Space.lg) }
+                        // Filtering force-expands it so matches are never hidden.
+                        if !defaultCollapsed || !filter.trimmingCharacters(in: .whitespaces).isEmpty {
+                            ForEach(ungrouped) { row($0) }
                         }
                     }
                 } header: {
@@ -111,7 +113,7 @@ struct SidebarView: View {
                 .dropDestination(for: String.self) { keys, _ in
                     for key in keys {
                         if let gid = SidebarDrag.groupID(from: key) {
-                            appModel.moveGroup(gid, before: nil) // folder dropped below all → move to end
+                            appModel.moveGroup(gid, before: appModel.currentGroups.first?.id) // → first folder
                         } else if let conn = appModel.connections.first(where: { $0.groupKey == key }) {
                             appModel.removeFromGroups(conn)
                         }
@@ -119,6 +121,9 @@ struct SidebarView: View {
                     ungroupedDropTargeted = false; dropTargetGroup = nil
                     return true
                 } isTargeted: { ungroupedDropTargeted = $0 }
+                ForEach(appModel.currentGroups) { group in
+                    groupTree(group)
+                }
                 if showEnded && endedCount > 0 {
                     Button("全部移除…", role: .destructive) { confirmRemoveAllEnded = true }
                         .buttonStyle(.plain)
@@ -172,6 +177,7 @@ struct SidebarView: View {
             }
         }
         .sheet(isPresented: $showServerSheet) { ServerListView() }
+        .sheet(isPresented: $showProjects) { WorkspaceManager().environment(appModel) }
         .alert("移除全部已断开的终端?", isPresented: $confirmRemoveAllEnded) {
             Button("全部移除", role: .destructive) { appModel.removeAllEnded() }
             Button("取消", role: .cancel) {}
@@ -215,7 +221,7 @@ struct SidebarView: View {
                         : (dropTargetGroup == group.id ? nil : dropTargetGroup)
                 }
             if groupExpanded(group.id) && !members.isEmpty {
-                ForEach(members) { row($0).padding(.leading, Theme.Space.lg) } // indent under the folder
+                ForEach(members) { row($0) }
                 if members.isEmpty {
                     Text("暂无终端 · 右键终端可加入分组")
                         .font(.caption2)
@@ -267,14 +273,14 @@ struct SidebarView: View {
         return HStack(spacing: Theme.Space.xs) {
             // Chevron = fold/unfold. Its own (generously sized) tap target, separate from the name.
             Image(systemName: "chevron.right")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(Theme.textTertiary)
                 .rotationEffect(.degrees(expanded ? 90 : 0))
-                .frame(width: 20, height: 20)
+                .frame(width: 14, height: 18)
                 .contentShape(Rectangle())
                 .onTapGesture { toggleGroup(group.id) }
             // Name (icon → count stretch) = open this group's Markdown note in the detail area.
-            sectionHeaderLabel(group.name, icon: "folder.fill",
+            sectionHeaderLabel(group.name,
                                count: appModel.visibleTerminals(in: group).filter { $0.isEnded == showEnded }.count)
                 .contentShape(Rectangle())
                 .onTapGesture { appModel.openGroupNote(group) }
@@ -284,6 +290,7 @@ struct SidebarView: View {
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .padding(.leading, Theme.Space.xs)
+                .opacity(hoveredGroup == group.id ? 1 : 0)
                 .contentShape(Rectangle())
                 .draggable(SidebarDrag.groupPayload(group.id)) {
                     Label(group.name, systemImage: "folder.fill")
@@ -293,7 +300,8 @@ struct SidebarView: View {
                 .help("拖动重新排序分组")
                 .accessibilityHidden(true) // reorder is exposed via the row's accessibilityActions
         }
-        .padding(.vertical, 2)
+        .padding(.top, Theme.Space.sm)
+        .onHover { hoveredGroup = $0 ? group.id : (hoveredGroup == group.id ? nil : hoveredGroup) }
         .background(
             // Highlight the folder while a terminal is dragged over it (#8 drop feedback).
             RoundedRectangle(cornerRadius: Theme.Radius.sm)
@@ -343,41 +351,43 @@ struct SidebarView: View {
         let expanded = !defaultCollapsed || !filter.trimmingCharacters(in: .whitespaces).isEmpty
         return HStack(spacing: Theme.Space.xs) {
             Image(systemName: "chevron.right")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(Theme.textTertiary)
                 .rotationEffect(.degrees(expanded ? 90 : 0))
-                .frame(width: 20, height: 20)
-            sectionHeaderLabel("未分组", icon: "folder.fill", count: count)
+                .frame(width: 14, height: 18)
+            sectionHeaderLabel("未分组", count: count)
+            // Invisible stand-in for a group's drag grip, so the counts line up across folders.
+            Image(systemName: "line.3.horizontal")
+                .font(.caption)
+                .padding(.leading, Theme.Space.xs)
+                .hidden()
         }
-        .padding(.vertical, 2)
+        .padding(.top, Theme.Space.sm)
         .contentShape(Rectangle())
         .onTapGesture { defaultCollapsed.toggle() }
         .help("未分组的终端 · 点击折叠/展开")
         .animation(.easeInOut(duration: 0.15), value: expanded)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel("Ungrouped, \(expanded ? "expanded" : "collapsed")")
+        .accessibilityLabel("未分组, \(expanded ? "expanded" : "collapsed")")
         .accessibilityAction { defaultCollapsed.toggle() }
     }
 
-    /// Shared prominent section header: a brand-tinted icon, a LARGE full-strength title (so a group
-    /// reads as a header, not a dimmer sub-item), and a count pill. Used by groups and "Default".
-    private func sectionHeaderLabel(_ name: String, icon: String, count: Int) -> some View {
+    /// Shared folder header label: a small, tracked, muted caps title (so the terminal names stay the
+    /// loudest text in the list) and a plain count. Used by groups and「未分组」.
+    private func sectionHeaderLabel(_ name: String, count: Int) -> some View {
         HStack(spacing: Theme.Space.sm) {
-            Image(systemName: icon)
-                .font(.callout)
-                .foregroundStyle(Theme.brand)
             Text(name)
-                .font(Theme.Font.groupHeader)
-                .foregroundStyle(.primary)
-                .textCase(nil)        // don't let the sidebar uppercase/dim the title
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.6)
+                .textCase(.uppercase)
+                .foregroundStyle(Theme.textTertiary)
                 .lineLimit(1)
             Spacer(minLength: Theme.Space.xs)
             if count > 0 {
-                // Plain muted count (v2): a badge fill would vanish on the cream sidebar (surface2 == cream).
                 Text("\(count)")
-                    .font(.caption.monospacedDigit().weight(.medium))
-                    .foregroundStyle(Theme.textTertiary)
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(Theme.Colors.pewter)
             }
         }
         .padding(.vertical, Theme.Space.xxs)
@@ -411,59 +421,89 @@ struct SidebarView: View {
     }
 }
 
-/// Top of the left panel: a host switcher (Local / ssh hosts / Add Host…) plus the primary actions,
-/// so the functions live on the LEFT and the title stays on the right (rebuild.md #1/#2).
+/// Top of the left panel: the host · project pill (one menu for both), the 待处理 button, and the
+/// charcoal「+」(rebuild.md #1/#2).
 private struct SidebarHeader: View {
     @Environment(AppModel.self) private var appModel
-    let onSearch: () -> Void
     let onAddHost: () -> Void
     let onManageServers: () -> Void
-    let onNewGroup: () -> Void
+    let onManageProjects: () -> Void
 
     private var hasServers: Bool {
         appModel.knownHosts.contains { if case .ssh = $0 { return true }; return false }
     }
 
     var body: some View {
+        @Bindable var store = WorkspaceStore.shared
         HStack(spacing: Theme.Space.sm) {
             Menu {
-                ForEach(Array(appModel.knownHosts.enumerated()), id: \.offset) { _, host in
-                    Button {
-                        appModel.selectHost(host)
-                    } label: {
-                        if appModel.currentHost == host {
-                            Label(host.label, systemImage: "checkmark")
-                        } else {
-                            Label(host.label, systemImage: host.icon)
+                Section("主机") {
+                    ForEach(Array(appModel.knownHosts.enumerated()), id: \.offset) { _, host in
+                        Button {
+                            appModel.selectHost(host)
+                        } label: {
+                            Label(hostName(host), systemImage: appModel.currentHost == host ? "checkmark" : host.icon)
                         }
                     }
+                    Button { onAddHost() } label: { Label("Add Host…", systemImage: "plus") }
+                    if hasServers {
+                        Button { onManageServers() } label: { Label("Manage Servers…", systemImage: "server.rack") }
+                    }
                 }
-                Divider()
-                Button { onAddHost() } label: { Label("Add Host…", systemImage: "plus") }
-                if hasServers {
-                    Button { onManageServers() } label: { Label("Manage Servers…", systemImage: "server.rack") }
+                Section("项目") {
+                    Picker("项目", selection: $store.selectedID) {
+                        Text("全部项目").tag(nil as UUID?)
+                        ForEach(store.projects) { Text($0.name).tag(Optional($0.id)) }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                    Button { onManageProjects() } label: { Label("管理项目…", systemImage: "folder.badge.gearshape") }
                 }
             } label: {
-                // v2 host pill: a white capsule with a status dot, host name, and a chevron.
+                // White pill — the sidebar's anchor: host glyph with a status dot · host · project ·
+                // chevron. Slightly taller and bolder than the controls around it.
                 HStack(spacing: Theme.Space.sm) {
-                    Circle()
-                        .fill(hostDot)
-                        .frame(width: 7, height: 7)
-                    Text(appModel.currentHost.label).font(Theme.Font.rowTitle).lineLimit(1)
-                    Spacer(minLength: Theme.Space.xs)
-                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.textTertiary)
+                    Image(systemName: appModel.currentHost.icon)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                        .overlay(alignment: .bottomTrailing) {
+                            Circle()
+                                .fill(hostDot)
+                                .frame(width: 6, height: 6)
+                                .overlay(Circle().stroke(Theme.surface, lineWidth: 1.5))
+                                .offset(x: 3, y: 2)
+                        }
+                    Text(hostName(appModel.currentHost))
+                        .font(.system(size: 14, weight: .semibold))
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                    // The project only shows when one narrows the list; "全部项目" is the quiet default.
+                    if let project = store.selected {
+                        Text("· \(project.name)")
+                            .font(Theme.Font.rowSubtitle)
+                            .foregroundStyle(Theme.textTertiary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Theme.textSecondary)
                 }
-                .padding(.horizontal, Theme.Space.md)
-                .padding(.vertical, 6)
+                .foregroundStyle(Theme.textPrimary)
+                .padding(.horizontal, 10)
+                .frame(height: 32)
                 .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
-                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
+                // Nav-level control → Cool Stone border (DESIGN.md), one step stronger than card Linen.
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.borderStrong, lineWidth: 1))
+                .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
             }
-            .menuStyle(.borderlessButton)
+            // `.button` + plain draws the custom label as-is (`.borderlessButton` reduces it to text).
+            .menuStyle(.button)
+            .buttonStyle(.plain)
             .menuIndicator(.hidden)
-            .fixedSize()                       // hug content → the host pill sits left-aligned
-            .help("Switch host for new terminals")
+            .help("切换主机与项目")
 
-            Spacer(minLength: Theme.Space.sm)  // push the trailing actions to the right edge
+            AttentionButton()
 
             // New terminal — a filled charcoal square (v2 primary action); a menu of the two launch
             // kinds, each opening the「新建会话」sheet. axis-claude runs against the LOCAL model only.
@@ -473,24 +513,27 @@ private struct SidebarHeader: View {
                     .disabled(appModel.currentHost != .local)
             } label: {
                 Image(systemName: "plus")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.canvas)
-                    .frame(width: 30, height: 30)
+                    .frame(width: 32, height: 32)
                     .background(Theme.brand, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
                     .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(.plain)
             .menuIndicator(.hidden)
             .fixedSize()
             .help("New terminal on \(appModel.currentHost.label) (⌘T)")
             .accessibilityLabel("新建终端")
-
-            HeaderButton(system: "magnifyingglass", help: "Search across all panes (⌘F)", action: onSearch)
-            HeaderButton(system: "folder.badge.plus", help: "New group", action: onNewGroup)
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.top, Theme.Space.md)
-        .padding(.bottom, Theme.Space.xs)
+        .padding(.bottom, Theme.Space.md)
+    }
+
+    private func hostName(_ host: AppModel.HostTarget) -> String {
+        if case .local = host { return "本机" }
+        return host.label
     }
 
     /// The host pill's status dot — sage for the always-available local host, neutral for a remote
@@ -508,9 +551,13 @@ private struct HeaderButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: system).font(.system(size: 13, weight: .medium))
+            Image(systemName: system)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.textTertiary)
+                .frame(width: 22, height: 28)
+                .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.plain)
         .help(help)
         .accessibilityLabel(help)
     }
@@ -571,6 +618,40 @@ private struct ToolDock: View {
     }
 }
 
+/// A full-width two-way switch in the system segmented look (the stock segmented Picker can't
+/// stretch to the sidebar width on macOS): a linen well with the chosen segment raised in white.
+private struct SegmentedBar<Value: Hashable>: View {
+    @Binding var selection: Value
+    let options: [(Value, String)]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
+                let chosen = option.0 == selection
+                Button { selection = option.0 } label: {
+                    Text(option.1)
+                        .font(.system(size: 12, weight: chosen ? .semibold : .regular))
+                        .foregroundStyle(chosen ? Theme.textPrimary : Theme.textSecondary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 22)
+                        .background {
+                            if chosen {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Theme.surface)
+                                    .shadow(color: Theme.textPrimary.opacity(0.12), radius: 1, y: 0.5)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(chosen ? .isSelected : [])
+            }
+        }
+        .padding(2)
+        .background(Theme.Colors.linen.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 /// A native-feeling search field that live-filters the terminal list.
 private struct FilterField: View {
     @Binding var text: String
@@ -578,7 +659,7 @@ private struct FilterField: View {
     var body: some View {
         HStack(spacing: Theme.Space.sm) {
             // A filter-semantics glyph (not a magnifier) so it reads as "narrow this list", visually
-            // distinct from the header's magnifyingglass which triggers full-text search across panes.
+            // distinct from the magnifyingglass beside it, which triggers full-text search across panes.
             Image(systemName: "line.3.horizontal.decrease")
                 .foregroundStyle(.secondary)
                 .font(.system(size: 12, weight: .medium))
@@ -598,8 +679,6 @@ private struct FilterField: View {
         .padding(.vertical, 7)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
-        .padding(.horizontal, Theme.Space.md)
-        .padding(.bottom, Theme.Space.sm)
         .accessibilityLabel("Filter terminals")
     }
 }
@@ -626,8 +705,7 @@ private struct TerminalRow: View {
         HStack(spacing: Theme.Space.md) {
             // ONE primary signal per row (dsh discipline): the icon tint + the single right-side
             // glyph carry the state; no left rail, no colored subtitles duplicating them.
-            Image(systemName: "terminal.fill")
-                .foregroundStyle(attention ? Self.amber : (working || status == .connected ? Theme.brand : Color.secondary))
+            KindBadge(kind: TerminalKind.of(conn), dimmed: status == .ended || status == .dormant)
             VStack(alignment: .leading, spacing: Theme.Space.xxs) {
                 Text(conn.title)
                     .font(Theme.Font.rowTitle)
@@ -654,6 +732,12 @@ private struct TerminalRow: View {
         }
         .padding(.vertical, Theme.Space.xxs)
         .background(rowTint, in: RoundedRectangle(cornerRadius: 6))
+        // The selected row carries a short charcoal bar at its leading edge.
+        .overlay(alignment: .leading) {
+            if isSelected {
+                Capsule().fill(Theme.brand).frame(width: 3, height: 18).offset(x: -7)
+            }
+        }
         .animation(.easeInOut(duration: 0.15), value: showDot)
         .animation(.easeInOut(duration: 0.28), value: working)
         .animation(.easeInOut(duration: 0.2), value: attention)
@@ -662,8 +746,9 @@ private struct TerminalRow: View {
     }
 
     private var rowTint: Color {
+        // Only "needs you" tints a row; working is carried by the equalizer alone, so an active row
+        // never reads as the selected one.
         if attention { return Self.amber.opacity(0.12) }
-        if working && !isSelected { return Theme.brand.opacity(0.06) }
         return .clear
     }
 

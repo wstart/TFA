@@ -52,35 +52,44 @@ final class WorkspaceStore {
     }
 }
 
-struct WorkspaceControls: View {
+/// The 待处理 button in the sidebar header: a tray glyph with an amber count badge while terminals
+/// ask for you or fail to connect; opens the attention center. Also owns the "project changed → jump
+/// to a terminal in it" behavior.
+struct AttentionButton: View {
     @Environment(AppModel.self) private var model
     @State private var store = WorkspaceStore.shared
-    @State private var showProjects = false
     @State private var showAttention = false
     var body: some View {
-        VStack(spacing: 6) {
-            HStack {
-                Picker("项目", selection: $store.selectedID) {
-                    Text("全部项目").tag(nil as UUID?)
-                    ForEach(store.projects) { Text($0.name).tag(Optional($0.id)) }
-                }.labelsHidden()
-                Button { showProjects = true } label: { Image(systemName: "folder.badge.gearshape") }
-                    .buttonStyle(.borderless).help("管理项目工作区")
-            }
-            TimelineView(.periodic(from: .now, by: 2)) { _ in
+        TimelineView(.periodic(from: .now, by: 2)) { _ in
+            let count = model.connections.filter { $0.needsAttention || $0.connectError != nil }.count
             Button { showAttention = true } label: {
-                Label("待处理 \(model.connections.filter { $0.needsAttention || $0.connectError != nil }.count)", systemImage: "tray")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }.buttonStyle(.borderless).help("查看请求关注或连接失败的终端")
+                Image(systemName: count > 0 ? "tray.full" : "tray")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(count > 0 ? Theme.Status.attention : Theme.textTertiary)
+                    .frame(width: 24, height: 32)
+                    .overlay(alignment: .topTrailing) {
+                        if count > 0 {
+                            Text("\(count)")
+                                .font(.system(size: 9, weight: .bold).monospacedDigit())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 4)
+                                .frame(minWidth: 15, minHeight: 15)
+                                .background(Theme.Status.attention, in: Capsule())
+                                .offset(x: 5, y: 2)
+                        }
+                    }
+                    .contentShape(Rectangle())
             }
-        }.padding(8)
+            .buttonStyle(.plain)
+            .help(count > 0 ? "待处理：\(count) 个终端需要你" : "待处理：暂无")
+            .accessibilityLabel("待处理 \(count)")
+        }
         .onChange(of: store.selectedID) {
             guard !model.axisSelected && !model.skillsSelected && !model.claudeMdSelected else { return }
             if let connection = model.connections.first(where: { store.includes($0) }) {
                 model.goToTerminal(connection.id)
             } else { model.selectedConnectionID = nil }
         }
-        .sheet(isPresented: $showProjects) { WorkspaceManager().environment(model) }
         .sheet(isPresented: $showAttention) { AttentionCenter().environment(model) }
     }
 }

@@ -42,27 +42,27 @@ struct RootView: View {
                                 onDismiss: { model.dismissDetachNotice() })
                 }
                 if appModel.axisSelected {
-                    AxisHeaderBar()
+                    ToolHeaderBar(icon: "cpu", title: "模型", subtitle: "本机 axis-model 服务：安装、启停、切换模型。axis-claude 用的就是它。")
                     Divider()
                     AxisModelView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.claudeMdSelected {
-                    ClaudeMdHeaderBar()
+                    ToolHeaderBar(icon: "text.book.closed", title: "规则", subtitle: "Claude Code / Codex 的全局规则文件，保存后对新对话生效。")
                     Divider()
                     ClaudeMdView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.skillsSelected {
-                    SkillsHeaderBar()
+                    ToolHeaderBar(icon: "wand.and.stars", title: "Skills", subtitle: "管理 Claude Code / Codex 的 Skills，点开编辑 SKILL.md。")
                     Divider()
                     SkillsView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.labSelected {
-                    LabHeaderBar()
+                    ToolHeaderBar(icon: "flask", title: "实验室", subtitle: "系统监控、Token 用量与 PTY 进程。")
                     Divider()
                     LabView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.tunnelsSelected {
-                    TunnelsHeaderBar()
+                    ToolHeaderBar(icon: "network.badge.shield.half.filled", title: "隧道", subtitle: "把本机端口送到远程服务器，或打通一个临时公网地址。断线会自己重连。")
                     Divider()
                     TunnelsView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -74,6 +74,10 @@ struct RootView: View {
                     Divider()
                     TerminalAreaView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if let conn = appModel.selectedConnection {
+                        Divider()
+                        TerminalFooter(connection: conn)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -157,6 +161,7 @@ private struct SidebarDivider: View {
 /// Reconnect affordance when it has failed. (Shared `StatusIndicator` keeps it consistent.)
 private struct ActiveTerminalHeader: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.openWindow) private var openWindow
     let connection: ConnectionSession?
     /// Grid chip visibility: shown for a few seconds after the grid actually changes, then fades.
     @State private var showGrid = false
@@ -173,43 +178,56 @@ private struct ActiveTerminalHeader: View {
             .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
 
             if let conn = connection {
-                StatusIndicator(status: TerminalStatus.of(conn))
                 Text(conn.title)
                     .font(Theme.Font.headerTitle)
                     .lineLimit(1)
                     .layoutPriority(1)
-
-                let command = conn.subtitle.lowercased()
-                if command.contains("codex") { metaChip("terminal", "Codex") }
-                else if command.contains("claude") { metaChip("terminal", "Claude Code") }
-                if conn.needsAttention { Text("需要回复").font(.caption).foregroundStyle(Theme.Status.attention) }
-                else if appModel.isWorking(conn) { Text("执行中").font(.caption).foregroundStyle(.secondary) }
+                let state = stateTag(conn)
+                StateTag(text: state.0, tint: state.1)
 
                 if let host = conn.host { metaChip("network", host) }
                 // Grid size only matters while it's changing — surface it briefly after a resize
                 // instead of announcing a constant nobody reads (dsh: on-demand, don't announce).
                 if let g = conn.grid, showGrid { metaChip("squareshape.split.2x2", "\(g.cols)×\(g.rows)") }
 
-                if let path = conn.currentPath { pathChip(displayPath(path, remote: conn.host != nil)) }
+                if let path = conn.currentPath {
+                    let shown = displayPath(path, remote: conn.host != nil)
+                    Text(shown)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(shown)
+                        .accessibilityLabel("当前路径 \(shown)")
+                }
 
                 Spacer(minLength: Theme.Space.md)
-
-                // History viewer: scroll back through this pane's scrollback even when it's on the
-                // alternate screen (claude / vim / less), where the live view can't scroll.
-                Button { appModel.showHistoryViewer() } label: {
-                    Image(systemName: "clock.arrow.circlepath")
-                }
-                .buttonStyle(.borderless)
-                .help("查看历史(⌘⇧H)")
-                .accessibilityLabel("查看历史")
 
                 if TerminalStatus.of(conn) == .failed {
                     Button { conn.retry() } label: {
                         Label("重新连接", systemImage: "arrow.clockwise")
                     }
+                    .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .accessibilityLabel("Reconnect terminal")
                 }
+                // History viewer: scroll back through this pane's scrollback even when it's on the
+                // alternate screen (claude / vim / less), where the live view can't scroll.
+                Button { appModel.showHistoryViewer() } label: {
+                    Label("历史", systemImage: "clock.arrow.circlepath")
+                }
+                .help("查看历史(⌘⇧H)")
+                Button {
+                    if let p = conn.currentPath { openWindow(value: URL(fileURLWithPath: p)) }
+                } label: {
+                    Label("文件", systemImage: "folder")
+                }
+                .disabled(conn.host != nil || conn.currentPath == nil)
+                .help(conn.host != nil ? "暂不支持远程会话" : "文件管理器")
+                Button { appModel.isShowingQuickSwitch = true } label: {
+                    Text("⌘K")
+                }
+                .help("快速切换终端")
             } else {
                 Circle()
                     .fill(Color.secondary.opacity(0.35))
@@ -220,8 +238,9 @@ private struct ActiveTerminalHeader: View {
                 Spacer(minLength: 0)
             }
         }
+        .controlSize(.small)
         .padding(.horizontal, Theme.Space.lg)
-        .padding(.vertical, Theme.Space.sm)
+        .frame(height: 40)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.canvas)
         .onChange(of: gridText) { _, new in
@@ -236,27 +255,23 @@ private struct ActiveTerminalHeader: View {
         }
     }
 
+    /// The header's state tag: what this terminal needs from you, in priority order.
+    private func stateTag(_ conn: ConnectionSession) -> (String, Color) {
+        switch TerminalStatus.of(conn) {
+        case .failed: return ("连接失败", Theme.Status.error)
+        case .ended: return ("已断开", Theme.Status.neutral)
+        case .reconnecting: return ("重连中", Theme.Status.pending)
+        case .connecting: return ("连接中", Theme.Status.pending)
+        case .dormant: return ("未连接", Theme.Status.neutral)
+        case .connected:
+            if conn.needsAttention { return ("需要你", Theme.Status.attention) }
+            return appModel.isWorking(conn) ? ("运行中", Theme.Status.positive) : ("空闲", Theme.Status.neutral)
+        }
+    }
+
     /// The grid as a compare-friendly string (tuples aren't Equatable for onChange); nil = no grid.
     private var gridText: String? {
         connection?.grid.map { "\($0.cols)×\($0.rows)" }
-    }
-
-    /// The active pane's working directory, rendered as a flexible middle-truncating chip — the
-    /// header's main "where am I" cue. Takes the slack between the title and the trailing controls.
-    private func pathChip(_ text: String) -> some View {
-        HStack(spacing: Theme.Space.xxs) {
-            Image(systemName: "folder").font(.system(size: 10))
-            Text(text)
-                .font(Theme.Font.headerMeta)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, Theme.Space.sm)
-        .padding(.vertical, Theme.Space.xxs)
-        .background(Theme.surface2, in: Capsule())
-        .help(text)
-        .accessibilityLabel("当前路径 \(text)")
     }
 
     /// Abbreviate a LOCAL path's home prefix to `~`. Remote paths are left as-is (the home that
@@ -279,6 +294,36 @@ private struct ActiveTerminalHeader: View {
         .padding(.vertical, Theme.Space.xxs)
         .background(Theme.surface2, in: Capsule())
         .accessibilityLabel("\(text)")
+    }
+}
+
+/// The slim line under the terminal: what is running and where, plus the shortcuts that matter.
+private struct TerminalFooter: View {
+    let connection: ConnectionSession
+
+    var body: some View {
+        let kind = TerminalKind.of(connection)
+        HStack(spacing: Theme.Space.lg) {
+            Label(kind.label, systemImage: kind.symbol)
+            Text(connection.host.map { "ssh · \($0)" } ?? "本机 · tmux")
+            Spacer(minLength: Theme.Space.md)
+            hint("⌘]", "下一个有动静")
+            hint("⌘K", "快速切换")
+            hint("⌘F", "搜索全部")
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(Theme.textTertiary)
+        .lineLimit(1)
+        .padding(.horizontal, Theme.Space.lg)
+        .frame(height: 24)
+        .background(Theme.canvas)
+    }
+
+    private func hint(_ key: String, _ label: String) -> some View {
+        HStack(spacing: 3) {
+            Text(key).fontWeight(.semibold).foregroundStyle(Theme.textSecondary)
+            Text(label)
+        }
     }
 }
 
@@ -335,123 +380,38 @@ private struct ErrorBanner: View {
     }
 }
 
-/// Slim header for the Claude Code / Codex rules detail pane.
-private struct ClaudeMdHeaderBar: View {
+/// Header for a tool pane (模型 / 规则 / Skills / 实验室 / 隧道): sidebar toggle, accent icon and
+/// title, and one line underneath saying what the pane is for.
+private struct ToolHeaderBar: View {
     @Environment(AppModel.self) private var appModel
+    let icon: String
+    let title: String
+    let subtitle: String
 
     var body: some View {
-        HStack(spacing: Theme.Space.md) {
+        HStack(alignment: .top, spacing: Theme.Space.md) {
             Button { appModel.toggleSidebar() } label: {
                 Image(systemName: "sidebar.left")
             }
             .buttonStyle(.borderless)
             .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
             .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
+            .padding(.top, 2)
 
-            Image(systemName: "text.book.closed").foregroundStyle(Theme.brand)
-            Text("Agent 全局规则").font(Theme.Font.headerTitle).lineLimit(1)
-            Spacer()
-        }
-        .padding(.horizontal, Theme.Space.lg)
-        .padding(.vertical, Theme.Space.sm)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.canvas)
-    }
-}
-
-/// Slim header for the Skills detail pane — mirrors `LabHeaderBar`'s chrome so switching between a
-/// terminal, the Lab, and Skills feels consistent.
-private struct SkillsHeaderBar: View {
-    @Environment(AppModel.self) private var appModel
-
-    var body: some View {
-        HStack(spacing: Theme.Space.md) {
-            Button { appModel.toggleSidebar() } label: {
-                Image(systemName: "sidebar.left")
+            VStack(alignment: .leading, spacing: Theme.Space.xxs) {
+                HStack(spacing: Theme.Space.sm) {
+                    Image(systemName: icon).foregroundStyle(Theme.brand)
+                    Text(title).font(Theme.Font.headerTitle).lineLimit(1)
+                }
+                Text(subtitle)
+                    .font(Theme.Font.headerMeta)
+                    .foregroundStyle(Theme.textTertiary)
+                    .lineLimit(1)
             }
-            .buttonStyle(.borderless)
-            .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
-            .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
-
-            Image(systemName: "wand.and.stars").foregroundStyle(Theme.brand)
-            Text("Skills 管理").font(Theme.Font.headerTitle).lineLimit(1)
             Spacer()
         }
         .padding(.horizontal, Theme.Space.lg)
-        .padding(.vertical, Theme.Space.sm)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.canvas)
-    }
-}
-
-/// Slim header for the Lab detail pane — mirrors `ActiveTerminalHeader`'s chrome (sidebar toggle +
-/// title) so switching between a terminal and the Lab feels consistent.
-private struct LabHeaderBar: View {
-    @Environment(AppModel.self) private var appModel
-
-    var body: some View {
-        HStack(spacing: Theme.Space.md) {
-            Button { appModel.toggleSidebar() } label: {
-                Image(systemName: "sidebar.left")
-            }
-            .buttonStyle(.borderless)
-            .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
-            .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
-
-            Image(systemName: "flask").foregroundStyle(Theme.brand)
-            Text("实验室 · 系统监控").font(Theme.Font.headerTitle).lineLimit(1)
-            Spacer()
-        }
-        .padding(.horizontal, Theme.Space.lg)
-        .padding(.vertical, Theme.Space.sm)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.canvas)
-    }
-}
-
-/// Slim header for the axis-model (local model backend) pane.
-private struct AxisHeaderBar: View {
-    @Environment(AppModel.self) private var appModel
-
-    var body: some View {
-        HStack(spacing: Theme.Space.md) {
-            Button { appModel.toggleSidebar() } label: {
-                Image(systemName: "sidebar.left")
-            }
-            .buttonStyle(.borderless)
-            .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
-            .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
-
-            Image(systemName: "cpu").foregroundStyle(Theme.brand)
-            Text("模型 · axis-model").font(Theme.Font.headerTitle).lineLimit(1)
-            Spacer()
-        }
-        .padding(.horizontal, Theme.Space.lg)
-        .padding(.vertical, Theme.Space.sm)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.canvas)
-    }
-}
-
-/// Slim header for the SSH reverse-tunnel manager pane.
-private struct TunnelsHeaderBar: View {
-    @Environment(AppModel.self) private var appModel
-
-    var body: some View {
-        HStack(spacing: Theme.Space.md) {
-            Button { appModel.toggleSidebar() } label: {
-                Image(systemName: "sidebar.left")
-            }
-            .buttonStyle(.borderless)
-            .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
-            .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
-
-            Image(systemName: "network.badge.shield.half.filled").foregroundStyle(Theme.brand)
-            Text("SSH 反向转发 · 隧道管理").font(Theme.Font.headerTitle).lineLimit(1)
-            Spacer()
-        }
-        .padding(.horizontal, Theme.Space.lg)
-        .padding(.vertical, Theme.Space.sm)
+        .padding(.vertical, Theme.Space.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.canvas)
     }

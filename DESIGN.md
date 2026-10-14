@@ -20,7 +20,7 @@ work for a Chinese-heavy, dense, long-running terminal UI.
 
 ## Workspace interaction standard (2026-10)
 
-- Sidebar hierarchy: host → project selector → attention inbox → terminal filter → grouped terminals → tools.
+- Sidebar hierarchy: host · project pill + 待处理 button + “+” → terminal filter (with ⌘F search and new group beside it) → 在线/已断开 → the built-in「未分组」folder pinned on top, then group folders → tools. The project is chosen from the host pill's menu.
 - Projects keep a local folder and stable terminal associations. New terminals inherit the selected folder; board tasks created in a project retain that project even before assignment. “全部项目” clears the filter.
 - Attention inbox is global: terminal errors/attention and unanswered, blocked or queued tasks remain visible across project filters. Viewing a terminal does not resolve an outstanding board question; replying records a task comment.
 - New-session sheet: ordinary shell / Codex / Claude Code; show CLI discovery status before creation. Never infer an exact conversation from “most recent”; use an explicitly bound UUID or the CLI picker.
@@ -207,16 +207,33 @@ signature looping animation**:
 Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
 
 - **Sidebar** — Cream chrome; hosts the host pill, filter pill, terminal list, and tool dock.
-- **Host pill** — White capsule + Linen border on Cream; sage status dot + host name + chevron; paired
-  with a filled-charcoal square `+` (new terminal).
+- **Host pill** — the sidebar's anchor: White, 32px tall, Cool Stone border (nav-level), 9.6px; host
+  glyph with a sage/stone status dot, 「本机」/host in 14 semibold, the project name (only when one is
+  selected), and an up-down chevron. One menu for hosts and projects. Followed by the 待处理 button and
+  a 32px filled-charcoal `+` (menu: 启动终端 / 启动 axis-claude).
+- **待处理 button** — a tray glyph in the header; amber with a small count badge while terminals ask
+  for you or fail to connect, muted otherwise; opens the attention center.
+- **Filter row** — the filter field plus quiet ⌘F search and new-group icons beside it.
+- **在线 / 已断开 switch** — full-width segmented bar: a Linen well with the chosen half raised in white.
 - **Filter pill** — White capsule + Linen border, 9.6px; live-filters the list (distinct from ⌘F search).
-- **Sidebar terminal row** — White on Cream; `rowTitle` name + `rowSubtitle` (cwd / live line);
-  status glyph (§6); a single primary activity signal per row; active = charcoal wash.
-- **Group folder** — disclosure row, `groupHeader`; drag-reorderable; drop targets highlight in accent.
+- **Sidebar terminal row** — a 22px rounded-square **kind badge** (agents — axis-claude / Claude /
+  Codex — solid Charcoal with an ivory glyph; shells and ssh quiet Linen; ended/dormant faded), then
+  `rowTitle` name + `rowSubtitle` (cwd / live line), and one trailing signal (§6). Selected = system
+  selection plus a 3px Charcoal bar at the leading edge. Only "needs you" tints a row (amber wash);
+  working is carried by the equalizer alone. Ungrouped terminals live in a built-in「未分组」folder
+  pinned above the groups (same header style, collapsible, not reorderable); rows align under their
+  folder label (no indent).
+- **Group folder** — a small chevron and an 11pt tracked, muted caps label with a plain count, so
+  terminal names stay the loudest text; the drag grip appears on hover; drop targets highlight in accent.
 - **Tool dock** (模型 / 隧道 / 规则 / Skills / 实验室) — sidebar bottom; equal-width icon+label cells,
   selected = filled charcoal cell with ivory glyph (mirrors a selected row).
 - **Status indicator** — shared spinner-or-glyph component; symbol + tint + VoiceOver label.
-- **Panel header bar** — Ivory canvas, `headerTitle`, sidebar-toggle + a leading accent icon.
+- **Terminal header** — 40px: sidebar toggle, name (`headerTitle`), a state tag (运行中 sage / 需要你
+  amber / 连接失败 brick / 空闲·已断开 stone, tinted 12% fill), a muted monospaced `~` path, then small
+  bordered 历史 / 文件 / ⌘K buttons (+ prominent 重新连接 when failed).
+- **Terminal footer** — 24px under the pane: kind + host on the left, ⌘] / ⌘K / ⌘F hints on the right.
+- **Panel header bar** — Ivory canvas, sidebar-toggle + accent icon + `headerTitle`, and one muted line
+  underneath saying what the pane is for.
 - **Model panel card** — White, Linen border, 16px radius; a status dot + title header above, then
   control / stats (mono values) / model list cards.
 - **Tunnel row** — White card, 16px radius; status dot (running=slate, retrying=amber, stopped=stone),
@@ -224,7 +241,8 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
 - **Sheets / forms** (SSH host, tunnel, environment editor) — White, Linen border, `headerTitle` title,
   rounded-border inputs, Charcoal primary button.
 - **Banners & toasts** (tmux-missing, error, detach-undo) — flat, Linen-bordered, accent-tinted.
-- **Terminal watermark** — large faded session name on the dark pane, in `terminalForeground` at ~8%.
+- **Terminal watermark** — the session name in the pane's bottom-right corner, rounded bold, at most
+  140pt, `terminalForeground` at 5% — an identity cue that never competes with output.
 - **Empty states** — `emptyTitle` + `emptyBody`, centered, with a faint accent glyph and key shortcuts.
 
 ---
