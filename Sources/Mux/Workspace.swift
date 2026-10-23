@@ -60,30 +60,29 @@ struct AttentionButton: View {
     @State private var store = WorkspaceStore.shared
     @State private var showAttention = false
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 2)) { _ in
-            let count = model.connections.filter { $0.needsAttention || $0.connectError != nil }.count
-            Button { showAttention = true } label: {
-                Image(systemName: count > 0 ? "tray.full" : "tray")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(count > 0 ? Theme.Status.attention : Theme.textTertiary)
-                    .frame(width: 24, height: 32)
-                    .overlay(alignment: .topTrailing) {
-                        if count > 0 {
-                            Text("\(count)")
-                                .font(.system(size: 9, weight: .bold).monospacedDigit())
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 4)
-                                .frame(minWidth: 15, minHeight: 15)
-                                .background(Theme.Status.attention, in: Capsule())
-                                .offset(x: 5, y: 2)
-                        }
+        // No timer: needsAttention / connectError are @Observable, so this re-renders when they change.
+        let count = model.connections.filter { $0.needsAttention || $0.connectError != nil }.count
+        Button { showAttention = true } label: {
+            Image(systemName: count > 0 ? "tray.full" : "tray")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(count > 0 ? Theme.Status.attention : Theme.textTertiary)
+                .frame(width: 24, height: 32)
+                .overlay(alignment: .topTrailing) {
+                    if count > 0 {
+                        Text("\(count)")
+                            .font(.system(size: 9, weight: .bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4)
+                            .frame(minWidth: 15, minHeight: 15)
+                            .background(Theme.Status.attention, in: Capsule())
+                            .offset(x: 5, y: 2)
                     }
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(count > 0 ? "待处理：\(count) 个终端需要你" : "待处理：暂无")
-            .accessibilityLabel("待处理 \(count)")
+                }
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .help(count > 0 ? "待处理：\(count) 个终端需要你" : "待处理：暂无")
+        .accessibilityLabel("待处理 \(count)")
         .onChange(of: store.selectedID) {
             guard !model.axisSelected && !model.skillsSelected && !model.claudeMdSelected else { return }
             if let connection = model.connections.first(where: { store.includes($0) }) {
@@ -163,26 +162,25 @@ struct AttentionCenter: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 2)) { _ in
-            VStack(alignment: .leading, spacing: 12) {
-                HStack { Text("待处理中心 · 全部项目").font(.headline); Spacer(); Button("完成") { dismiss() }.keyboardShortcut(.cancelAction) }
-                List {
-                    Section("需要关注的终端") {
-                        let terminals = model.connections.filter { $0.needsAttention || $0.connectError != nil }
-                        if terminals.isEmpty { Text("暂无终端需要处理").foregroundStyle(.secondary) }
-                        ForEach(terminals) { connection in
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(connection.title)
-                                    Text(connection.connectError ?? connection.attentionMessage ?? "Agent 请求关注").font(.caption).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Button("前往终端") { model.goToTerminal(connection.id); dismiss() }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack { Text("待处理中心 · 全部项目").font(.headline); Spacer(); Button("完成") { dismiss() }.keyboardShortcut(.cancelAction) }
+            List {
+                Section("需要关注的终端") {
+                    let terminals = model.connections.filter { $0.needsAttention || $0.connectError != nil }
+                    if terminals.isEmpty { Text("暂无终端需要处理").foregroundStyle(.secondary) }
+                    ForEach(terminals) { connection in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(connection.title)
+                                Text(connection.connectError ?? connection.attentionMessage ?? "Agent 请求关注").font(.caption).foregroundStyle(.secondary)
                             }
+                            Spacer()
+                            Button("前往终端") { model.goToTerminal(connection.id); dismiss() }
                         }
                     }
                 }
-            }.padding(20)
-        }.frame(width: 720, height: 500)
+            }
+        }.padding(20)
+        .frame(width: 720, height: 500)
     }
 }

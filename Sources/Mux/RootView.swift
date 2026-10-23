@@ -458,15 +458,21 @@ private struct FontSizeHUD: View {
     @State private var hideTask: Task<Void, Never>?
 
     var body: some View {
-        Text("\(Int(size)) pt")
-            .font(.system(.title3, design: .rounded).weight(.semibold))
-            .monospacedDigit()
-            .padding(.horizontal, Theme.Space.lg)
-            .padding(.vertical, Theme.Space.sm)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().strokeBorder(Theme.brand.opacity(0.4)))
-            .opacity(visible ? 1 : 0)
-            .padding(.top, Theme.Space.xl)
+        // Mounted only while showing: a material keeps re-blurring whatever is behind it, so an
+        // always-present (opacity 0) HUD over the live terminal re-rendered continuously.
+        ZStack {
+            if visible {
+                Text("\(Int(size)) pt")
+                    .font(.system(.title3, design: .rounded).weight(.semibold))
+                    .monospacedDigit()
+                    .padding(.horizontal, Theme.Space.lg)
+                    .padding(.vertical, Theme.Space.sm)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(Capsule().strokeBorder(Theme.brand.opacity(0.4)))
+                    .padding(.top, Theme.Space.xl)
+                    .transition(.opacity)
+            }
+        }
             .allowsHitTesting(false)
             .accessibilityHidden(true)
             .animation(.easeOut(duration: 0.12), value: visible)

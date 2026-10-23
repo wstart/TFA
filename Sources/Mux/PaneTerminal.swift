@@ -108,6 +108,8 @@ final class PaneTerminal {
 
     /// Live count of lines that streamed in while the user was scrolled up (cleared on return).
     private var unseenLines = 0
+    /// A count update is already scheduled — see `noteOutput`.
+    private var unseenNotifyPending = false
 
     /// True when the viewport is pinned to the live tail. SwiftTerm reports `scrollPosition == 0`
     /// at the bottom (yDisp <= 0) and 1.0 at the oldest scrollback line — so "at bottom" is simply
@@ -135,7 +137,16 @@ final class PaneTerminal {
         }
         let newlines = data.reduce(into: 0) { count, byte in if byte == 0x0A { count += 1 } }
         unseenLines += max(newlines, 1) // at least 1 so any output bumps the badge
-        onScrollState?(false, unseenLines)
+        // Throttle the badge to ~2 updates/s: each notification re-renders the pane's SwiftUI body,
+        // and a busy TUI (an agent's spinner) repaints ~10×/s — notifying per feed kept the window
+        // re-rendering continuously while the user read scrollback.
+        guard !unseenNotifyPending else { return }
+        unseenNotifyPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            self.unseenNotifyPending = false
+            if !self.atBottom { self.onScrollState?(false, self.unseenLines) }
+        }
     }
 
     /// Recompute & push scroll state after a user scroll. Driven by the Coordinator's `scrolled`

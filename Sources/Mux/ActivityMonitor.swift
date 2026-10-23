@@ -14,10 +14,10 @@ import TmuxKit
 @MainActor
 @Observable
 final class TerminalActivityMonitor {
-    private(set) var activity: [String: Int] = [:]       // session name → last output epoch
+    // Published state changes ONLY when its value changes: every sidebar row reads it, so a tick that
+    // reassigned it unconditionally re-rendered the whole list every 1.5 s even when nothing moved.
+    private(set) var working: Set<String> = []           // sessions that produced output within `activeWithin`
     private(set) var lastLine: [String: String] = [:]    // session name → latest non-empty line
-    private(set) var workingSince: [String: Int] = [:]   // session name → epoch it started its current burst
-    private(set) var nowEpoch: Int = 0
     static let activeWithin = 5                           // "working" = produced output within this many seconds
 
     @ObservationIgnored private var lineCache: [String: (epoch: Int, line: String)] = [:]
@@ -48,19 +48,15 @@ final class TerminalActivityMonitor {
         }.value
         let now = Int(Date().timeIntervalSince1970)
         let workingNames = Set(snap.act.filter { now - $0.value < within }.map { $0.key })
-        var since = self.workingSince
-        for n in workingNames where since[n] == nil { since[n] = now }
-        for k in Array(since.keys) where !workingNames.contains(k) { since[k] = nil }
         var cacheNext: [String: (epoch: Int, line: String)] = [:]
         for (name, line) in snap.lines { if let t = snap.act[name] { cacheNext[name] = (t, line) } }
         self.lineCache = cacheNext
-        self.activity = snap.act; self.lastLine = snap.lines; self.workingSince = since; self.nowEpoch = now
+        if workingNames != working { working = workingNames }
+        if snap.lines != lastLine { lastLine = snap.lines }
     }
 
     /// True when this (local) session produced output within the last `activeWithin` seconds.
-    func isWorking(name: String) -> Bool { activity[name].map { nowEpoch - $0 < Self.activeWithin } ?? false }
+    func isWorking(name: String) -> Bool { working.contains(name) }
     /// The latest non-empty output line, if the session is currently active.
     func line(_ name: String) -> String? { lastLine[name] }
-    /// Seconds the session has been continuously producing output (its current burst), if working.
-    func workedSeconds(_ name: String) -> Int? { workingSince[name].map { max(0, nowEpoch - $0) } }
 }

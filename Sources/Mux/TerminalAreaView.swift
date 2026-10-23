@@ -287,21 +287,61 @@ private struct LoginView: View {
 /// A faint, non-interactive watermark of the session name in the terminal's bottom-right corner —
 /// an at-a-glance identity cue when juggling many terminals (see DESIGN.md). Kept small and quiet so
 /// it never competes with live output; never intercepts input.
+///
+/// Drawn by AppKit (a layer-backed label), NOT SwiftUI: at this size every glyph is path-rendered on
+/// the CPU, and as SwiftUI content it was re-rendered on every frame any animation in the window ran
+/// — the bulk of TFA's idle CPU. A label's layer is drawn once and cached until the text/size changes.
 private struct SessionWatermark: View {
     let name: String
 
     var body: some View {
         GeometryReader { geo in
-            Text(name)
-                .font(.system(size: min(140, max(geo.size.height * 0.18, 48)), weight: .bold, design: .rounded))
-                .foregroundStyle(Theme.terminalForeground.opacity(0.05)) // faint on the DARK terminal
-                .lineLimit(1)
-                .minimumScaleFactor(0.2) // shrink long names to one line
+            WatermarkLabel(text: name, fontSize: min(140, max(geo.size.height * 0.18, 48)))
                 .frame(maxWidth: geo.size.width * 0.8, alignment: .trailing)
                 .frame(width: geo.size.width - 28, height: geo.size.height - 16, alignment: .bottomTrailing)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+}
+
+private struct WatermarkLabel: NSViewRepresentable {
+    let text: String
+    let fontSize: CGFloat
+
+    func makeNSView(context: Context) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.wantsLayer = true
+        label.alignment = .right
+        label.lineBreakMode = .byClipping
+        label.maximumNumberOfLines = 1
+        label.textColor = Theme.terminalForegroundNS.withAlphaComponent(0.05) // faint on the DARK terminal
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.setAccessibilityElement(false)
+        label.font = Self.font(fontSize)
+        return label
+    }
+
+    func updateNSView(_ label: NSTextField, context: Context) {
+        if label.stringValue != text { label.stringValue = text }
+    }
+
+    /// Picks the font size here (the one place it is set): the requested size, shrunk to fit the
+    /// offered width for long names (like `.minimumScaleFactor`). Unchanged size → no redraw.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView label: NSTextField, context: Context) -> CGSize? {
+        var size = fontSize
+        let full = (text as NSString).size(withAttributes: [.font: Self.font(fontSize)])
+        if let width = proposal.width, width > 0, full.width > width {
+            size = max(fontSize * 0.2, fontSize * width / full.width)
+        }
+        if label.font?.pointSize != size { label.font = Self.font(size) }
+        return (text as NSString).size(withAttributes: [.font: Self.font(size)])
+    }
+
+    private static func font(_ size: CGFloat) -> NSFont {
+        let base = NSFont.systemFont(ofSize: size, weight: .bold)
+        guard let rounded = base.fontDescriptor.withDesign(.rounded) else { return base }
+        return NSFont(descriptor: rounded, size: size) ?? base
     }
 }
 
@@ -526,17 +566,17 @@ private struct JumpToLatestPill: View {
                 if unseenLines > 0 {
                     Text("\(unseenLines)")
                         .font(.caption.monospacedDigit().weight(.semibold))
-                        .contentTransition(.numericText())
                 }
             }
             .foregroundStyle(Theme.brand)
             .padding(.horizontal, Theme.Space.sm)
             .padding(.vertical, Theme.Space.xs)
-            .background(.ultraThinMaterial, in: Capsule())
+            // Solid fill, no material and no per-count animation: it sits over a live terminal, so a
+            // blur would be recomputed on every repaint underneath it.
+            .background(Theme.surface, in: Capsule())
             .overlay(Capsule().stroke(Theme.brand.opacity(0.6), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: unseenLines)
         .accessibilityLabel("Jump to latest output")
     }
 }

@@ -829,6 +829,21 @@ private struct AttentionBell: View {
 /// activity effect. Honors Reduce Motion (static bars). Pure visual, no layout impact.
 private struct EqualizerBars: View {
     let animated: Bool
+    /// Only bounce while TFA is the active app: a `repeatForever` animation keeps the whole window
+    /// re-rendering at display rate, which is wasted (and was most of TFA's idle CPU) when TFA is in
+    /// the background. Inactive → static bars; reactivation remounts the animated variant.
+    @State private var appActive = NSApp.isActive
+
+    var body: some View {
+        Bars(animated: animated && appActive)
+            .id(animated && appActive)
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in appActive = true }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in appActive = false }
+    }
+}
+
+private struct Bars: View {
+    let animated: Bool
     @State private var up = false
 
     var body: some View {
