@@ -68,8 +68,11 @@ public final class PtyProcessTransport: TmuxTransport {
 
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
-        // New session so the PTY becomes the child's controlling terminal.
-        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
+        // New session so the PTY becomes the child's controlling terminal. CLOEXEC_DEFAULT: the
+        // child keeps ONLY the fds set up above (0/1/2). Without it every child inherited the other
+        // connections' pty masters, so after TFA exited no child ever saw a hangup and they all
+        // lived on as orphans, each pinning ptys.
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT))
         defer { posix_spawnattr_destroy(&attr) }
 
         var cargs: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) }

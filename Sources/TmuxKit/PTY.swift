@@ -20,6 +20,10 @@ final class PTY {
         }
         master = m
         slave = s
+        // Close-on-exec for both ends, so no OTHER child spawned by this process (Process(), the
+        // ssh askpass helper, …) inherits this pty and keeps it alive after we exit.
+        _ = fcntl(m, F_SETFD, FD_CLOEXEC)
+        _ = fcntl(s, F_SETFD, FD_CLOEXEC)
     }
 
     /// The slave device path (e.g. `/dev/ttys003`). Opening THIS in a session-leader child (after
