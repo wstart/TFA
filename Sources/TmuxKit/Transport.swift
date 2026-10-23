@@ -12,6 +12,13 @@ public protocol TmuxTransport: AnyObject {
     func write(_ data: Data)
     func resize(cols: Int, rows: Int)
     func terminate()
+    /// Terminate once everything already written has been flushed, giving the process `grace`
+    /// seconds to exit by itself first (e.g. after `detach-client` / `kill-session`).
+    func terminate(after grace: TimeInterval)
+}
+
+public extension TmuxTransport {
+    func terminate(after grace: TimeInterval) { terminate() }
 }
 
 /// Runs an arbitrary argv (tmux, or ssh whose remote runs tmux) on a raw PTY and streams
@@ -30,7 +37,12 @@ public final class PtyProcessTransport: TmuxTransport {
     private var rows: Int
 
     private var pty: PTY?
+    /// The child's pid until it has been reaped; -1 afterwards, so a late `terminate()` (deinit)
+    /// can never signal a recycled pid. Guarded by `pidLock` (read from any thread, cleared by the
+    /// exit source on `ioQueue`).
     private var pid: pid_t = -1
+    private let pidLock = NSLock()
+    private var exitSource: DispatchSourceProcess?
     private var readSource: DispatchSourceRead?
     private let ioQueue = DispatchQueue(label: "tmux.pty.read")
     private let writeQueue = DispatchQueue(label: "tmux.pty.write")
@@ -90,8 +102,15 @@ public final class PtyProcessTransport: TmuxTransport {
         var childPid: pid_t = 0
         let rc = posix_spawn(&childPid, execPath, &fileActions, &attr, cargs, cenv)
         guard rc == 0 else { throw TmuxError.spawnFailed(rc) }
-        pid = childPid
+        pidLock.lock(); pid = childPid; pidLock.unlock()
         pty.closeSlave() // parent only needs the master side
+
+        // Reap the child whenever it exits (no zombie left behind), then forget its pid.
+        let exit = DispatchSource.makeProcessSource(identifier: childPid, eventMask: .exit, queue: ioQueue)
+        exit.setEventHandler { [weak self] in self?.reap(blocking: true) }
+        exitSource = exit
+        exit.resume()
+        ioQueue.async { [weak self] in self?.reap(blocking: false) } // exited before the source armed
 
         let src = DispatchSource.makeReadSource(fileDescriptor: pty.master, queue: ioQueue)
         src.setEventHandler { [weak self] in self?.readAvailable() }
@@ -142,8 +161,33 @@ public final class PtyProcessTransport: TmuxTransport {
     }
 
     public func terminate() {
-        if pid > 0 { kill(pid, SIGTERM) }
+        pidLock.lock()
+        let target = pid
+        pidLock.unlock()
+        if target > 0 { kill(target, SIGTERM) }
         readSource?.cancel()
+    }
+
+    public func terminate(after grace: TimeInterval) {
+        // Queue behind pending writes (same serial queue), so the final commands reach tmux before
+        // any signal; then only signal if the child hasn't exited on its own within `grace`.
+        writeQueue.async { [weak self] in
+            self?.ioQueue.asyncAfter(deadline: .now() + grace) { [weak self] in self?.terminate() }
+        }
+    }
+
+    /// Collect the child's exit status (blocking only when the exit event already fired) and clear
+    /// the pid. Runs on `ioQueue`.
+    private func reap(blocking: Bool) {
+        pidLock.lock()
+        defer { pidLock.unlock() }
+        guard pid > 0 else { return }
+        var status: Int32 = 0
+        let r = waitpid(pid, &status, blocking ? 0 : WNOHANG)
+        if r == pid || (r == -1 && errno == ECHILD) {
+            pid = -1
+            exitSource?.cancel()
+        }
     }
 
     deinit { terminate() }
@@ -152,10 +196,6 @@ public final class PtyProcessTransport: TmuxTransport {
         guard !didClose else { return }
         didClose = true
         if let pty = pty { close(pty.master) }
-        if pid > 0 {
-            var status: Int32 = 0
-            waitpid(pid, &status, WNOHANG)
-        }
         onClose?()
     }
 }

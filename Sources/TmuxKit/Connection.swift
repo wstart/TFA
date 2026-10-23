@@ -107,6 +107,10 @@ public struct TmuxConnection: Sendable {
                 args += ["-o", "StrictHostKeyChecking=accept-new", "-o", "NumberOfPasswordPrompts=1"]
             }
             args += sshArgs
+            // Defaults AFTER the user's args (ssh keeps the first value it sees, so theirs win):
+            // detect a dead link after laptop sleep / Wi-Fi change instead of freezing forever on a
+            // half-open TCP connection, and fail fast when the host is unreachable.
+            args += ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ConnectTimeout=10"]
             // ssh runs a one-shot remote command through the user's login shell as `shell -c "<args>"`,
             // which does NOT source .zprofile/.zshrc — so Homebrew's bin dir is absent from PATH and a
             // bare `tmux` isn't found on macOS remotes (the classic Homebrew-over-ssh PATH gap). Resolve

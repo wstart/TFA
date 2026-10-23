@@ -114,8 +114,11 @@ public final class TmuxControlClient: @unchecked Sendable {
         sendFireAndForget("refresh-client -A '\(pane):continue'")
     }
 
+    /// Tear down the connection. Ordered after every command already sent (same queue), and the
+    /// process gets a moment to exit by itself — a `detach-client` / `kill-session` sent just before
+    /// must reach tmux, not race a SIGTERM (which lost kills and left sizes pinned).
     public func terminate() {
-        transport.terminate()
+        queue.async { self.transport.terminate(after: 1.0) }
     }
 
     /// The DCS sequence tmux emits to enter control mode (`ESC P 1000 p`) — the login→control handoff.
