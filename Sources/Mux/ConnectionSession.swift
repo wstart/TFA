@@ -134,6 +134,8 @@ final class ConnectionSession: Identifiable {
     /// create-or-attach as given) from "dropped after attaching" (reconnect attach-only).
     @ObservationIgnored private var hasEverConnected = false
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+    /// A close is being evaluated (server queried off-main) — see `handleUnderlyingClose`.
+    @ObservationIgnored private var closeDecisionPending = false
 
     /// Up to ~23s of backoff (0.5, 1, 2, 4, 8, 8s) before declaring the terminal gone.
     static let maxReconnectAttempts = 6
@@ -497,12 +499,16 @@ final class ConnectionSession: Identifiable {
             isReconnecting = false
             return // AppModel already removed us on the user's action — no toast, no onClosed.
         }
-        guard reconnectTask == nil else { return } // a reconnect loop is already running
+        guard reconnectTask == nil, !closeDecisionPending else { return } // already handling it
 
-        if canAttemptReconnect() {
-            startReconnectLoop()
-        } else {
-            finalizeClosed()
+        // Ask the tmux server OFF the main thread (a hung server must not freeze the UI), then
+        // decide once: reconnect, or finalize (exactly once) when the session is provably gone.
+        closeDecisionPending = true
+        Task { @MainActor in
+            let alive = await self.canAttemptReconnect()
+            self.closeDecisionPending = false
+            guard !self.intentionalClose, self.reconnectTask == nil, !self.isClosed else { return }
+            if alive { self.startReconnectLoop() } else { self.finalizeClosed() }
         }
     }
 
@@ -519,12 +525,13 @@ final class ConnectionSession: Identifiable {
     /// Reconnect is worth attempting only if the session might still be there. For local we can
     /// cheaply check the server; for ssh we can't, so we attempt (bounded) — ssh jitter is exactly
     /// the case reconnect exists for.
-    private func canAttemptReconnect() -> Bool {
+    private func canAttemptReconnect() async -> Bool {
         switch baseConnection.endpoint {
         case .local:
-            let names = TmuxServer.listLocalSessions(tmuxPath: baseConnection.tmuxPath,
-                                                     socketName: baseConnection.socketName)
-            return names.contains(currentSessionName)
+            let (path, socket, name) = (baseConnection.tmuxPath, baseConnection.socketName, currentSessionName)
+            return await Task.detached(priority: .userInitiated) {
+                TmuxServer.listLocalSessions(tmuxPath: path, socketName: socket).contains(name)
+            }.value
         case .ssh:
             return true
         }
@@ -538,7 +545,7 @@ final class ConnectionSession: Identifiable {
             var attempt = 0
             while attempt < Self.maxReconnectAttempts {
                 if self.intentionalClose || Task.isCancelled { return }
-                guard self.canAttemptReconnect() else { break } // session disappeared mid-backoff
+                guard await self.canAttemptReconnect() else { break } // session disappeared mid-backoff
                 self.reconnectAttempt = attempt + 1
                 let delay = Self.backoffDelay(attempt: attempt)
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))

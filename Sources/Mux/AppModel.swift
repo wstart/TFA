@@ -1127,7 +1127,7 @@ final class AppModel {
         let names: [String]
         switch host {
         case .local:
-            names = TmuxServer.listLocalSessions()
+            names = await Task.detached(priority: .userInitiated) { TmuxServer.listLocalSessions() }.value // off main
         case .ssh(let h, let args):
             names = await TmuxServer.listRemoteSessions(host: h, args: args, password: hostPasswords[h])
         }
