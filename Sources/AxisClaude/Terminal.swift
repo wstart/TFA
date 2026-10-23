@@ -17,6 +17,9 @@ final class Interrupts: @unchecked Sendable {
 
     func setHandler(_ h: (() -> Void)?) { lock.withLock { handler = h } }
 
+    /// Runs (on the signal queue) before exiting on SIGTERM / SIGHUP — e.g. to save the session.
+    var beforeExit: (() -> Void)?
+
     func install() {
         for sig in [SIGINT, SIGTERM, SIGHUP] {
             signal(sig, SIG_IGN)
@@ -26,6 +29,7 @@ final class Interrupts: @unchecked Sendable {
                     self?.fire()
                 } else {
                     Shell.killAll()
+                    self?.beforeExit?()
                     exit(128 + sig)
                 }
             }
@@ -68,12 +72,41 @@ final class LineReader {
                 return .line(String(decoding: buffer, as: UTF8.self))
             }
             if Interrupts.shared.count != start || Task.isCancelled { return .interrupted }
-            var pfd = pollfd(fd: 0, events: Int16(POLLIN), revents: 0)
-            guard poll(&pfd, 1, 100) > 0 else { continue }
-            var chunk = [UInt8](repeating: 0, count: 4096)
-            let n = read(0, &chunk, chunk.count)
-            if n > 0 { buffer += chunk[0..<n] } else if n == 0 || errno != EINTR { atEOF = true }
+            if let more = fill(timeoutMS: 100) { if !more { atEOF = true } }
         }
+    }
+
+    /// The next line IF more input is already pending (it arrived in the same burst as the previous
+    /// line, i.e. a paste); nil once input pauses. Typing never arrives this fast.
+    func readPasteContinuation() -> LineInput? {
+        if buffer.isEmpty, fill(timeoutMS: 15) == nil { return nil }
+        if buffer.isEmpty { return nil }
+        if let i = buffer.firstIndex(of: 10) {
+            let line = String(decoding: buffer[..<i], as: UTF8.self)
+            buffer.removeFirst(i + 1)
+            return .line(line)
+        }
+        // A trailing partial line: wait briefly for its newline, else take it as is.
+        _ = fill(timeoutMS: 15)
+        if let i = buffer.firstIndex(of: 10) {
+            let line = String(decoding: buffer[..<i], as: UTF8.self)
+            buffer.removeFirst(i + 1)
+            return .line(line)
+        }
+        defer { buffer.removeAll() }
+        return .line(String(decoding: buffer, as: UTF8.self))
+    }
+
+    /// Reads whatever stdin has within `timeoutMS`: nil = nothing arrived, true = bytes appended,
+    /// false = end of input.
+    private func fill(timeoutMS: Int32) -> Bool? {
+        var pfd = pollfd(fd: 0, events: Int16(POLLIN), revents: 0)
+        guard poll(&pfd, 1, timeoutMS) > 0 else { return nil }
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        let n = read(0, &chunk, chunk.count)
+        if n > 0 { buffer += chunk[0..<n]; return true }
+        if n == 0 || errno != EINTR { return false }
+        return nil
     }
 }
 

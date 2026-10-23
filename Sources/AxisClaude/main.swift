@@ -21,7 +21,7 @@ axis-claude \(axisVersion) — 终端编码助手（后端：本地 axis-model�
   AXIS_BASE_URL / ANTHROPIC_BASE_URL     默认 http://127.0.0.1:1234
   AXIS_MODEL                             默认 axis_model
   AXIS_AUTH_TOKEN / ANTHROPIC_AUTH_TOKEN 默认 dummy
-  AXIS_MAX_TOKENS                        默认 8192
+  AXIS_MAX_TOKENS                        默认 16384
 
 交互命令：/help  /clear（新对话）  /exit
 """
@@ -92,15 +92,19 @@ func makeAgent(_ r: SessionRecord) -> Agent {
     let a = Agent(config: config, transport: HTTPTransport(config: config, sessionID: r.id),
                   systemPrompt: systemPrompt, cwd: cwd, ui: ui, permission: permission)
     a.messages = r.messages
+    // Save after every tool round, not only at the end of a turn: closing the terminal (or a crash)
+    // mid-turn must not lose the record of edits that already happened.
+    a.onProgress = { snapshot in DispatchQueue.main.async { persist(snapshot) } }
     return a
 }
 
 var agent = makeAgent(record)
 
 @MainActor
-func persist() {
-    guard !agent.messages.isEmpty else { return }
-    record.messages = agent.messages
+func persist(_ messages: [Message]? = nil) {
+    let messages = messages ?? agent.messages
+    guard !messages.isEmpty else { return }
+    record.messages = messages
     record.updatedAt = Date()
     do { try store.save(record) } catch { err(Style.red("保存对话失败：\(error.localizedDescription)") + "\n") }
 }
@@ -124,6 +128,12 @@ func runTurn(_ text: String) async -> TurnOutcome {
 }
 
 Interrupts.shared.install()
+// SIGTERM / SIGHUP (terminal closed): save what we have before exiting.
+Interrupts.shared.beforeExit = {
+    let done = DispatchSemaphore(value: 0)
+    DispatchQueue.main.async { persist(Agent.closingDanglingToolUses(agent.messages)); done.signal() }
+    _ = done.wait(timeout: .now() + 1)
+}
 
 // MARK: - Non-interactive
 
@@ -174,6 +184,8 @@ repl: while true {
         continue repl
     case .line(let l):
         lines.append(l)
+        // A multi-line paste arrives as one burst: keep it as ONE message instead of one turn per line.
+        while case .line(let more)? = reader.readPasteContinuation() { lines.append(more) }
     }
     pendingExit = false
     let text = lines.joined(separator: "\n")

@@ -162,7 +162,7 @@ struct APIConfig {
             baseURL: URL(string: base) ?? URL(string: "http://127.0.0.1:1234")!,
             model: pick("AXIS_MODEL") ?? "axis_model",
             authToken: pick("AXIS_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN") ?? "dummy",
-            maxTokens: pick("AXIS_MAX_TOKENS").flatMap(Int.init) ?? 8192
+            maxTokens: pick("AXIS_MAX_TOKENS").flatMap(Int.init) ?? 16384
         )
     }
 }
@@ -211,10 +211,15 @@ struct StreamAssembler {
         var text = ""
         var json = ""
         var signature = ""
+        /// Input given whole in `content_block_start`; used when no deltas follow.
+        var startInput: JSONValue?
     }
 
     private var builders: [Int: Builder] = [:]
     private(set) var stopReason: String?
+    /// The server said the message is complete. Without it the stream ended early (server crash,
+    /// out of memory, dropped connection) and whatever arrived is not a whole reply.
+    private(set) var sawMessageStop = false
 
     mutating func handle(_ event: JSONValue) throws -> [StreamEvent] {
         switch event["type"]?.stringValue {
@@ -223,7 +228,10 @@ struct StreamAssembler {
             switch block["type"]?.stringValue {
             case "tool_use":
                 let name = block["name"]?.stringValue ?? ""
-                builders[index] = Builder(kind: .toolUse(id: block["id"]?.stringValue ?? "", name: name))
+                var b = Builder(kind: .toolUse(id: block["id"]?.stringValue ?? "", name: name))
+                // Some servers send the whole input here instead of as input_json_delta chunks.
+                if let input = block["input"], case .object(let o) = input, !o.isEmpty { b.startInput = input }
+                builders[index] = b
                 return [.toolUseStart(name: name)]
             case "thinking":
                 var b = Builder(kind: .thinking)
@@ -259,14 +267,20 @@ struct StreamAssembler {
         case "message_delta":
             if let r = event["delta"]?["stop_reason"]?.stringValue { stopReason = r }
             return []
+        case "message_stop":
+            sawMessageStop = true
+            return []
         case "error":
             throw APIError.server(event["error"]?["message"]?.stringValue ?? event.compactString)
         default:
-            return []   // message_start, content_block_stop, ping, message_stop
+            return []   // message_start, content_block_stop, ping
         }
     }
 
     func finish() throws -> AssistantMessage {
+        guard sawMessageStop else {
+            throw APIError.badResponse("响应流提前结束（服务端中断或崩溃），这次回复不完整")
+        }
         var blocks: [ContentBlock] = []
         for index in builders.keys.sorted() {
             let b = builders[index]!
@@ -278,7 +292,10 @@ struct StreamAssembler {
             case .toolUse(let id, let name):
                 let raw = b.json.trimmingCharacters(in: .whitespacesAndNewlines)
                 let input: JSONValue
-                do { input = raw.isEmpty ? .object([:]) : try JSONValue.parse(raw) } catch {
+                do { input = raw.isEmpty ? (b.startInput ?? .object([:])) : try JSONValue.parse(raw) } catch {
+                    // Cut off by max_tokens mid-arguments: drop the half call (never run it); the
+                    // agent tells the model and lets it retry in smaller steps.
+                    if stopReason == "max_tokens" { continue }
                     throw APIError.badResponse("工具 \(name) 的参数不是合法 JSON：\(raw.prefix(200))")
                 }
                 blocks.append(.toolUse(id: id, name: name, input: input))
@@ -348,7 +365,11 @@ struct HTTPTransport: Transport {
         var assembler = StreamAssembler()
         do {
             for try await line in bytes.lines {
-                guard let payload = SSE.payload(fromLine: line) else { continue }
+                guard let payload = SSE.payload(fromLine: line) else {
+                    let body = line.hasPrefix("data:") ? line.dropFirst(5).trimmingCharacters(in: .whitespaces) : ""
+                    if !body.isEmpty, body != "[DONE]" { throw APIError.badResponse("无法解析的流数据：\(body.prefix(200))") }
+                    continue
+                }
                 for e in try assembler.handle(payload) { onEvent(e) }
             }
         } catch let e as APIError {

@@ -29,6 +29,11 @@ final class Agent {
     let ui: AgentUI
     let permission: PermissionCheck
     var messages: [Message] = []
+    /// Called (off the main actor) with a snapshot of `messages` after each tool round, so the CLI
+    /// can save progress mid-turn.
+    var onProgress: (([Message]) -> Void)?
+    /// Consecutive replies cut by max_tokens that the agent auto-continues before giving up.
+    static let maxTruncatedContinues = 2
 
     init(config: APIConfig, transport: Transport, tools: [Tool] = Tools.all, systemPrompt: String,
          cwd: URL, ui: AgentUI, permission: @escaping PermissionCheck) {
@@ -51,6 +56,7 @@ final class Agent {
         appendUser([.text(userText)])
         let toolSchemas = tools.map(\.schema)
         var lastText = ""
+        var truncations = 0
 
         for _ in 0..<Self.maxToolRounds {
             try Task.checkCancellation()
@@ -59,14 +65,26 @@ final class Agent {
                                           system: systemPrompt, messages: messages, tools: toolSchemas)
             let reply = try await transport.send(request) { [ui] in ui.streamEvent($0) }
             ui.responseFinished(reply)
-            messages.append(Message(role: "assistant", content: reply.content.isEmpty ? [.text("")] : reply.content))
+            // An empty text block is rejected by Anthropic-compatible servers; keep a placeholder.
+            messages.append(Message(role: "assistant", content: reply.content.isEmpty ? [.text("…")] : reply.content))
             lastText = reply.text
 
             let uses = reply.content.compactMap { block -> (String, String, JSONValue)? in
                 if case .toolUse(let id, let name, let input) = block { return (id, name, input) }
                 return nil
             }
-            if uses.isEmpty { return lastText }
+            if uses.isEmpty {
+                // Cut off by max_tokens (possibly mid tool call, which was dropped): say so and let the
+                // model continue, a bounded number of times.
+                if reply.stopReason == "max_tokens", truncations < Self.maxTruncatedContinues {
+                    truncations += 1
+                    appendUser([.text("（上一条回复达到 max_tokens 上限被截断。如果当时在写工具调用，它没有执行：请把内容拆成更小的步骤重新调用；否则请从中断处继续。）")])
+                    onProgress?(messages)
+                    continue
+                }
+                return lastText
+            }
+            truncations = 0
 
             var results: [ContentBlock] = []
             var cancelled = false
@@ -81,6 +99,7 @@ final class Agent {
                 results.append(.toolResult(toolUseID: id, content: r.content, isError: r.isError))
             }
             appendUser(results)
+            onProgress?(messages)
             if cancelled { throw CancellationError() }
         }
         appendUser([.text("（已达到单轮 \(Self.maxToolRounds) 次工具调用上限，已停止）")])
@@ -114,6 +133,21 @@ final class Agent {
         }
         ui.toolFinished(r)
         return r
+    }
+
+    /// `messages` made resumable when the process is about to die mid-tool: an assistant turn whose
+    /// tool calls never got results would be rejected by the server on `--continue`, so each gets an
+    /// error result.
+    static func closingDanglingToolUses(_ messages: [Message]) -> [Message] {
+        guard let last = messages.last, last.role == "assistant" else { return messages }
+        let ids = last.content.compactMap { block -> String? in
+            if case .toolUse(let id, _, _) = block { return id }
+            return nil
+        }
+        guard !ids.isEmpty else { return messages }
+        return messages + [Message(role: "user", content: ids.map {
+            .toolResult(toolUseID: $0, content: "进程被终止，工具未完成", isError: true)
+        })]
     }
 
     private func appendUser(_ blocks: [ContentBlock]) {

@@ -95,21 +95,34 @@ func truncateMiddle(_ s: String, limit: Int) -> String {
     return String(s.prefix(half)) + "\n…（省略 \(s.count - limit) 字符）…\n" + String(s.suffix(half))
 }
 
-private let skippedDirs: Set<String> = [".git", ".build", "node_modules"]
+/// VCS, dependency, virtual-env and build-output directories: huge, generated, never what a search
+/// is after (running from ~ or a monorepo otherwise walks millions of files).
+private let skippedDirs: Set<String> = [
+    ".git", ".hg", ".svn", ".build", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache",
+    ".pytest_cache", ".tox", "DerivedData", "Pods", "Carthage", ".gradle", ".next", ".nuxt",
+    ".turbo", ".cache", "target", "dist",
+]
 
-/// Recursively lists regular files under `root`, skipping VCS/build directories.
-private func walkFiles(_ root: URL) -> [URL] {
-    guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey]) else { return [] }
+/// Cap on files a single Glob/Grep walks; results past it would be noise anyway.
+private let walkLimit = 20_000
+
+/// Recursively lists regular files under `root` (skipping `skippedDirs`), up to `walkLimit`.
+/// Stops early on task cancellation (Ctrl-C). `truncated` is true when the cap was hit.
+private func walkFiles(_ root: URL) -> (files: [URL], truncated: Bool) {
+    let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey]
+    guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys) else { return ([], false) }
     var out: [URL] = []
     for case let url as URL in e {
-        let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+        if Task.isCancelled { break }
+        let values = try? url.resourceValues(forKeys: Set(keys))
         if values?.isDirectory == true {
             if skippedDirs.contains(url.lastPathComponent) { e.skipDescendants() }
         } else if values?.isRegularFile == true {
             out.append(url)
+            if out.count >= walkLimit { return (out, true) }
         }
     }
-    return out
+    return (out, false)
 }
 
 private func relativePath(_ url: URL, to root: URL) -> String {
@@ -174,6 +187,12 @@ enum Tools {
             throw ToolError("文件不存在：\(url.path)")
         }
         if isDir.boolValue { throw ToolError("\(url.path) 是目录，请用 LS") }
+        // Never open FIFOs / devices (they block or never end) or giant files (loaded whole).
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        guard attrs?[.type] as? FileAttributeType == .typeRegular else { throw ToolError("\(url.path) 不是普通文件") }
+        if let size = attrs?[.size] as? Int, size > 50_000_000 {
+            throw ToolError("\(url.path) 太大（\(size / 1_000_000) MB），请用 Bash 的 head/sed/grep 读取片段")
+        }
         let data = try Data(contentsOf: url)
         if isBinary(data) { throw ToolError("\(url.path) 是二进制文件") }
         let lines = String(decoding: data, as: UTF8.self).components(separatedBy: "\n")
@@ -182,11 +201,14 @@ enum Tools {
         guard start <= lines.count else { return ToolResult(content: "（文件共 \(lines.count) 行，offset 超出范围）", isError: false) }
         let end = min(lines.count, start - 1 + limit)
         var out = ""
+        var size = 0 // running UTF-8 size: `out.count` on every line made long reads quadratic
         for i in (start - 1)..<end {
             var line = lines[i]
-            if line.count > 2000 { line = String(line.prefix(2000)) + "…" }
-            out += String(format: "%6d\t", i + 1) + line + "\n"
-            if out.count > 100_000 {
+            if line.utf8.count > 2000 { line = String(line.prefix(2000)) + "…" }
+            let row = String(format: "%6d\t", i + 1) + line + "\n"
+            out += row
+            size += row.utf8.count
+            if size > 100_000 {
                 out += "…（输出过长，已在第 \(i + 1) 行截断，用 offset 继续读取）\n"
                 break
             }
@@ -272,10 +294,13 @@ enum Tools {
         let pattern = try input.required("pattern")
         let root = resolvePath(input.string("path") ?? ".", cwd: cwd)
         guard let re = globToRegex(pattern) else { throw ToolError("无效的 glob：\(pattern)") }
-        let hits = walkFiles(root).map { relativePath($0, to: root) }.filter { matches(re, $0) }.sorted()
+        let walk = walkFiles(root)
+        try Task.checkCancellation()
+        let hits = walk.files.map { relativePath($0, to: root) }.filter { matches(re, $0) }.sorted()
         if hits.isEmpty { return ToolResult(content: "（无匹配文件）", isError: false) }
         var out = hits.prefix(200).joined(separator: "\n")
         if hits.count > 200 { out += "\n…（共 \(hits.count) 个，仅显示前 200 个）" }
+        if walk.truncated { out += "\n…（目录过大，只扫描了前 \(walkLimit) 个文件，请缩小 path）" }
         return ToolResult(content: out, isError: false)
     }
 
@@ -300,16 +325,23 @@ enum Tools {
         guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir) else {
             throw ToolError("路径不存在：\(root.path)")
         }
-        var files = isDir.boolValue ? walkFiles(root) : [root]
+        let walk = isDir.boolValue ? walkFiles(root) : (files: [root], truncated: false)
+        var files = walk.files
         if let g = input.string("glob"), let gre = globToRegex(g) {
             files = files.filter { matches(gre, g.contains("/") ? relativePath($0, to: root) : $0.lastPathComponent) }
         }
         var out: [String] = []
         var total = 0
         for file in files.sorted(by: { $0.path < $1.path }) {
-            guard let data = try? Data(contentsOf: file), data.count < 5_000_000, !isBinary(data) else { continue }
+            try Task.checkCancellation()
+            // Size check BEFORE reading: a multi-GB model/weights file must never be loaded.
+            let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            guard size < 5_000_000, let data = try? Data(contentsOf: file), !isBinary(data) else { continue }
+            let text = String(decoding: data, as: UTF8.self)
+            // One whole-file test first: most files don't match, and that skips the per-line split.
+            guard matches(re, text) else { continue }
             let name = isDir.boolValue ? relativePath(file, to: root) : file.path
-            for (i, line) in String(decoding: data, as: UTF8.self).components(separatedBy: "\n").enumerated() where matches(re, line) {
+            for (i, line) in text.components(separatedBy: "\n").enumerated() where matches(re, line) {
                 total += 1
                 if out.count < 200 {
                     out.append("\(name):\(i + 1):\(line.count > 300 ? String(line.prefix(300)) + "…" : line)")
@@ -319,6 +351,7 @@ enum Tools {
         if out.isEmpty { return ToolResult(content: "（无匹配）", isError: false) }
         var s = out.joined(separator: "\n")
         if total > out.count { s += "\n…（共 \(total) 处匹配，仅显示前 \(out.count) 处）" }
+        if walk.truncated { s += "\n…（目录过大，只搜索了前 \(walkLimit) 个文件，请缩小 path）" }
         return ToolResult(content: s, isError: false)
     }
 
@@ -357,6 +390,9 @@ enum Shell {
     /// Process group of the running command, so signal handlers can reclaim it on shutdown.
     private static let lock = NSLock()
     private static var activeGroups: Set<pid_t> = []
+
+    /// How long output is still collected after the shell exits (from descendants still writing).
+    static let drainGrace: TimeInterval = 2
 
     static func killAll() {
         for g in lock.withLock({ activeGroups }) { _ = kill(-g, SIGKILL) }
@@ -410,11 +446,20 @@ enum Shell {
             let output: Data = await withCheckedContinuation { cont in
                 let group = DispatchGroup()
                 var data = Data()
-                // Reader: drains the pipe until every writer (incl. descendants) is gone.
+                // Reader: drains the pipe until every writer is gone — but at most `drainGrace` after
+                // the shell exits: a descendant that escaped the process group (setsid, nohup, a
+                // daemon) can hold the pipe open indefinitely and must not hang the call.
                 group.enter()
                 DispatchQueue.global().async {
                     var buf = [UInt8](repeating: 0, count: 65536)
                     while true {
+                        var pfd = pollfd(fd: readFD, events: Int16(POLLIN), revents: 0)
+                        let ready = poll(&pfd, 1, 200)
+                        if ready == 0 {
+                            if let exited = state.exitedAt, Date().timeIntervalSince(exited) > Self.drainGrace { break }
+                            continue
+                        }
+                        if ready < 0 { if errno == EINTR { continue } else { break } }
                         let n = read(readFD, &buf, buf.count)
                         if n <= 0 { break }
                         if data.count < 4_000_000 { data.append(buf, count: n) }
@@ -451,12 +496,15 @@ enum Shell {
         private var _status: Int32 = 0
         private var _finished = false
         private var _timedOut = false
+        private var _exitedAt: Date?
         var status: Int32 { lock.withLock { _status } }
+        /// When the shell itself exited (set together with `status`).
+        var exitedAt: Date? { lock.withLock { _exitedAt } }
         var finished: Bool { lock.withLock { _finished } }
         var timedOut: Bool {
             get { lock.withLock { _timedOut } }
             set { lock.withLock { _timedOut = newValue } }
         }
-        func setStatus(_ s: Int32) { lock.withLock { _status = s; _finished = true } }
+        func setStatus(_ s: Int32) { lock.withLock { _status = s; _finished = true; _exitedAt = Date() } }
     }
 }
