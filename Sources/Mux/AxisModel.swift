@@ -65,6 +65,17 @@ final class AxisModelService {
     /// A requested start/stop is in flight until the server answers (or stops answering) — or this
     /// deadline passes (the server saves its cache before exiting, which can take a while).
     @ObservationIgnored private var transitionDeadline: Date?
+    /// Consecutive failed /health polls. One slow answer (a long prefill) must not flip a running
+    /// server to 已停止 — whose start button would then restart it.
+    @ObservationIgnored private var healthFailures = 0
+    /// A restart is in flight: stay 启动中 until the old process has gone AND the new one answers.
+    @ObservationIgnored private var restartPending = false
+    @ObservationIgnored private var restartSawDown = false
+    /// The model list makes the server rescan its model folders — fetch it on demand / every 30 s,
+    /// not on every 2 s status poll.
+    @ObservationIgnored private var modelsFetchedAt: Date?
+    /// `git fetch` hits the network: at most once an hour per app run.
+    @ObservationIgnored private var updateCheckedAt: Date?
 
     var isInstalled: Bool {
         FileManager.default.fileExists(atPath: Self.plistPath)
@@ -75,36 +86,56 @@ final class AxisModelService {
 
     func refresh() async {
         let health = await Self.getJSON("/health", timeout: 2)
+        let inTransition = transitionDeadline.map { Date() < $0 } ?? false
         if let health {
+            healthFailures = 0
             let ready = health["status"] as? String == "ok"
-            if status == .stopping, let d = transitionDeadline, Date() < d {
+            if status == .stopping, inTransition {
                 // still saving its cache on the way down — keep showing 停止中
+            } else if restartPending, !restartSawDown, inTransition {
+                // the OLD process is still answering — the restart hasn't happened yet
             } else {
-                status = ready ? .running : .standby
+                set(\.status, ready ? .running : .standby)
                 transitionDeadline = nil
+                restartPending = false
             }
-            loadError = health["error"] as? String ?? ""
+            set(\.loadError, health["error"] as? String ?? "")
             if let s = await Self.getJSON("/stats", timeout: 3) {
-                stats = Stats(rpm: s["rpm"] as? Double ?? 0, tpm: s["tpm_total"] as? Int ?? 0,
-                              cacheHitRate: s["cache_hit_rate"] as? Double ?? 0,
-                              totalRequests: s["total_requests"] as? Int ?? 0,
-                              cacheSlots: s["cache_slots"] as? Int ?? 0, cacheMaxSlots: s["cache_max_slots"] as? Int ?? 0,
-                              memoryGB: s["process_rss_gb"] as? Double ?? 0, systemGB: s["system_total_gb"] as? Double ?? 0,
-                              uptime: s["uptime"] as? Double ?? 0)
+                set(\.stats, Stats(rpm: s["rpm"] as? Double ?? 0, tpm: s["tpm_total"] as? Int ?? 0,
+                                   cacheHitRate: s["cache_hit_rate"] as? Double ?? 0,
+                                   totalRequests: s["total_requests"] as? Int ?? 0,
+                                   cacheSlots: s["cache_slots"] as? Int ?? 0, cacheMaxSlots: s["cache_max_slots"] as? Int ?? 0,
+                                   memoryGB: s["process_rss_gb"] as? Double ?? 0, systemGB: s["system_total_gb"] as? Double ?? 0,
+                                   uptime: s["uptime"] as? Double ?? 0))
             }
-            if let m = await Self.getJSON("/models/available", timeout: 5) {
-                currentModelPath = m["current_path"] as? String ?? ""
-                models = (m["models"] as? [[String: Any]] ?? []).compactMap { d in
-                    guard let id = d["id"] as? String, let path = d["path"] as? String else { return nil }
-                    return Model(id: id, path: path, sizeGB: d["size_gb"] as? Double ?? 0)
-                }
-            }
-        } else if status == .starting, let d = transitionDeadline, Date() < d {
+            if modelsFetchedAt.map({ Date().timeIntervalSince($0) > 30 }) ?? true { await fetchModels() }
+        } else if restartPending, inTransition {
+            restartSawDown = true  // old process gone; wait for the new one
+        } else if status == .starting, inTransition {
             // launchd is still bringing it up
         } else {
+            healthFailures += 1
+            // A running server gets a few chances (busy prefill, GC pause) before it is called stopped.
+            if isReachable, healthFailures < 3 { return }
             transitionDeadline = nil
-            status = isInstalled ? .stopped : .notInstalled
+            restartPending = false
+            set(\.status, isInstalled ? .stopped : .notInstalled)
         }
+    }
+
+    private func fetchModels() async {
+        guard let m = await Self.getJSON("/models/available", timeout: 5) else { return }
+        modelsFetchedAt = Date()
+        set(\.currentModelPath, m["current_path"] as? String ?? "")
+        set(\.models, (m["models"] as? [[String: Any]] ?? []).compactMap { d in
+            guard let id = d["id"] as? String, let path = d["path"] as? String else { return nil }
+            return Model(id: id, path: path, sizeGB: d["size_gb"] as? Double ?? 0)
+        })
+    }
+
+    /// Assign only when the value changed — every assignment re-renders the panel.
+    private func set<T: Equatable>(_ key: ReferenceWritableKeyPath<AxisModelService, T>, _ value: T) {
+        if self[keyPath: key] != value { self[keyPath: key] = value }
     }
 
     func start() {
@@ -112,7 +143,8 @@ final class AxisModelService {
         status = .starting; transitionDeadline = Date().addingTimeInterval(180)
         Task.detached {
             if !Self.launchctl(["load", Self.plistPath]) {
-                _ = Self.launchctl(["kickstart", "-k", "gui/\(getuid())/com.local.mlxserver"]) // already loaded
+                // Already loaded: start it, but WITHOUT -k — never kill a server that is up.
+                _ = Self.launchctl(["kickstart", "gui/\(getuid())/com.local.mlxserver"])
             }
         }
     }
@@ -130,6 +162,7 @@ final class AxisModelService {
     func restart() {
         guard isReachable else { return }
         status = .starting; transitionDeadline = Date().addingTimeInterval(180)
+        restartPending = true; restartSawDown = false
         Task.detached { _ = Self.launchctl(["kickstart", "-k", "gui/\(getuid())/com.local.mlxserver"]) }
     }
 
@@ -141,6 +174,7 @@ final class AxisModelService {
             let r = await Self.postJSON("/model/switch", ["path": m.path, "model_id": m.id], timeout: 900)
             switchingTo = nil
             lastMessage = r?["message"] as? String ?? "切换失败（服务无响应）"
+            modelsFetchedAt = nil // the current model changed
             await refresh()
         }
     }
@@ -148,8 +182,12 @@ final class AxisModelService {
     /// `git fetch` the local checkout and count commits behind origin/main (0 when unknown).
     func checkForUpdate() async {
         guard FileManager.default.fileExists(atPath: Self.repoDir + "/.git") else { commitsBehind = 0; return }
+        if let last = updateCheckedAt, Date().timeIntervalSince(last) < 3600 { return }
+        updateCheckedAt = Date()
         commitsBehind = await Task.detached(priority: .utility) { () -> Int in
-            _ = Self.run("/usr/bin/git", ["-C", Self.repoDir, "fetch", "-q"])
+            // Give up on a stalled connection (< 1 KB/s for 15 s) instead of hanging indefinitely.
+            _ = Self.run("/usr/bin/git", ["-C", Self.repoDir, "-c", "http.lowSpeedLimit=1000",
+                                         "-c", "http.lowSpeedTime=15", "fetch", "-q"])
             let out = Self.run("/usr/bin/git", ["-C", Self.repoDir, "rev-list", "--count", "HEAD..origin/main"])
             return Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         }.value
@@ -234,10 +272,12 @@ struct AxisModelView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Theme.canvas)
+        // The update check (network) runs on its own so it never delays the status poll.
+        .task { await service.checkForUpdate() }
         .task {
-            await service.checkForUpdate()
             while !Task.isCancelled {
-                await service.refresh()
+                // Nobody can see it (window hidden / covered / screen locked) → don't poll.
+                if NSApp.occlusionState.contains(.visible) { await service.refresh() }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
