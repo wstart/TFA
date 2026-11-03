@@ -119,12 +119,15 @@ public final class PtyProcessTransport: TmuxTransport {
         src.resume()
     }
 
+    /// Read buffer reused across reads (only touched on `ioQueue`): allocating and zero-filling
+    /// 64 KB per read was pure overhead on the output hot path.
+    private let readBuffer = UnsafeMutableRawPointer.allocate(byteCount: 1 << 16, alignment: 16)
+
     private func readAvailable() {
         guard let pty = pty else { return }
-        var buf = [UInt8](repeating: 0, count: 1 << 16)
-        let n = buf.withUnsafeMutableBytes { read(pty.master, $0.baseAddress, $0.count) }
+        let n = read(pty.master, readBuffer, 1 << 16)
         if n > 0 {
-            onData?(Data(buf[0..<n]))
+            onData?(Data(bytes: readBuffer, count: n))
         } else if n == 0 {
             readSource?.cancel()
         } else {
@@ -190,7 +193,10 @@ public final class PtyProcessTransport: TmuxTransport {
         }
     }
 
-    deinit { terminate() }
+    deinit {
+        terminate()
+        readBuffer.deallocate()
+    }
 
     private func finishClose() {
         guard !didClose else { return }

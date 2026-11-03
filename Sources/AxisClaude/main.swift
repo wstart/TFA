@@ -23,7 +23,7 @@ axis-claude \(axisVersion) — 终端编码助手（后端：本地 axis-model�
   AXIS_AUTH_TOKEN / ANTHROPIC_AUTH_TOKEN 默认 dummy
   AXIS_MAX_TOKENS                        默认 16384
 
-交互命令：/help  /clear（新对话）  /exit
+交互命令：/help  /clear（新对话）  /resume [编号]（恢复本目录的历史对话）  /exit
 """
 
 struct Options {
@@ -174,6 +174,28 @@ out(Style.bold("axis-claude \(axisVersion)") + Style.dim(" · \(config.model) @ 
 if !record.messages.isEmpty { out("已恢复上次对话（\(record.messages.count) 条消息）\n") }
 out(Style.dim("输入 /help 查看命令，行尾 \\ 换行续写，Ctrl-C 中断，Ctrl-D 退出") + "\n")
 
+/// `/resume`: list this directory's recent conversations and switch to the chosen one
+/// (`/resume N` picks directly). The current conversation is saved first.
+@MainActor
+func resumePicker(_ preset: Int?) {
+    let list = store.recent(for: cwd, limit: 10).filter { $0.id != record.id }
+    guard !list.isEmpty else { out(Style.dim("当前目录没有其他可恢复的对话") + "\n"); return }
+    var pick = preset
+    if pick == nil {
+        let f = DateFormatter(); f.dateFormat = "MM-dd HH:mm"
+        for (i, r) in list.enumerated() {
+            out(Style.bold(String(format: "%3d. ", i + 1)) + Style.dim("\(f.string(from: r.updatedAt)) · \(r.userTurns) 轮  ") + r.title + "\n")
+        }
+        out("选择编号（回车取消）：")
+        if case .line(let l) = reader.readLine() { pick = Int(l.trimmingCharacters(in: .whitespaces)) }
+    }
+    guard let n = pick, list.indices.contains(n - 1) else { out(Style.dim("已取消") + "\n"); return }
+    persist()
+    record = list[n - 1]
+    agent = makeAgent(record)
+    out("已恢复：" + Style.bold(record.title) + Style.dim("（\(record.messages.count) 条消息）") + "\n")
+}
+
 var pendingExit = false
 repl: while true {
     out("\n> ")
@@ -196,8 +218,12 @@ repl: while true {
         continue repl
     case .line(let l):
         lines.append(l)
-        // A multi-line paste arrives as one burst: keep it as ONE message instead of one turn per line.
-        while case .line(let more)? = reader.readPasteContinuation() { lines.append(more) }
+        // A multi-line paste into the terminal arrives as one burst: keep it as ONE message instead
+        // of one turn per line. Only on a TTY (piped/scripted input stays one line per turn) and never
+        // for a /command, whose following lines are its own input.
+        if isatty(0) != 0, !l.hasPrefix("/") {
+            while case .line(let more)? = reader.readPasteContinuation() { lines.append(more) }
+        }
     }
     pendingExit = false
     let text = lines.joined(separator: "\n")
@@ -214,6 +240,9 @@ repl: while true {
         record = SessionRecord(id: SessionStore.newID(), cwd: cwd.path, createdAt: Date(), updatedAt: Date(), messages: [])
         agent = makeAgent(record)
         out(Style.dim("已开始新对话") + "\n")
+        continue repl
+    case let cmd where cmd == "/resume" || cmd.hasPrefix("/resume "):
+        resumePicker(Int(cmd.dropFirst("/resume".count).trimmingCharacters(in: .whitespaces)))
         continue repl
     default:
         if trimmed.hasPrefix("/") && !trimmed.contains(" ") && !trimmed.dropFirst().contains("/") {

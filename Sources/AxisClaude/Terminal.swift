@@ -185,19 +185,28 @@ final class ConsoleUI: AgentUI {
         newline()
     }
 
+    private var toolStartedAt = Date()
+
     func toolStarted(_ summary: String) {
         newline()
+        toolStartedAt = Date()
         emit(Style.green("●") + " " + Style.bold(summary) + "\n")
     }
 
     func toolFinished(_ result: ToolResult) {
-        let lines = result.content.split(separator: "\n", omittingEmptySubsequences: false)
+        var lines = result.content.split(separator: "\n", omittingEmptySubsequences: false)
+        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty, lines.count > 1 { lines.removeLast() }
         var preview = lines.prefix(4).map { l -> String in
             l.count > 160 ? String(l.prefix(160)) + "…" : String(l)
         }
         if lines.count > 4 { preview.append("… (+\(lines.count - 4) 行)") }
-        let body = preview.enumerated().map { i, l in (i == 0 ? "  ⎿ " : "    ") + l }.joined(separator: "\n")
-        emit((result.isError ? Style.red(body) : Style.dim(body)) + "\n")
+        let body = preview.enumerated().map { i, l in
+            (i == 0 ? (result.isError ? "  ⎿ ✗ " : "  ⎿ ") : "    ") + l
+        }.joined(separator: "\n")
+        // Slow tools say how long they took (a quick read/edit doesn't need it).
+        let elapsed = Date().timeIntervalSince(toolStartedAt)
+        let timing = elapsed >= 1 ? Style.dim(String(format: "  (%.1fs)", elapsed)) : ""
+        emit((result.isError ? Style.red(body) : Style.dim(body)) + timing + "\n")
     }
 
     /// Interactive permission prompt for mutating tools; `a` remembers the tool for this session.

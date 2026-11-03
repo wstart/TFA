@@ -6,6 +6,22 @@ struct SessionRecord: Codable {
     var createdAt: Date
     var updatedAt: Date
     var messages: [Message]
+
+    /// The first thing the user asked, on one line — how a conversation is recognised in /resume.
+    var title: String {
+        for m in messages where m.role == "user" {
+            for case .text(let t) in m.content {
+                let one = t.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+                if !one.isEmpty { return one.count > 50 ? String(one.prefix(50)) + "…" : one }
+            }
+        }
+        return "（空对话）"
+    }
+
+    /// User turns typed by a person (tool results travel as user messages too, so skip those).
+    var userTurns: Int {
+        messages.filter { m in m.role == "user" && m.content.contains { if case .text = $0 { return true }; return false } }.count
+    }
 }
 
 /// Persists conversations as `<root>/<sanitized-cwd>/<timestamp-uuid>.json`.
@@ -45,17 +61,21 @@ struct SessionStore {
     }
 
     /// Most recently written session for `cwd` (by file modification time, then name).
-    func latest(for cwd: URL) -> SessionRecord? {
+    func latest(for cwd: URL) -> SessionRecord? { recent(for: cwd, limit: 1).first }
+
+    /// Up to `limit` sessions for `cwd`, newest first (unreadable files skipped).
+    func recent(for cwd: URL, limit: Int = 10) -> [SessionRecord] {
         let dir = directory(for: cwd)
         guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
         let sorted = urls.filter { $0.pathExtension == "json" }.map { url -> (URL, Date) in
             (url, (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast)
         }.sorted { a, b in a.1 != b.1 ? a.1 > b.1 : a.0.lastPathComponent > b.0.lastPathComponent }
-        for (url, _) in sorted {
-            if let r = decode(url) { return r }
+        var out: [SessionRecord] = []
+        for (url, _) in sorted where out.count < limit {
+            if let r = decode(url) { out.append(r) }
         }
-        return nil
+        return out
     }
 
     private func decode(_ url: URL) -> SessionRecord? {

@@ -144,11 +144,11 @@ public final class TmuxProtocolParser {
     }
 
     private func handleOutput(_ line: [UInt8], into events: inout [TmuxEvent]) {
-        let rest = Array(line[Self.pOutput.count...])
+        // Slices, not copies: this runs for every output line of every attached pane.
+        let rest = line[Self.pOutput.count...]
         guard let sp = rest.firstIndex(of: 0x20) else { return }
-        let pane = String(decoding: rest[0..<sp], as: UTF8.self)
-        let payload = sp + 1 <= rest.count ? Array(rest[(sp + 1)...]) : []
-        events.append(.output(pane: pane, data: Self.octalDecode(payload)))
+        let pane = String(decoding: rest[rest.startIndex..<sp], as: UTF8.self)
+        events.append(.output(pane: pane, data: Self.octalDecode(rest[(sp + 1)...])))
     }
 
     private func handleExtendedOutput(_ line: [UInt8], into events: inout [TmuxEvent]) {
@@ -157,8 +157,7 @@ public final class TmuxProtocolParser {
         let header = String(decoding: rest[0..<r], as: UTF8.self).split(separator: " ")
         let pane = header.first.map(String.init) ?? ""
         let age = header.count >= 2 ? (Int(header[1]) ?? 0) : 0
-        let payload = Array(rest[(r + 3)...])
-        events.append(.extendedOutput(pane: pane, ageMs: age, data: Self.octalDecode(payload)))
+        events.append(.extendedOutput(pane: pane, ageMs: age, data: Self.octalDecode(rest[(r + 3)...])))
     }
 
     // MARK: notification parsing
@@ -225,24 +224,34 @@ public final class TmuxProtocolParser {
     // MARK: octal decode
 
     /// Decode a `%output` payload: `\NNN` (3 octal digits) → byte; everything else verbatim.
-    static func octalDecode(_ bytes: [UInt8]) -> Data {
-        var out = Data()
-        out.reserveCapacity(bytes.count)
-        var i = 0
-        let n = bytes.count
-        while i < n {
-            let b = bytes[i]
-            if b == 0x5C, i + 3 < n,
-               isOctalDigit(bytes[i + 1]), isOctalDigit(bytes[i + 2]), isOctalDigit(bytes[i + 3]) {
-                let v = (Int(bytes[i + 1] - 0x30) << 6) | (Int(bytes[i + 2] - 0x30) << 3) | Int(bytes[i + 3] - 0x30)
-                out.append(UInt8(v & 0xFF))
-                i += 4
-            } else {
-                out.append(b)
-                i += 1
+    static func octalDecode(_ bytes: [UInt8]) -> Data { octalDecode(bytes[...]) }
+
+    /// Hot path (every output line): no backslash → one bulk copy; otherwise decode through raw
+    /// pointers into a preallocated buffer (per-byte `Data.append` was the main parsing cost).
+    static func octalDecode(_ bytes: ArraySlice<UInt8>) -> Data {
+        bytes.withUnsafeBufferPointer { src -> Data in
+            guard let base = src.baseAddress, src.count > 0 else { return Data() }
+            let n = src.count
+            guard memchr(base, 0x5C, n) != nil else { return Data(buffer: src) }
+            var out = [UInt8](repeating: 0, count: n) // decoded is never longer than the input
+            let written = out.withUnsafeMutableBufferPointer { dst -> Int in
+                var i = 0, o = 0
+                while i < n {
+                    let b = base[i]
+                    if b == 0x5C, i + 3 < n,
+                       isOctalDigit(base[i + 1]), isOctalDigit(base[i + 2]), isOctalDigit(base[i + 3]) {
+                        dst[o] = UInt8(truncatingIfNeeded: (Int(base[i + 1] - 0x30) << 6) | (Int(base[i + 2] - 0x30) << 3) | Int(base[i + 3] - 0x30))
+                        i += 4
+                    } else {
+                        dst[o] = b
+                        i += 1
+                    }
+                    o += 1
+                }
+                return o
             }
+            return out.withUnsafeBufferPointer { Data(buffer: UnsafeBufferPointer(rebasing: $0[0..<written])) }
         }
-        return out
     }
 
     // MARK: static prefixes
