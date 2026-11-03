@@ -111,6 +111,18 @@ func persist(_ messages: [Message]? = nil) {
 
 enum TurnOutcome { case done(String), interrupted, failed(Error) }
 
+/// "↑1.2k ↓345 · 缓存命中 92% · 上下文 23.4k" for the turn just finished; nil when the server sent no usage.
+func usageLine(_ a: Agent) -> String? {
+    let u = a.turnUsage
+    guard u.input + u.output + u.cacheRead + u.cacheWrite > 0 else { return nil }
+    func k(_ n: Int) -> String { n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)" }
+    var parts = ["↑\(k(u.input + u.cacheRead + u.cacheWrite)) ↓\(k(u.output))"]
+    let prompt = u.input + u.cacheRead + u.cacheWrite
+    if u.cacheRead > 0, prompt > 0 { parts.append("缓存命中 \(u.cacheRead * 100 / prompt)%") }
+    if a.contextTokens > 0 { parts.append("上下文 \(k(a.contextTokens))") }
+    return parts.joined(separator: " · ")
+}
+
 /// Runs one user turn in a child task so SIGINT can cancel it without exiting the program.
 @MainActor
 func runTurn(_ text: String) async -> TurnOutcome {
@@ -212,7 +224,7 @@ repl: while true {
 
     switch await runTurn(text) {
     case .done:
-        break
+        if let line = usageLine(agent) { out(Style.dim(line) + "\n") }
     case .interrupted:
         out("\n" + Style.red("⎿ 已中断") + "\n")
     case .failed(let e):

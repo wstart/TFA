@@ -41,6 +41,13 @@ final class PaneTerminal {
 
     /// While true, live bytes are buffered (not fed) until the snapshot is in place.
     private var hydrating = true
+    /// Live output for a terminal that is NOT on screen (no window), fed in one batch every
+    /// `offscreenFlushInterval` instead of per tmux line: a background agent printing all day would
+    /// otherwise parse every line individually and schedule up to 60 redraws/s nobody sees.
+    private var offscreen = Data()
+    private var offscreenFlushScheduled = false
+    private static let offscreenFlushInterval: TimeInterval = 0.25
+    private static let offscreenMaxBytes = 1 << 20
     private var hasHydrated = false
     private var pending = Data()
     /// Saved scrollback (a RESTORED session's pre-reboot history) to paint once at hydrate, above
@@ -98,10 +105,30 @@ final class PaneTerminal {
         guard !data.isEmpty else { return }
         if hydrating {
             pending.append(data)
+        } else if view.window == nil {
+            offscreen.append(data)
+            if offscreen.count >= Self.offscreenMaxBytes { flushPendingOutput(); return }
+            guard !offscreenFlushScheduled else { return }
+            offscreenFlushScheduled = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.offscreenFlushInterval) { [weak self] in
+                self?.flushPendingOutput()
+            }
         } else {
+            flushPendingOutput()
             view.feedCoalescingScroll(ArraySlice(data))
             noteOutput(data)
         }
+    }
+
+    /// Feed any batched off-screen output now. Called before anything else touches the engine
+    /// (showing the terminal, cursor sync, reading its buffer) so ordering is preserved.
+    func flushPendingOutput() {
+        offscreenFlushScheduled = false
+        guard !offscreen.isEmpty else { return }
+        let data = offscreen
+        offscreen.removeAll(keepingCapacity: true)
+        view.feedCoalescingScroll(ArraySlice(data))
+        noteOutput(data)
     }
 
     // MARK: - Scroll state (jump-to-latest)
@@ -213,7 +240,7 @@ final class PaneTerminal {
     /// though the buffer — including the cursor — is current. `draw()` renders straight from
     /// `terminal.displayBuffer`, so a repaint restores exact content + cursor (no re-capture,
     /// which would lose the cursor position).
-    func refreshDisplay() { view.needsDisplay = true }
+    func refreshDisplay() { flushPendingOutput(); view.needsDisplay = true }
 
     /// Re-assert the cursor from tmux's authoritative position. Called shortly after a terminal is
     /// shown, once its size has settled — the show-time resize/redraw race can otherwise leave the
@@ -223,6 +250,7 @@ final class PaneTerminal {
         guard let controller, !hydrating else { return }
         let pane = paneID
         let view = self.view
+        flushPendingOutput()
         Task { @MainActor in
             await self.pinEngineToPaneSize() // INVARIANT
             if let c = await controller.cursorPosition(pane) {
@@ -268,6 +296,7 @@ final class PaneTerminal {
     /// Callers should prefer `pinEngineToPaneSize()` so the invariant stays centralized.
     func applyModelSize(cols: Int, rows: Int) {
         guard cols > 0, rows > 0 else { return }
+        flushPendingOutput() // batched output was produced at the old size
         let term = view.getTerminal()
         if term.cols != cols || term.rows != rows {
             view.resize(cols: cols, rows: rows)

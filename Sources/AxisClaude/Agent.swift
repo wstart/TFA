@@ -32,6 +32,10 @@ final class Agent {
     /// Called (off the main actor) with a snapshot of `messages` after each tool round, so the CLI
     /// can save progress mid-turn.
     var onProgress: (([Message]) -> Void)?
+    /// Tokens used by the most recent `runTurn` (all its requests), and the conversation's size
+    /// after its last reply — shown after each turn.
+    private(set) var turnUsage = Usage()
+    private(set) var contextTokens = 0
     /// Consecutive replies cut by max_tokens that the agent auto-continues before giving up.
     static let maxTruncatedContinues = 2
 
@@ -57,6 +61,7 @@ final class Agent {
         let toolSchemas = tools.map(\.schema)
         var lastText = ""
         var truncations = 0
+        turnUsage = Usage()
 
         for _ in 0..<Self.maxToolRounds {
             try Task.checkCancellation()
@@ -65,6 +70,8 @@ final class Agent {
                                           system: systemPrompt, messages: messages, tools: toolSchemas)
             let reply = try await transport.send(request) { [ui] in ui.streamEvent($0) }
             ui.responseFinished(reply)
+            turnUsage = turnUsage + reply.usage
+            if reply.usage.context > 0 { contextTokens = reply.usage.context }
             // An empty text block is rejected by Anthropic-compatible servers; keep a placeholder.
             messages.append(Message(role: "assistant", content: reply.content.isEmpty ? [.text("…")] : reply.content))
             lastText = reply.text

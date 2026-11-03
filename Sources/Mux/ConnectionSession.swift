@@ -516,6 +516,7 @@ final class ConnectionSession: Identifiable {
     /// trailing blank lines trimmed, newest `maxLines` kept. nil when there's no pane or no text.
     private func localScrollbackText(maxLines: Int = 3000) -> String? {
         guard let pane = controller.primaryPane?.id, let term = terminals[pane] else { return nil }
+        term.flushPendingOutput()
         let data = term.view.getTerminal().getBufferAsData(kind: .normal)
         var lines = String(decoding: data, as: UTF8.self).components(separatedBy: "\n")
         while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }

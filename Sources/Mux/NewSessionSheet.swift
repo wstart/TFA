@@ -30,19 +30,17 @@ struct NewSessionSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
-            Text(launchesAxisClaude ? "启动 axis-claude" : "启动终端").font(Theme.Font.headerTitle)
-            if launchesAxisClaude {
-                if AxisClaude.executablePath == nil {
-                    Text("未找到内置的 axis-claude，请重新安装 TFA。").font(.caption).foregroundStyle(Theme.Status.error)
-                } else if axis.status != .running {
-                    // Still creatable: axis-claude itself reports the missing backend, and the user
-                    // may start the service right after.
-                    Text("axis-model 服务\(axis.status.label)。可在侧栏「模型」面板启动或安装后再对话。")
-                        .font(.caption).foregroundStyle(Theme.Status.attention)
-                } else {
-                    Text("使用本机 axis-model · \(axis.currentModelName)").font(.caption).foregroundStyle(Theme.textSecondary)
+            HStack(alignment: .top, spacing: Theme.Space.md) {
+                KindBadge(kind: launchesAxisClaude ? .axisClaude : .shell)
+                VStack(alignment: .leading, spacing: Theme.Space.xxs) {
+                    Text(launchesAxisClaude ? "启动 axis-claude" : "启动终端").font(Theme.Font.headerTitle)
+                    Text(launchesAxisClaude ? "用本机 axis-model 读写代码、执行命令的编程助手。"
+                                            : "一个真实的 tmux 会话——关掉 TFA 也不会丢。")
+                        .font(Theme.Font.headerMeta)
+                        .foregroundStyle(Theme.textTertiary)
                 }
             }
+            if launchesAxisClaude { axisStatus }
 
             VStack(alignment: .leading, spacing: Theme.Space.xs) {
                 Text("名字").font(.caption).foregroundStyle(.secondary)
@@ -57,23 +55,30 @@ struct NewSessionSheet: View {
 
             VStack(alignment: .leading, spacing: Theme.Space.xs) {
                 Text("起始文件夹").font(.caption).foregroundStyle(.secondary)
+                // The whole row picks a folder (not just the small button).
                 HStack(spacing: Theme.Space.sm) {
-                    Image(systemName: "folder").foregroundStyle(.secondary)
+                    Image(systemName: "folder.fill").foregroundStyle(Theme.textTertiary)
                     Text(displayFolder)
+                        .font(.system(size: 12, design: .monospaced))
                         .lineLimit(1).truncationMode(.middle)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .help(folder)
-                    Button("选择…") { pickFolder() }
-                        .buttonStyle(.borderless)
+                    Text("选择…").font(.caption).foregroundStyle(Theme.textSecondary)
                 }
-                .padding(.horizontal, Theme.Space.sm).padding(.vertical, Theme.Space.xs)
-                .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                .padding(.horizontal, Theme.Space.md).padding(.vertical, 7)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
+                .contentShape(Rectangle())
+                .onTapGesture { pickFolder() }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("起始文件夹 \(displayFolder)，点击选择")
             }
 
             HStack {
                 Spacer()
                 Button("取消", role: .cancel) { dismiss() }
                 Button("创建") { create() }
+                    .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canCreate)
             }
@@ -87,6 +92,22 @@ struct NewSessionSheet: View {
             nameFocused = true
         }
         .task { if launchesAxisClaude { await axis.refresh() } }
+    }
+
+    /// axis-model state as a small status capsule (dot + text) — creatable either way: axis-claude
+    /// itself reports a missing backend, and the user may start the service right after.
+    @ViewBuilder private var axisStatus: some View {
+        let (tint, text): (Color, String) = {
+            if AxisClaude.executablePath == nil { return (Theme.Status.error, "未找到内置的 axis-claude，请重新安装 TFA") }
+            if axis.status == .running { return (Theme.Status.positive, "axis-model 运行中 · \(axis.currentModelName)") }
+            return (Theme.Status.attention, "axis-model \(axis.status.label) · 可在侧栏「模型」面板启动")
+        }()
+        HStack(spacing: Theme.Space.sm) {
+            Circle().fill(tint).frame(width: 7, height: 7)
+            Text(text).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1).truncationMode(.middle)
+        }
+        .padding(.horizontal, Theme.Space.md).padding(.vertical, 5)
+        .background(tint.opacity(0.10), in: Capsule())
     }
 
     private var displayFolder: String {

@@ -129,9 +129,23 @@ struct MessagesRequest: Encodable {
     var stream: Bool = true
 }
 
+/// Token accounting for one response (Anthropic `usage`). `input` excludes cached tokens.
+struct Usage: Equatable {
+    var input = 0, output = 0, cacheRead = 0, cacheWrite = 0
+
+    /// Tokens the conversation occupies after this response (prompt incl. cache + the reply).
+    var context: Int { input + cacheRead + cacheWrite + output }
+
+    static func + (a: Usage, b: Usage) -> Usage {
+        Usage(input: a.input + b.input, output: a.output + b.output,
+              cacheRead: a.cacheRead + b.cacheRead, cacheWrite: a.cacheWrite + b.cacheWrite)
+    }
+}
+
 struct AssistantMessage: Equatable {
     var content: [ContentBlock]
     var stopReason: String?
+    var usage = Usage()
 
     var text: String {
         content.compactMap { if case .text(let t) = $0 { return t } else { return nil } }.joined()
@@ -220,6 +234,7 @@ struct StreamAssembler {
     /// The server said the message is complete. Without it the stream ended early (server crash,
     /// out of memory, dropped connection) and whatever arrived is not a whole reply.
     private(set) var sawMessageStop = false
+    private(set) var usage = Usage()
 
     mutating func handle(_ event: JSONValue) throws -> [StreamEvent] {
         switch event["type"]?.stringValue {
@@ -264,8 +279,12 @@ struct StreamAssembler {
                 break
             }
             return []
+        case "message_start":
+            if let u = event["message"]?["usage"] { absorbUsage(u) }
+            return []
         case "message_delta":
             if let r = event["delta"]?["stop_reason"]?.stringValue { stopReason = r }
+            if let u = event["usage"] { absorbUsage(u) }
             return []
         case "message_stop":
             sawMessageStop = true
@@ -301,7 +320,15 @@ struct StreamAssembler {
                 blocks.append(.toolUse(id: id, name: name, input: input))
             }
         }
-        return AssistantMessage(content: blocks, stopReason: stopReason)
+        return AssistantMessage(content: blocks, stopReason: stopReason, usage: usage)
+    }
+
+    /// Counts are cumulative per message: the latest non-zero value of each field wins.
+    private mutating func absorbUsage(_ u: JSONValue) {
+        if let n = u["input_tokens"].flatMap(Self.int), n > 0 { usage.input = n }
+        if let n = u["output_tokens"].flatMap(Self.int), n > 0 { usage.output = n }
+        if let n = u["cache_read_input_tokens"].flatMap(Self.int), n > 0 { usage.cacheRead = n }
+        if let n = u["cache_creation_input_tokens"].flatMap(Self.int), n > 0 { usage.cacheWrite = n }
     }
 
     private static func int(_ v: JSONValue) -> Int? {
