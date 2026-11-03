@@ -203,6 +203,34 @@ enum APIError: Error, Equatable, CustomStringConvertible {
     }
 }
 
+// MARK: - Startup health check
+
+/// One quick `GET /health` before the first prompt, so a stopped server (or one with no model
+/// loaded) is reported right away instead of after a long "思考中…".
+enum Health {
+    /// The warning to show, or nil when the server is fine — or isn't axis-model at all (another
+    /// Anthropic-compatible endpoint without /health: don't guess).
+    static func probe(_ config: APIConfig) async -> String? {
+        var req = URLRequest(url: config.baseURL.appendingPathComponent("health"))
+        req.timeoutInterval = 2
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            return warning(status: (response as? HTTPURLResponse)?.statusCode ?? 0,
+                           body: String(decoding: data, as: UTF8.self), base: config.baseURL.absoluteString)
+        } catch {
+            return "无法连接 axis-model（\(config.baseURL.absoluteString)）— 请在 TFA「模型」面板启动服务"
+        }
+    }
+
+    static func warning(status: Int, body: String, base: String) -> String? {
+        guard status == 200, let json = try? JSONValue.parse(body) else { return nil }
+        switch json["status"]?.stringValue {
+        case "ok", nil: return nil
+        default: return "axis-model 已启动，但还没有加载模型 — 请在 TFA「模型」面板选择模型"
+        }
+    }
+}
+
 // MARK: - SSE parsing
 
 enum SSE {

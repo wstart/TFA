@@ -225,6 +225,12 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   folder label (no indent).
 - **Group folder** — a small chevron and an 11pt tracked, muted caps label with a plain count, so
   terminal names stay the loudest text; the drag grip appears on hover; drop targets highlight in accent.
+- **已断开 bulk actions** — at the top of the 已断开 list: a small prominent 「全部恢复 N」 and a quiet
+  「全部移除…」 text button.
+- **Metric card** (Lab system monitor) — White, Linen border, `card` radius; caption title, one large
+  rounded monospaced value, an optional 6px capsule usage bar (Charcoal; amber past 85%), a caption
+  detail. Laid out in a 760pt column (two wide cards, then three small).
+- **Status capsule** (new-session sheet) — a 7px dot + caption on a 10% tint of the same status color.
 - **Tool dock** (模型 / 隧道 / 规则 / Skills / 实验室) — sidebar bottom; equal-width icon+label cells,
   selected = filled charcoal cell with ivory glyph (mirrors a selected row).
 - **Status indicator** — shared spinner-or-glyph component; symbol + tint + VoiceOver label.

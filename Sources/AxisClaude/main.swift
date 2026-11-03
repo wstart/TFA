@@ -147,6 +147,9 @@ Interrupts.shared.beforeExit = {
     _ = done.wait(timeout: .now() + 1)
 }
 
+// One quick /health look so a stopped server / unloaded model is reported up front (≤ 2 s).
+let healthWarning = await Health.probe(config)
+
 // MARK: - Non-interactive
 
 if options.printMode {
@@ -157,6 +160,7 @@ if options.printMode {
     guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         err("-p 需要提示内容\n"); exit(2)
     }
+    if let w = healthWarning { err(w + "\n") }
     switch await runTurn(prompt) {
     case .done(let text):
         out(text.hasSuffix("\n") ? text : text + "\n")
@@ -171,6 +175,7 @@ if options.printMode {
 // MARK: - REPL
 
 out(Style.bold("axis-claude \(axisVersion)") + Style.dim(" · \(config.model) @ \(config.baseURL.absoluteString) · \(cwd.path)") + "\n")
+if let w = healthWarning { out(Style.red("⚠ " + w) + "\n") }
 if !record.messages.isEmpty { out("已恢复上次对话（\(record.messages.count) 条消息）\n") }
 out(Style.dim("输入 /help 查看命令，行尾 \\ 换行续写，Ctrl-C 中断，Ctrl-D 退出") + "\n")
 

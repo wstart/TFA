@@ -828,7 +828,7 @@ final class AppModel {
     /// @tfa_id → same group / env / board assignee), keeping it selected if it was. Falls back to
     /// removal only if there's no record to rebuild from.
     func convertToEnded(_ conn: ConnectionSession) {
-        guard let record = sessionStore.roster().first(where: { $0.tfaID == conn.stableID }) else {
+        guard let record = sessionStore.record(tfaID: conn.stableID) else {
             removeConnection(conn); return
         }
         conn.disconnect() // quiet teardown of whatever is left (idempotent on a dead connection)

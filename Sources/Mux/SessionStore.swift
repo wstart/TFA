@@ -62,6 +62,19 @@ final class SessionStore {
         return out
     }
 
+    /// One row by its permanent id (primary-key lookup). A tmux server loss converts every terminal
+    /// to an ended record one by one — loading the whole table, scrollbacks and all, per terminal
+    /// made that O(N²) in data read.
+    func record(tfaID: String) -> SessionRecord? {
+        var out: SessionRecord?
+        query("SELECT tfa_id,name,cwd,command,is_ai,scrollback,updated_at FROM sessions WHERE tfa_id=?", [.t(tfaID)]) { s in
+            out = SessionRecord(
+                tfaID: colText(s, 0), name: colText(s, 1), cwd: colText(s, 2), command: colText(s, 3),
+                isAI: sqlite3_column_int64(s, 4) != 0, scrollback: colText(s, 5), updatedAt: colDouble(s, 6))
+        }
+        return out
+    }
+
     // MARK: 写
 
     /// 完整快照(含 scrollback)——周期性写盘时用。

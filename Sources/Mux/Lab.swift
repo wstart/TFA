@@ -283,24 +283,22 @@ private struct PtyMonitorPane: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: Theme.Space.xl) {
+            // Same card language as the system monitor, in the same readable column.
+            VStack(alignment: .leading, spacing: Theme.Space.lg) {
                 HStack {
-                    Text("PTY / 进程监控").font(Theme.Font.emptyTitle)
                     Spacer()
-                    Button { monitor.refresh() } label: { Image(systemName: "arrow.clockwise") }
-                        .buttonStyle(.borderless).disabled(monitor.loading).help("刷新")
+                    Button { monitor.refresh() } label: { Label("刷新", systemImage: "arrow.clockwise") }
+                        .buttonStyle(.borderless).disabled(monitor.loading)
                 }
 
-                MetricBar(title: "PTY 使用 / pseudo-terminals", value: ptyFraction,
-                          detail: "\(monitor.ptyCount) / \(monitor.ptyMax)")
-                if ptyFraction > 0.8 {
-                    Text("⚠️ pty 使用率接近上限，新终端可能打不开。")
-                        .font(.caption).foregroundStyle(.orange)
+                MetricCard(title: "PTY 使用", big: "\(monitor.ptyCount) / \(monitor.ptyMax)",
+                           detail: ptyFraction > 0.8 ? "接近上限，新终端可能打不开" : "系统伪终端总量与上限",
+                           fraction: ptyFraction)
+                HStack(spacing: Theme.Space.lg) {
+                    MetricCard(title: "tmux -CC 客户端", big: "\(monitor.ccTotal)", detail: "TFA 打开的控制连接")
+                    MetricCard(title: "孤儿客户端", big: "\(monitor.ccOrphans)", detail: "PPID=1，未回收")
+                    MetricCard(title: "残留探针 socket", big: "\(monitor.probeSockets)", detail: "其它工具留下的")
                 }
-
-                statRow("TFA 的 tmux -CC 客户端", "\(monitor.ccTotal)")
-                statRow("其中孤儿 (PPID=1·未回收)", "\(monitor.ccOrphans)")
-                statRow("残留 tmux 探针 socket (其它工具)", "\(monitor.probeSockets)")
 
                 if monitor.ccOrphans > 0 {
                     Button(role: .destructive) { confirmCleanup = true } label: {
@@ -309,10 +307,11 @@ private struct PtyMonitorPane: View {
                     Text("孤儿 = TFA 被强杀后没回收的 tmux -CC 进程，各占一个 pty。清理只是分离它们，tmux 会话本身保留、可重新打开。")
                         .font(.caption).foregroundStyle(.tertiary)
                 } else {
-                    Text("没有孤儿客户端 👍").font(.caption).foregroundStyle(.tertiary)
+                    Text("没有孤儿客户端").font(.caption).foregroundStyle(Theme.textTertiary)
                 }
             }
             .padding(Theme.Space.xxl)
+            .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Theme.canvas)
@@ -325,13 +324,6 @@ private struct PtyMonitorPane: View {
         }
     }
 
-    private func statRow(_ title: String, _ value: String) -> some View {
-        HStack {
-            Text(title).font(Theme.Font.rowTitle)
-            Spacer()
-            Text(value).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary)
-        }
-    }
 }
 
 /// A labelled progress bar for a 0…1 metric, brand-tinted, with a right-aligned detail string.
@@ -370,28 +362,3 @@ private struct MetricCard: View {
     }
 }
 
-private struct MetricBar: View {
-    let title: String
-    let value: Double
-    let detail: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.sm) {
-            HStack {
-                Text(title).font(Theme.Font.rowTitle)
-                Spacer()
-                Text(detail).font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary)
-            }
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: Theme.Radius.sm).fill(Theme.surface2)
-                    RoundedRectangle(cornerRadius: Theme.Radius.sm)
-                        .fill(Theme.brand)
-                        .frame(width: max(0, min(1, value)) * geo.size.width)
-                        .animation(.easeOut(duration: 0.3), value: value)
-                }
-            }
-            .frame(height: 10)
-        }
-    }
-}
