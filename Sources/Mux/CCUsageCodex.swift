@@ -59,19 +59,32 @@ extension CCUsage {
 
         static func load(pricing: PricingMap, timeZone: TimeZone? = nil,
                          env: [String: String] = ProcessInfo.processInfo.environment) -> [LoadedEntry] {
+            // Per-file parsing is independent (model / running totals are per session file), so files
+            // parse concurrently; the cross-file dedup then runs serially in the original file order.
+            let allFiles = sessionDirs(homes(env: env)).flatMap { dir in files([dir]).map { (dir: dir, file: $0) } }
+            var perFile = [[Event]](repeating: [], count: allFiles.count)
+            let lock = NSLock()
+            DispatchQueue.concurrentPerform(iterations: allFiles.count) { i in
+                let file = allFiles[i].file
+                var currentModel: String?
+                var previousTotals = (i: UInt64(0), c: UInt64(0), o: UInt64(0), r: UInt64(0))
+                var events: [Event] = []
+                // Only these lines can yield an event or change the session state (see `parse`);
+                // the rest are message content and are never JSON-parsed.
+                forEachLine(in: file, containingAny: ["turn_context", "token_count", "\"usage\""]) { line in
+                    guard let obj = jsonObject(line),
+                          let ev = parse(line: line, obj: obj, file: file,
+                                         currentModel: &currentModel, previousTotals: &previousTotals) else { return }
+                    events.append(ev)
+                }
+                lock.lock(); perFile[i] = events; lock.unlock()
+            }
             var result: [LoadedEntry] = []
             var seen = Set<String>() // aggregate dedup key (incl. session)
-            for dir in sessionDirs(homes(env: env)) {
-                for file in files([dir]) {
-                    guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
-                    let sid = sessionId(file, under: dir)
-                    var currentModel: String?
-                    var previousTotals = (i: UInt64(0), c: UInt64(0), o: UInt64(0), r: UInt64(0))
-                    for raw in text.split(separator: "\n", omittingEmptySubsequences: true) {
-                        let line = String(raw)
-                        guard let obj = jsonObject(line) else { continue }
-                        guard let ev = parse(line: line, obj: obj, file: file,
-                                             currentModel: &currentModel, previousTotals: &previousTotals) else { continue }
+            for (i, entry) in allFiles.enumerated() {
+                let file = entry.file
+                let sid = sessionId(file, under: entry.dir)
+                for ev in perFile[i] {
                         guard !ev.model.isEmpty else { continue } // aggregate requires non-empty model
                         let key = "\(sid)\u{0}\(ev.tsString)\u{0}\(ev.model)\u{0}\(ev.input)\u{0}\(ev.cached)\u{0}\(ev.output)\u{0}\(ev.reasoning)\u{0}\(ev.total)"
                         if seen.contains(key) { continue }
@@ -87,7 +100,6 @@ extension CCUsage {
                             sessionId: sid, projectPath: file.deletingLastPathComponent().lastPathComponent,
                             model: ev.model, cost: cost, usage: usage, messageId: nil, requestId: nil,
                             isSidechain: false, version: nil, agent: "codex"))
-                    }
                 }
             }
             return result

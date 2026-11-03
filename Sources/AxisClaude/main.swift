@@ -23,7 +23,7 @@ axis-claude \(axisVersion) — 终端编码助手（后端：本地 axis-model�
   AXIS_AUTH_TOKEN / ANTHROPIC_AUTH_TOKEN 默认 dummy
   AXIS_MAX_TOKENS                        默认 16384
 
-交互命令：/help  /clear（新对话）  /resume [编号]（恢复本目录的历史对话）  /exit
+交互命令：/help  /clear（新对话）  /resume [编号]（恢复本目录的历史对话）  /compact（压缩对话，释放上下文）  /exit
 """
 
 struct Options {
@@ -174,6 +174,28 @@ out(Style.bold("axis-claude \(axisVersion)") + Style.dim(" · \(config.model) @ 
 if !record.messages.isEmpty { out("已恢复上次对话（\(record.messages.count) 条消息）\n") }
 out(Style.dim("输入 /help 查看命令，行尾 \\ 换行续写，Ctrl-C 中断，Ctrl-D 退出") + "\n")
 
+/// `/compact`: summarize the conversation into a short history (Ctrl-C cancels; history untouched).
+@MainActor
+func compactConversation() async {
+    let a = agent
+    let before = a.contextTokens
+    let task = Task { try await a.compact() }
+    Interrupts.shared.setHandler { task.cancel() }
+    let result = await task.result
+    Interrupts.shared.setHandler(nil)
+    switch result {
+    case .success(nil):
+        out(Style.dim("对话还很短，无需压缩") + "\n")
+    case .success:
+        persist()
+        out(Style.dim(before > 0 ? "已压缩对话（压缩前上下文约 \(before) tokens）" : "已压缩对话") + "\n")
+    case .failure(let e) where e is CancellationError:
+        out("\n" + Style.red("⎿ 已取消压缩") + "\n")
+    case .failure(let e):
+        out("\n" + Style.red("✗ \(e)") + "\n")
+    }
+}
+
 /// `/resume`: list this directory's recent conversations and switch to the chosen one
 /// (`/resume N` picks directly). The current conversation is saved first.
 @MainActor
@@ -240,6 +262,9 @@ repl: while true {
         record = SessionRecord(id: SessionStore.newID(), cwd: cwd.path, createdAt: Date(), updatedAt: Date(), messages: [])
         agent = makeAgent(record)
         out(Style.dim("已开始新对话") + "\n")
+        continue repl
+    case "/compact":
+        await compactConversation()
         continue repl
     case let cmd where cmd == "/resume" || cmd.hasPrefix("/resume "):
         resumePicker(Int(cmd.dropFirst("/resume".count).trimmingCharacters(in: .whitespaces)))

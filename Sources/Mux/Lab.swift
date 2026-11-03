@@ -113,6 +113,8 @@ struct LabView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .fixedSize()
+            .frame(maxWidth: .infinity, alignment: .leading) // aligned with the header, not centered
             .padding(.horizontal, Theme.Space.xxl)
             .padding(.top, Theme.Space.md)
             Divider().padding(.top, Theme.Space.sm)
@@ -132,40 +134,31 @@ private struct SystemMonitorPane: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: Theme.Space.xl) {
-                Text("系统监控")
-                    .font(Theme.Font.emptyTitle)
-
-                MetricBar(title: "CPU", value: monitor.cpuUsage,
-                          detail: "\(Int(monitor.cpuUsage * 100))%  ·  \(monitor.coreCount) cores")
-
-                MetricBar(title: "内存 / Memory",
-                          value: monitor.memTotalGB > 0 ? monitor.memUsedGB / monitor.memTotalGB : 0,
-                          detail: String(format: "%.1f / %.1f GB", monitor.memUsedGB, monitor.memTotalGB))
-
-                statRow("负载 / Load",
-                        String(format: "%.2f · %.2f · %.2f", monitor.load1, monitor.load5, monitor.load15))
-                statRow("运行时间 / Uptime", Self.formatUptime(monitor.uptime))
-                statRow("GPU", monitor.gpuNames.isEmpty ? "—" : monitor.gpuNames.joined(separator: ", "))
-
-                Text("GPU 利用率 macOS 无公开 API，此处仅显示型号。")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+            // Cards in a readable column (full-width rows put labels a screen away from values).
+            VStack(alignment: .leading, spacing: Theme.Space.lg) {
+                HStack(spacing: Theme.Space.lg) {
+                    MetricCard(title: "CPU", big: "\(Int(monitor.cpuUsage * 100))%",
+                               detail: "\(monitor.coreCount) 核", fraction: monitor.cpuUsage)
+                    let mem = monitor.memTotalGB > 0 ? monitor.memUsedGB / monitor.memTotalGB : 0
+                    MetricCard(title: "内存", big: String(format: "%.1f GB", monitor.memUsedGB),
+                               detail: String(format: "共 %.0f GB · %d%%", monitor.memTotalGB, Int(mem * 100)), fraction: mem)
+                }
+                HStack(spacing: Theme.Space.lg) {
+                    MetricCard(title: "负载 1 / 5 / 15 分钟",
+                               big: String(format: "%.2f", monitor.load1),
+                               detail: String(format: "%.2f · %.2f", monitor.load5, monitor.load15))
+                    MetricCard(title: "运行时间", big: Self.formatUptime(monitor.uptime), detail: "自上次开机")
+                    MetricCard(title: "GPU", big: monitor.gpuNames.first ?? "—",
+                               detail: "利用率 macOS 无公开 API")
+                }
             }
             .padding(Theme.Space.xxl)
+            .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Theme.canvas)
         .onAppear { monitor.start() }
         .onDisappear { monitor.stop() }
-    }
-
-    private func statRow(_ title: String, _ value: String) -> some View {
-        HStack {
-            Text(title).font(Theme.Font.rowTitle)
-            Spacer()
-            Text(value).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary)
-        }
     }
 
     private static func formatUptime(_ t: TimeInterval) -> String {
@@ -342,6 +335,41 @@ private struct PtyMonitorPane: View {
 }
 
 /// A labelled progress bar for a 0…1 metric, brand-tinted, with a right-aligned detail string.
+/// A system-monitor card: small title, one large value, a detail line, and an optional usage bar
+/// (amber past 85% — the one moment the panel needs your eye).
+private struct MetricCard: View {
+    let title: String
+    let big: String
+    let detail: String
+    var fraction: Double? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            Text(title).font(.caption).foregroundStyle(Theme.textTertiary)
+            Text(big)
+                .font(.system(size: 22, weight: .semibold, design: .rounded).monospacedDigit())
+                .lineLimit(1).minimumScaleFactor(0.6)
+            if let fraction {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Theme.surface2)
+                        Capsule()
+                            .fill(fraction > 0.85 ? Theme.Status.attention : Theme.brand)
+                            .frame(width: max(0, min(1, fraction)) * geo.size.width)
+                            .animation(.easeOut(duration: 0.3), value: fraction)
+                    }
+                }
+                .frame(height: 6)
+            }
+            Text(detail).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+        }
+        .padding(Theme.Space.lg)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card).stroke(Theme.border, lineWidth: 1))
+    }
+}
+
 private struct MetricBar: View {
     let title: String
     let value: Double

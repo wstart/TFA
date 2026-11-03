@@ -6,6 +6,29 @@ import Foundation
 /// ~/.gstack/projects/tty/ccusage-spec/{core.md, claude-codex.md}.
 extension CCUsage {
 
+    /// Calls `body` with each line of `file` that contains at least one of `needles`, found by byte
+    /// search. Other lines never become Strings: transcripts are mostly message content, and
+    /// String-decoding + splitting hundreds of MB was most of the load time.
+    static func forEachLine(in file: URL, containingAny needles: [String], _ body: (String) -> Void) {
+        guard let data = try? Data(contentsOf: file, options: .mappedIfSafe) else { return }
+        let patterns = needles.map { Array($0.utf8) }
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress else { return }
+            let n = raw.count
+            var start = 0
+            while start < n {
+                let end = memchr(base + start, 0x0A, n - start).map { UnsafeRawPointer($0) - base } ?? n
+                let len = end - start
+                if len > 0, patterns.contains(where: { p in
+                    p.withUnsafeBytes { memmem(base + start, len, $0.baseAddress, $0.count) != nil }
+                }) {
+                    body(String(decoding: UnsafeRawBufferPointer(start: base + start, count: len), as: UTF8.self))
+                }
+                start = end + 1
+            }
+        }
+    }
+
     /// One usage record after parsing + costing (the unit fed to aggregation/blocks).
     struct LoadedEntry: Sendable {
         var timestamp: TimestampMs
@@ -115,11 +138,11 @@ extension CCUsage {
             let lock = NSLock()
             DispatchQueue.concurrentPerform(iterations: allFiles.count) { i in
                 let file = allFiles[i]
-                guard let text = try? String(contentsOf: file, encoding: .utf8) else { return }
                 let (sid, proj) = sessionParts(file)
                 var out: [LoadedEntry] = []
-                for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-                    if let e = parseLine(String(line), sessionId: sid, projectPath: proj,
+                // Only lines carrying usage can produce an entry (parseLine checks the same marker).
+                forEachLine(in: file, containingAny: ["\"usage\":{"]) { line in
+                    if let e = parseLine(line, sessionId: sid, projectPath: proj,
                                          mode: mode, pricing: pricing, tz: timeZone) { out.append(e) }
                 }
                 lock.lock(); perFile[i] = out; lock.unlock()

@@ -142,6 +142,35 @@ final class Agent {
         return r
     }
 
+    /// `/compact`: ask the model to summarize the conversation, then replace the history with that
+    /// summary so a long session stops growing toward the context limit. The request is the full
+    /// history + one instruction with the SAME system prompt and tools, so the server's prefix cache
+    /// covers everything but the instruction. Returns the summary (nil when there was nothing to do).
+    @discardableResult
+    func compact() async throws -> String? {
+        guard messages.count >= 2 else { return nil }
+        var history = Self.closingDanglingToolUses(messages)
+        let instruction = ContentBlock.text("""
+            请把以上对话压缩成一份供你自己继续工作的摘要（不要调用工具）。包括：用户的目标和要求、\
+            已完成的改动（文件路径与要点）、关键结论与决定、未完成的事项和下一步。只输出摘要。
+            """)
+        if history.last?.role == "user" { history[history.count - 1].content.append(instruction) }
+        else { history.append(Message(role: "user", content: [instruction])) }
+        ui.requestStarted()
+        let request = MessagesRequest(model: config.model, max_tokens: config.maxTokens, system: systemPrompt,
+                                      messages: history, tools: tools.map(\.schema))
+        let reply = try await transport.send(request) { [ui] in ui.streamEvent($0) }
+        ui.responseFinished(reply)
+        let summary = reply.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else { throw APIError.badResponse("模型没有返回摘要，对话未压缩") }
+        messages = [
+            Message(role: "user", content: [.text("（以下是此前对话的摘要，请据此继续）\n\n" + summary)]),
+            Message(role: "assistant", content: [.text("好的，我已了解之前的进展。")]),
+        ]
+        contextTokens = 0
+        return summary
+    }
+
     /// `messages` made resumable when the process is about to die mid-tool: an assistant turn whose
     /// tool calls never got results would be rejected by the server on `--continue`, so each gets an
     /// error result.
