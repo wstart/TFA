@@ -92,6 +92,48 @@ public enum TmuxServer {
         return picked.reversed() // oldest → newest
     }
 
+    /// The latest non-empty visible line of EACH session's active pane, in ONE tmux invocation
+    /// (`capture-pane` chained with `;`, a marker printed before each), cleaned and clamped like
+    /// `lastOutputLine`. Sessions with no visible text are absent. The activity poller calls this
+    /// every tick — one fork instead of one per busy session.
+    public static func lastOutputLines(sessions: [String], tmuxPath: String? = nil, socketName: String? = nil) -> [String: String] {
+        guard !sessions.isEmpty, let tmux = tmuxPath ?? TmuxLocator.find() else { return [:] }
+        let marker = "\u{1}TFA-CAP\u{1}"
+        var args: [String] = []
+        if let socket = socketName { args += ["-L", socket] }
+        args += ["-u"]
+        for (i, name) in sessions.enumerated() {
+            if i > 0 { args.append(";") }
+            args += ["display-message", "-p", marker + "\(i)", ";", "capture-pane", "-p", "-t", name]
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tmux)
+        process.arguments = args
+        process.environment = utf8Environment()
+        let stdout = Pipe(); process.standardOutput = stdout; process.standardError = Pipe()
+        do { try process.run() } catch { return [:] }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        // Walk the output; each marker line starts the next session's capture. (A session that
+        // vanished mid-tick ends the chain early — the rest simply show up next tick.)
+        var result: [String: String] = [:]
+        var current: Int?
+        var last: String?
+        func flush() { if let i = current, let l = last { result[sessions[i]] = l } }
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix(marker), let i = Int(line.dropFirst(marker.count)), sessions.indices.contains(i) {
+                flush(); current = i; last = nil
+                continue
+            }
+            let cleaned = String(line.unicodeScalars.filter { $0.value >= 0x20 }).trimmingCharacters(in: .whitespaces)
+            if !cleaned.isEmpty { last = cleaned.count > 60 ? String(cleaned.prefix(60)) + "…" : cleaned }
+        }
+        flush()
+        return result
+    }
+
     public static func listLocalSessions(tmuxPath: String? = nil,
                                          socketName: String? = nil) -> [String] {
         guard let tmux = tmuxPath ?? TmuxLocator.find() else { return [] }

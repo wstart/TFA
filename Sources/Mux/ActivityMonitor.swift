@@ -39,10 +39,13 @@ final class TerminalActivityMonitor {
             let now = Int(Date().timeIntervalSince1970)
             var lines: [String: String] = [:]
             if capture {
+                var stale: [String] = []
                 for (name, t) in act where now - t < within {
                     if let c = cache[name], c.epoch == t { lines[name] = c.line }          // reuse — no new output
-                    else if let l = TmuxServer.lastOutputLine(session: name) { lines[name] = l }
+                    else { stale.append(name) }
                 }
+                // Every session with new output in ONE tmux call (was one fork per busy session).
+                lines.merge(TmuxServer.lastOutputLines(sessions: stale.sorted())) { _, new in new }
             }
             return (act, lines)
         }.value

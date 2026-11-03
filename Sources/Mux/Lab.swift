@@ -1,6 +1,7 @@
 import SwiftUI
 import Darwin
 import Metal
+import TmuxKit
 
 /// The "Lab" (实验室) — a home for experimental, non-terminal features. First experiment: a live
 /// system monitor. Selected from the sidebar's bottom Lab entry; shown in the detail area.
@@ -220,13 +221,23 @@ final class PtyMonitor {
         s.ptyCount = devs.filter { $0.hasPrefix("ttys") }.count
         var maxv: Int32 = 0; var sz = MemoryLayout<Int32>.size
         if sysctlbyname("kern.tty.ptmx_max", &maxv, &sz, nil, 0) == 0 { s.ptyMax = Int(maxv) }
+        // A tmux SERVER started by `tmux -u -CC new-session …` keeps that command line and
+        // daemonizes to PPID 1 — in `ps` it looks exactly like a leaked control client. Killing it
+        // ends every session, so servers are excluded twice: by asking each socket for its server
+        // pid, and by requiring a controlling tty (clients run on a pty; a daemon has none: "??").
+        var candidates: [(pid: pid_t, ppid: pid_t, tty: Substring, socket: [String])] = []
         for line in runPS().split(separator: "\n") {
-            guard line.contains("tmux -u -CC "),
+            guard line.contains("tmux "), line.contains(" -CC "),
                   line.contains("attach-session") || line.contains("new-session") else { continue }
             let f = line.split(separator: " ", omittingEmptySubsequences: true)
-            guard f.count >= 2, let pid = pid_t(f[0]), let ppid = pid_t(f[1]) else { continue }
+            guard f.count >= 4, let pid = pid_t(f[0]), let ppid = pid_t(f[1]) else { continue }
+            candidates.append((pid, ppid, f[2], socketArgs(Array(f.dropFirst(3)))))
+        }
+        var servers: [[String]: pid_t] = [:]
+        for socket in Set(candidates.map(\.socket)) { servers[socket] = serverPID(socket) }
+        for c in candidates where servers[c.socket] != c.pid {
             s.ccTotal += 1
-            if ppid == 1 { s.ccOrphans += 1; s.orphanPids.append(pid) }
+            if c.ppid == 1, c.tty != "??" { s.ccOrphans += 1; s.orphanPids.append(c.pid) }
         }
         let dir = "/private/tmp/tmux-\(getuid())"
         let socks = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
@@ -234,10 +245,31 @@ final class PtyMonitor {
         return s
     }
 
+    /// The `-L name` / `-S path` arguments selecting a tmux process's socket ([] = default socket).
+    nonisolated private static func socketArgs(_ argv: [Substring]) -> [String] {
+        for (i, a) in argv.enumerated() where (a == "-L" || a == "-S") && i + 1 < argv.count {
+            return [String(a), String(argv[i + 1])]
+        }
+        return []
+    }
+
+    /// The server pid tmux reports for that socket (nil if no server answers).
+    nonisolated private static func serverPID(_ socket: [String]) -> pid_t? {
+        guard let tmux = TmuxLocator.find() else { return nil }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: tmux)
+        p.arguments = socket + ["display-message", "-p", "#{pid}"]
+        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+        do { try p.run() } catch { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return pid_t(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     nonisolated private static func runPS() -> String {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/ps")
-        p.arguments = ["-axo", "pid=,ppid=,command="]
+        p.arguments = ["-axo", "pid=,ppid=,tty=,command="]
         let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
         do { try p.run() } catch { return "" }
         let data = out.fileHandleForReading.readDataToEndOfFile()

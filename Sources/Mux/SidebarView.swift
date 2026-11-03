@@ -88,6 +88,12 @@ struct SidebarView: View {
                 get: { (model.axisSelected || model.labSelected || model.skillsSelected || model.claudeMdSelected || model.tunnelsSelected || model.groupNoteSelected) ? nil : model.selectedConnectionID },
                 set: { if let id = $0 { model.activateTerminal(id) } } // robust to re-selecting the same row while a tool pane is open
             )) {
+                // 已断开 tab: bulk actions first, where they're seen before scrolling the records.
+                if showEnded && endedCount > 0 {
+                    EndedActionsRow(count: endedCount,
+                                    onRestoreAll: { appModel.restoreAllEnded() },
+                                    onRemoveAll: { confirmRemoveAllEnded = true })
+                }
                 // Ungrouped terminals live in a built-in「未分组」folder pinned above the group folders
                 // (not a real group: no note, no reorder, not deletable). Scoped to the current host.
                 let ungrouped = filtered(showEnded ? appModel.visibleEndedUngroupedTerminals
@@ -123,12 +129,6 @@ struct SidebarView: View {
                 } isTargeted: { ungroupedDropTargeted = $0 }
                 ForEach(appModel.currentGroups) { group in
                     groupTree(group)
-                }
-                if showEnded && endedCount > 0 {
-                    Button("全部移除…", role: .destructive) { confirmRemoveAllEnded = true }
-                        .buttonStyle(.plain)
-                        .font(Theme.Font.rowSubtitle)
-                        .foregroundStyle(.secondary)
                 }
                 if appModel.isDiscoveringSessions {
                     HStack(spacing: Theme.Space.sm) {
@@ -649,6 +649,32 @@ private struct SegmentedBar<Value: Hashable>: View {
         }
         .padding(2)
         .background(Theme.Colors.linen.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// The 已断开 tab's bulk actions: restore every record (the common case after a tmux server loss)
+/// as the primary action, and a quiet remove-all.
+private struct EndedActionsRow: View {
+    let count: Int
+    let onRestoreAll: () -> Void
+    let onRemoveAll: () -> Void
+
+    var body: some View {
+        HStack(spacing: Theme.Space.sm) {
+            Button(action: onRestoreAll) {
+                Label("全部恢复 \(count)", systemImage: "arrow.counterclockwise")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .help("在原文件夹重建这些会话；仍在运行的会话直接重新连接")
+            Spacer(minLength: Theme.Space.xs)
+            Button("全部移除…", role: .destructive, action: onRemoveAll)
+                .buttonStyle(.plain)
+                .font(Theme.Font.rowSubtitle)
+                .foregroundStyle(Theme.textTertiary)
+        }
+        .padding(.vertical, Theme.Space.xs)
     }
 }
 

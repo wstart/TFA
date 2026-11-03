@@ -868,6 +868,33 @@ final class AppModel {
         }
     }
 
+    /// Restore every ended record on the current host (the「已断开」section's bulk restore) — after a
+    /// tmux server loss that is every terminal. Sessions still alive are just re-attached; the rest
+    /// are recreated in their saved folders. One at a time with a short gap: N login shells starting
+    /// at once contend for shell-init locks (e.g. `pyenv rehash`) and can stall each other.
+    func restoreAllEnded() {
+        let ended = connections.filter { $0.isEnded && $0.host == nil && matchesCurrentHost($0) }
+        guard !ended.isEmpty else { return }
+        Task { @MainActor in
+            let live = await Task.detached(priority: .userInitiated) { Set(TmuxServer.listLocalSessions()) }.value
+            for conn in ended where self.connection(conn.id) != nil && conn.isEnded {
+                let name = conn.controller.connection.sessionName
+                if live.contains(name) {
+                    guard let attached = self.open(TmuxConnection(endpoint: .local, sessionName: name, attachOnly: true),
+                                                   connect: false) else { continue }
+                    self.replace(conn, with: attached)
+                    continue
+                }
+                conn.isEnded = false
+                conn.beginConnecting()
+                await conn.connect()
+                if let err = conn.connectError { self.lastError = "\(conn.title): \(err)" }
+                await self.reconcileIdentity(conn)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+        }
+    }
+
     /// Forget every ended record on the current host (the「已断开」section's bulk remove).
     func removeAllEnded() {
         for conn in connections where conn.isEnded && matchesCurrentHost(conn) { closeTerminal(conn) }
