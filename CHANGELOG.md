@@ -3,7 +3,7 @@
 本文件记录 TFA 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com)，
 版本遵循 [语义化版本](https://semver.org)。
 
-## [Unreleased]
+## [0.21.0] — 2026-11-04
 
 ### 修复
 - **实验室「清理孤儿」可能杀掉 tmux 服务器**：由 `tmux -u -CC new-session …` 拉起的 tmux 服务器会保留这条命令行并挂到 PID 1，在 `ps` 里和泄漏的控制客户端一模一样，清理会把它当孤儿结束，所有会话随之丢失。现在按每个 socket 报告的服务器 pid 排除，并要求候选进程有控制终端。
