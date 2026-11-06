@@ -73,9 +73,11 @@ struct AttentionButton: View {
                             .font(.system(size: 9, weight: .bold).monospacedDigit())
                             .foregroundStyle(.white)
                             .padding(.horizontal, 4)
-                            .frame(minWidth: 15, minHeight: 15)
+                            .frame(minWidth: 14, minHeight: 14)
                             .background(Theme.Status.attention, in: Capsule())
-                            .offset(x: 5, y: 2)
+                            // A cream ring separates the badge from the tray glyph and the「+」beside it.
+                            .overlay(Capsule().stroke(Theme.chrome, lineWidth: 1.5))
+                            .offset(x: 3, y: 1)
                     }
                 }
                 .contentShape(Rectangle())

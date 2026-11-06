@@ -150,6 +150,8 @@ final class AppModel {
         loadEnvironments()
         migrateLegacyKeysIfNeeded() // one-time: name-keyed env/groups/assignees → UUID keys
         startScheduler() // ONE heartbeat: activity sampling + session snapshots
+        // The script 设置「安装 Shell 集成」sources (off main; writes only when it changed).
+        Task.detached(priority: .utility) { ShellIntegrationScript.install() }
         activity.captureEnabled = !sidebarCollapsed
         Task { @MainActor in self.tmuxMissing = await Task.detached(priority: .utility) { TmuxLocator.find() == nil }.value }
         // Discover existing local tmux sessions OFF the main thread: `tmux list-sessions` is a

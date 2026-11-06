@@ -248,16 +248,29 @@ enum TerminalKind {
 struct KindBadge: View {
     let kind: TerminalKind
     var dimmed = false
+    /// On a prominent (accent-filled) selection the charcoal/white badge would vanish into it;
+    /// then it becomes a translucent light chip instead.
+    var prominent = false
 
     var body: some View {
         Image(systemName: kind.symbol)
             .font(.system(size: 10, weight: .bold))
-            .foregroundStyle(kind.isAgent ? Theme.canvas : Theme.textSecondary)
+            .foregroundStyle(prominent || kind.isAgent ? Theme.canvas : Theme.textSecondary)
             .frame(width: 22, height: 22)
-            .background(kind.isAgent ? Theme.brand : Theme.Colors.linen,
-                        in: RoundedRectangle(cornerRadius: 6))
+            .background(fill, in: RoundedRectangle(cornerRadius: 6))
+            .overlay {
+                // A white shell chip needs its hairline to read on cream, gray selection and amber.
+                if !kind.isAgent && !prominent {
+                    RoundedRectangle(cornerRadius: 6).stroke(Theme.border, lineWidth: 1)
+                }
+            }
             .opacity(dimmed ? 0.45 : 1)
             .accessibilityHidden(true)
+    }
+
+    private var fill: Color {
+        if prominent { return Color.white.opacity(kind.isAgent ? 0.22 : 0.14) }
+        return kind.isAgent ? Theme.brand : Theme.surface
     }
 }
 

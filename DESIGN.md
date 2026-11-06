@@ -217,14 +217,18 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
 - **在线 / 已断开 switch** — full-width segmented bar: a Linen well with the chosen half raised in white.
 - **Filter pill** — White capsule + Linen border, 9.6px; live-filters the list (distinct from ⌘F search).
 - **Sidebar terminal row** — a 22px rounded-square **kind badge** (agents — axis-claude / Claude /
-  Codex — solid Charcoal with an ivory glyph; shells and ssh quiet Linen; ended/dormant faded), then
-  `rowTitle` name + `rowSubtitle` (cwd / live line), and one trailing signal (§6). Selected = system
-  selection plus a 3px Charcoal bar at the leading edge. Only "needs you" tints a row (amber wash);
-  working is carried by the equalizer alone. Ungrouped terminals live in a built-in「未分组」folder
-  pinned above the groups (same header style, collapsible, not reorderable); rows align under their
-  folder label (no indent).
-- **Group folder** — a small chevron and an 11pt tracked, muted caps label with a plain count, so
-  terminal names stay the loudest text; the drag grip appears on hover; drop targets highlight in accent.
+  Codex — solid Charcoal with an ivory glyph; shells and ssh a White chip with a Linen hairline;
+  ended/dormant faded), then `rowTitle` name + `rowSubtitle` (cwd shown as `~` and, when deep, only
+  its last two parts `…/proj/sub`, head-truncated; full path in the tooltip), and ONE 14pt signal
+  column (bell > connection glyph > slim equalizer > check/unseen dot). Selection is the system
+  List highlight; only while a tool pane hides that selection does the current row show a 3px
+  Charcoal bar at its leading edge. On a prominent (accent-filled) selection the badge becomes a
+  translucent light chip and the equalizer/dot turn ivory. "Needs you" is an amber wash at 10%
+  with the same rounded footprint as the selection; working is carried by the equalizer alone.
+  Ungrouped terminals live in a built-in「未分组」folder pinned above the groups.
+- **Group folder** — a 22pt-wide chevron (the badge width, so folder names align with row titles),
+  an 11pt tracked muted caps label, and the count in the rows' 14pt signal column; hovering swaps
+  the count for the drag grip. Folders are separated by 12pt; drop targets highlight in accent.
 - **已断开 bulk actions** — at the top of the 已断开 list: a small prominent 「全部恢复 N」 and a quiet
   「全部移除…」 text button.
 - **Metric card** (Lab system monitor) — White, Linen border, `card` radius; caption title, one large

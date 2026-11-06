@@ -54,6 +54,13 @@ struct SidebarView: View {
     /// The folder header under the pointer — its drag grip shows only then.
     @State private var hoveredGroup: UUID?
 
+    /// A tool pane is showing: the List has no selection then, so the current terminal's row shows
+    /// its own leading bar instead.
+    private var toolPaneOpen: Bool {
+        appModel.axisSelected || appModel.labSelected || appModel.skillsSelected
+            || appModel.claudeMdSelected || appModel.tunnelsSelected || appModel.groupNoteSelected
+    }
+
     var body: some View {
         @Bindable var model = appModel
         VStack(spacing: 0) {
@@ -64,7 +71,7 @@ struct SidebarView: View {
             )
 
             // Filter field, with the cross-pane search (⌘F) and new-group actions beside it.
-            HStack(spacing: Theme.Space.xs) {
+            HStack(spacing: Theme.Space.sm) {
                 FilterField(text: $filter)
                 HeaderButton(system: "magnifyingglass", help: "Search across all panes (⌘F)") { appModel.isShowingSearch = true }
                 HeaderButton(system: "folder.badge.plus", help: "New group") { startNewGroup() }
@@ -255,7 +262,8 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func row(_ conn: ConnectionSession) -> some View {
-        TerminalRow(conn: conn, isSelected: conn.id == appModel.selectedConnectionID)
+        TerminalRow(conn: conn, isSelected: conn.id == appModel.selectedConnectionID,
+                    toolPaneOpen: toolPaneOpen)
             .tag(conn.id)
             // Drag a row onto a group folder to file it there (#8). We carry the stable String
             // groupKey (Transferable) rather than the id so the drop side can re-resolve the session.
@@ -270,37 +278,37 @@ struct SidebarView: View {
         // NOT a Button: a Button's tap recognizer competes with `.draggable` (added in groupTree), making
         // the folder hard to pick up. A plain tappable row lets tap and drag coexist cleanly — quick
         // click toggles, press-and-move reorders. `.isButton` keeps the VoiceOver semantics.
-        return HStack(spacing: Theme.Space.xs) {
-            // Chevron = fold/unfold. Its own (generously sized) tap target, separate from the name.
-            Image(systemName: "chevron.right")
-                .font(.system(size: 8, weight: .bold))
-                .foregroundStyle(Theme.textTertiary)
-                .rotationEffect(.degrees(expanded ? 90 : 0))
-                .frame(width: 14, height: 18)
+        let count = appModel.visibleTerminals(in: group).filter { $0.isEnded == showEnded }.count
+        let hovered = hoveredGroup == group.id
+        return HStack(spacing: Theme.Space.md) {
+            // Chevron = fold/unfold, as wide as a row's kind badge so the name lines up with titles.
+            chevron(expanded)
                 .contentShape(Rectangle())
                 .onTapGesture { toggleGroup(group.id) }
-            // Name (icon → count stretch) = open this group's Markdown note in the detail area.
-            sectionHeaderLabel(group.name,
-                               count: appModel.visibleTerminals(in: group).filter { $0.isEnded == showEnded }.count)
+            // Name = open this group's Markdown note in the detail area.
+            sectionHeaderLabel(group.name)
                 .contentShape(Rectangle())
                 .onTapGesture { appModel.openGroupNote(group) }
-            // Dedicated drag handle: the ONLY draggable bit, so the tap-to-toggle area never fights the
-            // drag recognizer (that conflict is why dragging the whole header didn't start a drag).
-            Image(systemName: "line.3.horizontal")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .padding(.leading, Theme.Space.xs)
-                .opacity(hoveredGroup == group.id ? 1 : 0)
-                .contentShape(Rectangle())
-                .draggable(SidebarDrag.groupPayload(group.id)) {
-                    Label(group.name, systemImage: "folder.fill")
-                        .padding(Theme.Space.sm)
-                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
-                }
-                .help("拖动重新排序分组")
+            // The count and the drag grip share the rows' signal column; hovering swaps them. The grip
+            // is the ONLY draggable bit, so tap-to-toggle never fights the drag recognizer.
+            ZStack(alignment: .trailing) {
+                countLabel(count).opacity(hovered ? 0 : 1)
+                Image(systemName: "line.3.horizontal")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .opacity(hovered ? 1 : 0)
+                    .contentShape(Rectangle())
+                    .draggable(SidebarDrag.groupPayload(group.id)) {
+                        Label(group.name, systemImage: "folder.fill")
+                            .padding(Theme.Space.sm)
+                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                    }
+                    .help("拖动重新排序分组")
+            }
+            .frame(width: 14, alignment: .trailing)
                 .accessibilityHidden(true) // reorder is exposed via the row's accessibilityActions
         }
-        .padding(.top, Theme.Space.sm)
+        .padding(.top, isFirstSection(group.id) ? 0 : Theme.Space.lg)
         .onHover { hoveredGroup = $0 ? group.id : (hoveredGroup == group.id ? nil : hoveredGroup) }
         .background(
             // Highlight the folder while a terminal is dragged over it (#8 drop feedback).
@@ -349,20 +357,11 @@ struct SidebarView: View {
     /// to fold. No note / drag handle — it isn't a real group.
     private func defaultHeaderRow(count: Int) -> some View {
         let expanded = !defaultCollapsed || !filter.trimmingCharacters(in: .whitespaces).isEmpty
-        return HStack(spacing: Theme.Space.xs) {
-            Image(systemName: "chevron.right")
-                .font(.system(size: 8, weight: .bold))
-                .foregroundStyle(Theme.textTertiary)
-                .rotationEffect(.degrees(expanded ? 90 : 0))
-                .frame(width: 14, height: 18)
-            sectionHeaderLabel("未分组", count: count)
-            // Invisible stand-in for a group's drag grip, so the counts line up across folders.
-            Image(systemName: "line.3.horizontal")
-                .font(.caption)
-                .padding(.leading, Theme.Space.xs)
-                .hidden()
+        return HStack(spacing: Theme.Space.md) {
+            chevron(expanded)
+            sectionHeaderLabel("未分组")
+            countLabel(count).frame(width: 14, alignment: .trailing)
         }
-        .padding(.top, Theme.Space.sm)
         .contentShape(Rectangle())
         .onTapGesture { defaultCollapsed.toggle() }
         .help("未分组的终端 · 点击折叠/展开")
@@ -375,7 +374,7 @@ struct SidebarView: View {
 
     /// Shared folder header label: a small, tracked, muted caps title (so the terminal names stay the
     /// loudest text in the list) and a plain count. Used by groups and「未分组」.
-    private func sectionHeaderLabel(_ name: String, count: Int) -> some View {
+    private func sectionHeaderLabel(_ name: String) -> some View {
         HStack(spacing: Theme.Space.sm) {
             Text(name)
                 .font(.system(size: 11, weight: .semibold))
@@ -384,13 +383,30 @@ struct SidebarView: View {
                 .foregroundStyle(Theme.textTertiary)
                 .lineLimit(1)
             Spacer(minLength: Theme.Space.xs)
-            if count > 0 {
-                Text("\(count)")
-                    .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(Theme.Colors.pewter)
-            }
         }
-        .padding(.vertical, Theme.Space.xxs)
+    }
+
+    @ViewBuilder private func countLabel(_ count: Int) -> some View {
+        if count > 0 {
+            Text("\(count)")
+                .font(.system(size: 11).monospacedDigit())
+                .foregroundStyle(Theme.Colors.pewter)
+        }
+    }
+
+    /// Fold chevron, as wide as a row's kind badge (22pt) so folder names align with row titles.
+    private func chevron(_ expanded: Bool) -> some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 8, weight: .bold))
+            .foregroundStyle(Theme.textTertiary)
+            .rotationEffect(.degrees(expanded ? 90 : 0))
+            .frame(width: 22, height: 14)
+    }
+
+    /// The first folder header in the list sits flush with the top; later ones get breathing room.
+    private func isFirstSection(_ groupID: UUID) -> Bool {
+        let ungrouped = filtered(showEnded ? appModel.visibleEndedUngroupedTerminals : appModel.visibleUngroupedTerminals)
+        return ungrouped.isEmpty && appModel.currentGroups.first?.id == groupID
     }
 
     // MARK: - Helpers
@@ -554,7 +570,7 @@ private struct HeaderButton: View {
             Image(systemName: system)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Theme.textTertiary)
-                .frame(width: 22, height: 28)
+                .frame(width: 28, height: 28)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -591,21 +607,22 @@ private struct ToolDock: View {
         HStack(spacing: Theme.Space.sm) {
             ForEach(tools) { tool in
                 Button(action: tool.action) {
-                    VStack(spacing: Theme.Space.xs) {
+                    VStack(spacing: 3) {
                         Image(systemName: tool.icon)
-                            .font(.system(size: 15, weight: .regular))
+                            .font(.system(size: 14, weight: .regular))
+                            .frame(height: 18) // one baseline for glyphs of different heights
                             .foregroundStyle(tool.selected ? Theme.canvas : Theme.textSecondary)
                         Text(tool.title)
-                            .font(.system(size: 9.5))
+                            .font(.system(size: 10))
                             .foregroundStyle(tool.selected ? Theme.canvas : Theme.textTertiary)
                             .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, Theme.Space.md)
+                    .padding(.vertical, Theme.Space.sm)
                     .padding(.horizontal, Theme.Space.xs)
                     .background(tool.selected ? Theme.brand : Color.clear,
-                                in: RoundedRectangle(cornerRadius: 10))
-                    .contentShape(RoundedRectangle(cornerRadius: 10))
+                                in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+                    .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
                 }
                 .buttonStyle(.plain)
                 .help(tool.title)
@@ -613,8 +630,9 @@ private struct ToolDock: View {
             }
         }
         .padding(.horizontal, Theme.Space.lg)
-        .padding(.vertical, Theme.Space.md)
-        .overlay(alignment: .top) { Divider() }
+        .padding(.vertical, Theme.Space.sm)
+        // A warm linen rule (the system separator reads cool against the cream sidebar).
+        .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 }
 
@@ -687,11 +705,11 @@ private struct FilterField: View {
             // A filter-semantics glyph (not a magnifier) so it reads as "narrow this list", visually
             // distinct from the magnifyingglass beside it, which triggers full-text search across panes.
             Image(systemName: "line.3.horizontal.decrease")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.textTertiary)
                 .font(.system(size: 12, weight: .medium))
             TextField("筛选终端", text: $text)
                 .textFieldStyle(.plain)
-                .font(Theme.Font.rowSubtitle)
+                .font(.system(size: 12))
             if !text.isEmpty {
                 Button { text = "" } label: {
                     Image(systemName: "xmark.circle.fill")
@@ -701,8 +719,8 @@ private struct FilterField: View {
                 .accessibilityLabel("Clear filter")
             }
         }
-        .padding(.horizontal, Theme.Space.lg)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
+        .frame(height: 28)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
         .accessibilityLabel("Filter terminals")
@@ -712,8 +730,12 @@ private struct FilterField: View {
 private struct TerminalRow: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// `.increased` while the system draws the (accent-filled) selection behind this row — anything
+    /// drawn in charcoal would vanish into it, so those glyphs switch to light.
+    @Environment(\.backgroundProminence) private var prominence
     let conn: ConnectionSession
     let isSelected: Bool
+    let toolPaneOpen: Bool
 
     /// "Working" = producing output right now (shared logic on AppModel — fuses the live tmux
     /// `window_activity` poll with the attached controller's streaming phase).
@@ -728,10 +750,12 @@ private struct TerminalRow: View {
     var body: some View {
         let status = TerminalStatus.of(conn)
         let showDot = conn.hasUnseenOutput && !isSelected
+        let prominent = prominence == .increased
+        let ink = prominent ? Theme.canvas : Theme.brand
         HStack(spacing: Theme.Space.md) {
             // ONE primary signal per row (dsh discipline): the icon tint + the single right-side
             // glyph carry the state; no left rail, no colored subtitles duplicating them.
-            KindBadge(kind: TerminalKind.of(conn), dimmed: status == .ended || status == .dormant)
+            KindBadge(kind: TerminalKind.of(conn), dimmed: status == .ended || status == .dormant, prominent: prominent)
             VStack(alignment: .leading, spacing: Theme.Space.xxs) {
                 Text(conn.title)
                     .font(Theme.Font.rowTitle)
@@ -740,28 +764,36 @@ private struct TerminalRow: View {
                 subtitle(status)
             }
             Spacer(minLength: Theme.Space.xs)
-            if attention {
-                // Highest priority: an amber bell = this terminal explicitly wants you.
-                AttentionBell(animated: !reduceMotion, tint: Self.amber)
-            } else if working {
-                // Lively "equalizer" bars = this terminal is actively producing output.
-                EqualizerBars(animated: !reduceMotion)
-            } else {
-                // Idle: a checkmark flash when a burst just finished, else the unseen-output dot.
-                OutputActivityIndicator(phase: conn.outputPhase, showUnseen: showDot)
+            // ONE signal column (14pt, shared with the folder counts), in priority order.
+            ZStack {
+                if attention {
+                    // Highest priority: an amber bell = this terminal explicitly wants you.
+                    AttentionBell(animated: !reduceMotion, tint: Self.amber)
+                } else if status != .connected {
+                    // Only surface a connection glyph when it needs attention — a healthy row stays quiet.
+                    StatusIndicator(status: status)
+                } else if working {
+                    // Lively "equalizer" bars = this terminal is actively producing output.
+                    EqualizerBars(animated: !reduceMotion, tint: ink)
+                } else {
+                    // Idle: a checkmark flash when a burst just finished, else the unseen-output dot.
+                    OutputActivityIndicator(phase: conn.outputPhase, showUnseen: showDot, tint: ink)
+                }
             }
-            // Only surface a status glyph when it needs attention — a healthy connected row stays
-            // quiet (its brand-tinted icon is signal enough), keeping a long list calm.
-            if status != .connected {
-                StatusIndicator(status: status)
-            }
+            .frame(width: 14)
         }
         .padding(.vertical, Theme.Space.xxs)
-        .background(rowTint, in: RoundedRectangle(cornerRadius: 6))
-        // The selected row carries a short charcoal bar at its leading edge.
+        // The amber "needs you" wash spans the same rounded area as the system selection highlight.
+        .background {
+            if attention {
+                RoundedRectangle(cornerRadius: 6).fill(Self.amber.opacity(0.10))
+                    .padding(.horizontal, -6).padding(.vertical, -3)
+            }
+        }
+        // While a tool pane is open the List shows no selection — the current terminal keeps a bar.
         .overlay(alignment: .leading) {
-            if isSelected {
-                Capsule().fill(Theme.brand).frame(width: 3, height: 18).offset(x: -7)
+            if isSelected && toolPaneOpen {
+                Capsule().fill(Theme.brand).frame(width: 3, height: 16).offset(x: -11)
             }
         }
         .animation(.easeInOut(duration: 0.15), value: showDot)
@@ -769,13 +801,6 @@ private struct TerminalRow: View {
         .animation(.easeInOut(duration: 0.2), value: attention)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityText(status, showDot: showDot))
-    }
-
-    private var rowTint: Color {
-        // Only "needs you" tints a row; working is carried by the equalizer alone, so an active row
-        // never reads as the selected one.
-        if attention { return Self.amber.opacity(0.12) }
-        return .clear
     }
 
     /// Subtitle: attention message (the agent's ping) > live output line while working > running
@@ -801,11 +826,13 @@ private struct TerminalRow: View {
                 .truncationMode(.tail)
         } else if status == .ended {
             // Ended record: say so, and WHERE it lived — the folder is how you recognise it.
-            Text(folderLabel.map { "已断开 · \($0)" } ?? "已断开 · 可恢复")
-                .font(Theme.Font.rowSubtitle)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            HStack(spacing: 0) {
+                Text("已断开 · ").fixedSize()
+                Text(folderLabel ?? "可恢复").truncationMode(.head)
+            }
+            .font(Theme.Font.rowSubtitle)
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
         } else if status == .dormant {
             Text("未连接 · 点击打开")
                 .font(Theme.Font.rowSubtitle)
@@ -813,24 +840,33 @@ private struct TerminalRow: View {
                 .lineLimit(1)
         } else if let folder = folderLabel {
             // Idle connected: just show WHERE this terminal is — the working directory, home as ~.
+            // Head truncation keeps the folder's own name (the end of the path) visible.
             Text(folder)
                 .font(Theme.Font.rowSubtitle)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .truncationMode(.middle)
+                .truncationMode(.head)
         }
     }
 
     /// The terminal's current working directory with home abbreviated to `~` (nil until known).
-    private var folderLabel: String? {
+    private var fullFolder: String? {
         guard let p = conn.currentPath else { return nil }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return p == home ? "~" : p.replacingOccurrences(of: home, with: "~")
     }
 
+    /// The folder as a row shows it: deep paths keep only their last two parts (`…/proj/sub`) —
+    /// the part that identifies it; the full path is in the tooltip and VoiceOver.
+    private var folderLabel: String? {
+        guard let full = fullFolder else { return nil }
+        let parts = full.split(separator: "/", omittingEmptySubsequences: true)
+        return parts.count > 3 ? "…/" + parts.suffix(2).joined(separator: "/") : full
+    }
+
     private func accessibilityText(_ status: TerminalStatus, showDot: Bool) -> String {
         var parts = [conn.title, working ? "活动中" : status.label]
-        if let folder = folderLabel { parts.append("目录 \(folder)") }
+        if let folder = fullFolder { parts.append("目录 \(folder)") }
         if showDot { parts.append("new output") }
         return parts.joined(separator: ", ")
     }
@@ -855,13 +891,14 @@ private struct AttentionBell: View {
 /// activity effect. Honors Reduce Motion (static bars). Pure visual, no layout impact.
 private struct EqualizerBars: View {
     let animated: Bool
+    var tint: Color = Theme.brand
     /// Only bounce while TFA is the active app: a `repeatForever` animation keeps the whole window
     /// re-rendering at display rate, which is wasted (and was most of TFA's idle CPU) when TFA is in
     /// the background. Inactive → static bars; reactivation remounts the animated variant.
     @State private var appActive = NSApp.isActive
 
     var body: some View {
-        Bars(animated: animated && appActive)
+        Bars(animated: animated && appActive, tint: tint)
             .id(animated && appActive)
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in appActive = true }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in appActive = false }
@@ -870,12 +907,14 @@ private struct EqualizerBars: View {
 
 private struct Bars: View {
     let animated: Bool
+    let tint: Color
     @State private var up = false
 
     var body: some View {
-        HStack(alignment: .center, spacing: 1.5) {
+        // Slim and slightly translucent: the activity cue must not outweigh the terminal names.
+        HStack(alignment: .center, spacing: 2) {
             ForEach(0..<3, id: \.self) { i in
-                Capsule().fill(Theme.brand).frame(width: 2.5, height: height(i))
+                Capsule().fill(tint.opacity(0.85)).frame(width: 2, height: height(i))
             }
         }
         .frame(width: 12, height: 12, alignment: .center)
@@ -888,7 +927,7 @@ private struct Bars: View {
 
     /// Each bar swings between two heights; staggering the pairs makes them bounce out of phase.
     private func height(_ i: Int) -> CGFloat {
-        guard animated else { return [8, 8, 8][i] }
+        guard animated else { return [5, 9, 7][i] } // uneven at rest: reads as "activity", not "pause"
         let low: [CGFloat] = [4, 10, 6]
         let high: [CGFloat] = [10, 5, 11]
         return up ? high[i] : low[i]
@@ -900,6 +939,7 @@ private struct Bars: View {
 private struct OutputActivityIndicator: View {
     let phase: ConnectionSession.OutputPhase
     let showUnseen: Bool
+    var tint: Color = Theme.brand
 
     var body: some View {
         Group {
@@ -908,7 +948,7 @@ private struct OutputActivityIndicator: View {
                 // Static brand dot — no perpetual pulse loop. (Working terminals show the equalizer
                 // upstream; this path is the quieter fallback.)
                 Circle()
-                    .fill(Theme.brand)
+                    .fill(tint)
                     .frame(width: 7, height: 7)
             case .justFinished:
                 Image(systemName: "checkmark.circle.fill")
@@ -918,7 +958,7 @@ private struct OutputActivityIndicator: View {
             case .idle:
                 if showUnseen {
                     Circle()
-                        .fill(Theme.brand)
+                        .fill(tint)
                         .frame(width: 7, height: 7)
                         .transition(.scale.combined(with: .opacity))
                 }
