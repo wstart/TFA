@@ -1,4 +1,5 @@
 import SwiftUI
+import SuperagentCore
 import TmuxKit
 
 /// Sidebar drag payloads share one `String` channel. A TERMINAL-assign drag carries a row's
@@ -59,6 +60,7 @@ struct SidebarView: View {
     private var toolPaneOpen: Bool {
         appModel.axisSelected || appModel.labSelected || appModel.skillsSelected
             || appModel.claudeMdSelected || appModel.tunnelsSelected || appModel.groupNoteSelected
+            || appModel.superagentSelected
     }
 
     var body: some View {
@@ -92,7 +94,7 @@ struct SidebarView: View {
                 // While a tool pane (Tasks / Lab / Skills / CLAUDE.md) is showing, no terminal is on
                 // screen — so don't keep a terminal row highlighted (avoids a confusing double-selection).
                 // selectedConnectionID is preserved underneath, so returning to a terminal restores it.
-                get: { (model.axisSelected || model.labSelected || model.skillsSelected || model.claudeMdSelected || model.tunnelsSelected || model.groupNoteSelected) ? nil : model.selectedConnectionID },
+                get: { toolPaneOpen ? nil : model.selectedConnectionID },
                 set: { if let id = $0 { model.activateTerminal(id) } } // robust to re-selecting the same row while a tool pane is open
             )) {
                 // 已断开 tab: bulk actions first, where they're seen before scrolling the records.
@@ -100,6 +102,10 @@ struct SidebarView: View {
                     EndedActionsRow(count: endedCount,
                                     onRestoreAll: { appModel.restoreAllEnded() },
                                     onRemoveAll: { confirmRemoveAllEnded = true })
+                }
+                // The「主管」(router) row is pinned above everything: it's where requests are made.
+                if !showEnded && filter.isEmpty && WorkspaceStore.shared.selected == nil {
+                    routerRow
                 }
                 // Ungrouped terminals live in a built-in「未分组」folder pinned above the group folders
                 // (not a real group: no note, no reorder, not deletable). Scoped to the current host.
@@ -260,6 +266,26 @@ struct SidebarView: View {
 
     // MARK: - Rows / headers
 
+    /// The pinned「主管」row: the router terminal when it runs (selectable like any terminal), else a
+    /// one-tap 启动. Its signal column carries the count of tickets that need you.
+    @ViewBuilder
+    private var routerRow: some View {
+        if let conn = appModel.routerConnection {
+            RouterRow(conn: conn, isSelected: conn.id == appModel.selectedConnectionID, toolPaneOpen: toolPaneOpen)
+                .tag(conn.id)
+                .contextMenu {
+                    Button("打开主管面板") { appModel.openSuperagent() }
+                    Divider()
+                    SessionMenuItems(conn: conn)
+                }
+        } else {
+            RouterRow(conn: nil, isSelected: false, toolPaneOpen: toolPaneOpen)
+                .contentShape(Rectangle())
+                .onTapGesture { appModel.openRouter() }
+                .contextMenu { Button("打开主管面板") { appModel.openSuperagent() } }
+        }
+    }
+
     @ViewBuilder
     private func row(_ conn: ConnectionSession) -> some View {
         TerminalRow(conn: conn, isSelected: conn.id == appModel.selectedConnectionID,
@@ -412,7 +438,8 @@ struct SidebarView: View {
     // MARK: - Helpers
 
     private func filtered(_ list: [ConnectionSession]) -> [ConnectionSession] {
-        let list = list.filter { WorkspaceStore.shared.includes($0) }
+        let router = appModel.routerConnection?.id
+        let list = list.filter { WorkspaceStore.shared.includes($0) && $0.id != router }
         let q = filter.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return list }
         return list.filter { ($0.title + " " + $0.subtitle).lowercased().contains(q) }
@@ -590,11 +617,14 @@ private struct ToolDock: View {
         let title: String
         let icon: String
         let selected: Bool
+        var badge = 0
         let action: () -> Void
     }
 
     private var tools: [Tool] {
         [
+            Tool(id: "superagent", title: "主管", icon: "person.crop.rectangle.stack", selected: appModel.superagentSelected,
+                 badge: appModel.superagent.needsYou.count) { appModel.openSuperagent() },
             Tool(id: "axis",    title: "模型",   icon: "cpu",                                selected: appModel.axisSelected)    { appModel.openAxis() },
             Tool(id: "tunnels", title: "隧道",   icon: "network.badge.shield.half.filled",   selected: appModel.tunnelsSelected) { appModel.openTunnels() },
             Tool(id: "rules",   title: "规则",    icon: "text.book.closed",                   selected: appModel.claudeMdSelected){ appModel.openClaudeMd() },
@@ -604,7 +634,8 @@ private struct ToolDock: View {
     }
 
     var body: some View {
-        HStack(spacing: Theme.Space.sm) {
+        // Six cells in the 230–280pt sidebar: tight gaps so「实验室」fits without truncating.
+        HStack(spacing: Theme.Space.xxs) {
             ForEach(tools) { tool in
                 Button(action: tool.action) {
                     VStack(spacing: 3) {
@@ -612,14 +643,22 @@ private struct ToolDock: View {
                             .font(.system(size: 14, weight: .regular))
                             .frame(height: 18) // one baseline for glyphs of different heights
                             .foregroundStyle(tool.selected ? Theme.canvas : Theme.textSecondary)
+                            .overlay(alignment: .topTrailing) {
+                                if tool.badge > 0 {
+                                    Circle().fill(Theme.Status.attention).frame(width: 7, height: 7)
+                                        .overlay(Circle().stroke(tool.selected ? Theme.brand : Theme.chrome, lineWidth: 1.5))
+                                        .offset(x: 4, y: -1)
+                                }
+                            }
                         Text(tool.title)
                             .font(.system(size: 10))
+                            .minimumScaleFactor(0.85)
                             .foregroundStyle(tool.selected ? Theme.canvas : Theme.textTertiary)
                             .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, Theme.Space.sm)
-                    .padding(.horizontal, Theme.Space.xs)
+                    .padding(.horizontal, Theme.Space.xxs)
                     .background(tool.selected ? Theme.brand : Color.clear,
                                 in: RoundedRectangle(cornerRadius: Theme.Radius.md))
                     .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
@@ -629,7 +668,7 @@ private struct ToolDock: View {
                 .accessibilityLabel(tool.title)
             }
         }
-        .padding(.horizontal, Theme.Space.lg)
+        .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)
         // A warm linen rule (the system separator reads cool against the cream sidebar).
         .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
@@ -743,8 +782,12 @@ private struct TerminalRow: View {
     /// The latest output line for a working local session — "what it's doing right now".
     private var liveLine: String? { conn.host == nil ? appModel.activity.line(conn.groupKey) : nil }
 
-    /// An agent in the background is waiting for you (bell / OSC notification). Top-priority cue.
-    private var attention: Bool { conn.needsAttention && !isSelected }
+    /// The ticket this terminal executes (nil for ordinary terminals).
+    private var ticket: TicketView? { appModel.ticket(for: conn) }
+
+    /// An agent in the background is waiting for you (bell / OSC notification), or this terminal's
+    /// ticket needs you (review / answer / blocked …). Top-priority cue.
+    private var attention: Bool { (conn.needsAttention || ticket?.stage.needsPerson != nil) && !isSelected }
     private static let amber = Theme.Status.attention
 
     var body: some View {
@@ -806,7 +849,19 @@ private struct TerminalRow: View {
     /// Subtitle: attention message (the agent's ping) > live output line while working > running
     /// command > dormant hint.
     @ViewBuilder private func subtitle(_ status: TerminalStatus) -> some View {
-        if attention, let msg = conn.attentionMessage, !msg.isEmpty {
+        if let t = ticket, t.stage.needsPerson != nil || !(working && liveLine?.isEmpty == false) {
+            // A ticket terminal says where its ticket stands; the live line still wins while it works.
+            HStack(spacing: 0) {
+                Text("#\(t.id) ").foregroundStyle(.tertiary)
+                Text(t.stage.label).foregroundStyle(t.stage.needsPerson != nil ? t.stage.tint : .secondary)
+                if t.stage.needsPerson == nil, !t.ticket.ack.isEmpty {
+                    Text(" · \(t.ticket.ack)").foregroundStyle(.tertiary)
+                }
+            }
+            .font(Theme.Font.rowSubtitle)
+            .lineLimit(1)
+            .truncationMode(.tail)
+        } else if attention, let msg = conn.attentionMessage, !msg.isEmpty {
             Text(msg)
                 .font(.system(size: 11))
                 .foregroundStyle(Self.amber)
@@ -869,6 +924,70 @@ private struct TerminalRow: View {
         if let folder = fullFolder { parts.append("目录 \(folder)") }
         if showDot { parts.append("new output") }
         return parts.joined(separator: ", ")
+    }
+}
+
+/// The pinned「主管」row: a charcoal badge (the router is an agent), the title, and one line saying
+/// where the tickets stand; the signal column shows how many need you.
+private struct RouterRow: View {
+    @Environment(AppModel.self) private var appModel
+    @Environment(\.backgroundProminence) private var prominence
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let conn: ConnectionSession?
+    let isSelected: Bool
+    let toolPaneOpen: Bool
+
+    var body: some View {
+        let sa = appModel.superagent
+        let needs = sa.needsYou.count
+        let open = sa.openTickets.count
+        let prominent = prominence == .increased
+        HStack(spacing: Theme.Space.md) {
+            Image(systemName: "person.crop.rectangle.stack")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.canvas)
+                .frame(width: 22, height: 22)
+                .background(prominent ? Color.white.opacity(0.22) : Theme.brand, in: RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: Theme.Space.xxs) {
+                Text("主管").font(Theme.Font.rowTitle).foregroundStyle(prominent ? Theme.canvas : Theme.textPrimary).lineLimit(1)
+                Group {
+                    if needs > 0 {
+                        Text("\(needs) 个工单需要你").foregroundStyle(prominent ? Theme.canvas : Theme.Status.attention)
+                    } else if open > 0 {
+                        Text("\(open) 个工单进行中").foregroundStyle(.secondary)
+                    } else if conn == nil {
+                        Text("未启动 · 点击启动").foregroundStyle(.tertiary)
+                    } else {
+                        Text("在这里说需求").foregroundStyle(.secondary)
+                    }
+                }
+                .font(Theme.Font.rowSubtitle)
+                .lineLimit(1)
+            }
+            Spacer(minLength: Theme.Space.xs)
+            ZStack {
+                if needs > 0 {
+                    Text("\(needs)")
+                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Theme.canvas)
+                        .frame(minWidth: 14, minHeight: 14)
+                        .background(Theme.Status.attention, in: Capsule())
+                } else if let conn, appModel.isWorking(conn) {
+                    EqualizerBars(animated: !reduceMotion, tint: prominent ? Theme.canvas : Theme.brand)
+                }
+            }
+            .frame(minWidth: 14)
+        }
+        .padding(.vertical, Theme.Space.xxs)
+        .padding(.bottom, Theme.Space.xs)
+        .overlay(alignment: .leading) {
+            if isSelected && toolPaneOpen {
+                Capsule().fill(Theme.brand).frame(width: 3, height: 16).offset(x: -11)
+            }
+        }
+        .help(conn == nil ? "启动主管终端：用自然语言提需求，它拆成工单派给执行终端" : "主管终端")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(needs > 0 ? "主管，\(needs) 个工单需要你" : "主管")
     }
 }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import SuperagentCore
 import TmuxKit
 
 /// The app's root: a UNIFIED two-pane layout (no floating NavigationSplitView column). A solid,
@@ -66,12 +67,27 @@ struct RootView: View {
                     Divider()
                     TunnelsView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if appModel.superagentSelected {
+                    ToolHeaderBar(icon: "person.crop.rectangle.stack", title: "主管",
+                                  subtitle: "在主管终端里用自然语言提需求；这里只列需要你的工单、问题和规则。")
+                    Divider()
+                    SuperagentPanel()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.groupNoteSelected, let gid = appModel.groupNoteID {
                     GroupNoteView(groupID: gid)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ActiveTerminalHeader(connection: appModel.selectedConnection)
                     Divider()
+                    if let conn = appModel.selectedConnection {
+                        if let ticket = appModel.ticket(for: conn) {
+                            TicketBar(view: ticket)
+                            Divider()
+                        } else if conn.id == appModel.routerConnection?.id {
+                            RouterBar()
+                            Divider()
+                        }
+                    }
                     TerminalAreaView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if let conn = appModel.selectedConnection {
@@ -103,6 +119,10 @@ struct RootView: View {
         }
         .sheet(item: $model.historyViewer) { conn in
             HistoryViewerSheet(connection: conn)
+                .environment(appModel)
+        }
+        .sheet(item: $model.ticketFeedback) { req in
+            TicketFeedbackSheet(request: req)
                 .environment(appModel)
         }
         .sheet(isPresented: $model.isShowingNewSession) {

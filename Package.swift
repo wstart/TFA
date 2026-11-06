@@ -9,11 +9,24 @@ var targets: [Target] = [
         name: "TmuxKit",
         swiftSettings: [.swiftLanguageMode(.v5)]
     ),
+    // Super-agent domain: tickets, engine state machine, ~/.tfa/superagent.db. Foundation + SQLite only;
+    // shared by the app (which runs the effects) and the `tfa` CLI (which submits commands).
+    .target(
+        name: "SuperagentCore",
+        swiftSettings: [.swiftLanguageMode(.v5)]
+    ),
+    // `tfa`: the command line the 主管 (router) and the ticket workers use to talk to TFA.
+    .executableTarget(
+        name: "TFACLI",
+        dependencies: ["SuperagentCore"],
+        swiftSettings: [.swiftLanguageMode(.v5)]
+    ),
     // SwiftUI app (depends on SwiftTerm for the terminal view).
     .executableTarget(
         name: "Mux",
         dependencies: [
             "TmuxKit",
+            "SuperagentCore",
             .product(name: "SwiftTerm", package: "SwiftTerm"),
         ],
         swiftSettings: [.swiftLanguageMode(.v5)]
@@ -47,6 +60,20 @@ if FileManager.default.fileExists(atPath: "Tests/MuxTests") {
         swiftSettings: [.swiftLanguageMode(.v5)]
     ))
 }
+if FileManager.default.fileExists(atPath: "Tests/SuperagentCoreTests") {
+    targets.append(.testTarget(
+        name: "SuperagentCoreTests",
+        dependencies: ["SuperagentCore"],
+        swiftSettings: [.swiftLanguageMode(.v5)]
+    ))
+}
+if FileManager.default.fileExists(atPath: "Tests/TFACLITests") {
+    targets.append(.testTarget(
+        name: "TFACLITests",
+        dependencies: ["TFACLI", "SuperagentCore"],
+        swiftSettings: [.swiftLanguageMode(.v5)]
+    ))
+}
 if FileManager.default.fileExists(atPath: "Tests/AxisClaudeTests") {
     targets.append(.testTarget(
         name: "AxisClaudeTests",
@@ -64,6 +91,7 @@ let package = Package(
         .library(name: "TmuxKit", targets: ["TmuxKit"]),
         .executable(name: "Mux", targets: ["Mux"]),
         .executable(name: "axis-claude", targets: ["AxisClaude"]),
+        .executable(name: "tfa", targets: ["TFACLI"]),
     ],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm", from: "1.13.0"),

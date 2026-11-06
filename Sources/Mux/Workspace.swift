@@ -1,4 +1,5 @@
 import SwiftUI
+import SuperagentCore
 import AppKit
 import Observation
 
@@ -62,6 +63,7 @@ struct AttentionButton: View {
     var body: some View {
         // No timer: needsAttention / connectError are @Observable, so this re-renders when they change.
         let count = model.connections.filter { $0.needsAttention || $0.connectError != nil }.count
+            + model.superagent.needsYou.count
         Button { showAttention = true } label: {
             Image(systemName: count > 0 ? "tray.full" : "tray")
                 .font(.system(size: 12, weight: .medium))
@@ -83,7 +85,7 @@ struct AttentionButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(count > 0 ? "待处理：\(count) 个终端需要你" : "待处理：暂无")
+        .help(count > 0 ? "待处理：\(count) 项需要你" : "待处理：暂无")
         .accessibilityLabel("待处理 \(count)")
         .onChange(of: store.selectedID) {
             guard !model.axisSelected && !model.skillsSelected && !model.claudeMdSelected else { return }
@@ -167,6 +169,23 @@ struct AttentionCenter: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack { Text("待处理中心 · 全部项目").font(.headline); Spacer(); Button("完成") { dismiss() }.keyboardShortcut(.cancelAction) }
             List {
+                let tickets = model.superagent.needsYou
+                if !tickets.isEmpty {
+                    Section("需要你的工单") {
+                        ForEach(tickets) { t in
+                            HStack {
+                                StateTag(text: t.stage.label, tint: t.stage.tint)
+                                VStack(alignment: .leading) {
+                                    Text("#\(t.id) \(t.ticket.title)")
+                                    Text(t.ticket.attention ?? t.ticket.deliveryError ?? t.ticket.reportSummary)
+                                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                }
+                                Spacer()
+                                Button("前往终端") { model.goToTicket(t.id); dismiss() }
+                            }
+                        }
+                    }
+                }
                 Section("需要关注的终端") {
                     let terminals = model.connections.filter { $0.needsAttention || $0.connectError != nil }
                     if terminals.isEmpty { Text("暂无终端需要处理").foregroundStyle(.secondary) }

@@ -675,6 +675,9 @@ final class ConnectionSession: Identifiable {
 
     /// Lazily create (and hydrate) the SwiftTerm-backed terminal for a pane. Identity is stable:
     /// repeated calls return the same `PaneTerminal`.
+    /// When the user last typed into any of this terminal's panes (nil = not since launch).
+    var lastUserInputAt: Date? { terminals.values.compactMap(\.lastUserInputAt).max() }
+
     func terminal(for paneID: TmuxPaneID) -> PaneTerminal {
         if let existing = terminals[paneID] {
             return existing

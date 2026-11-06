@@ -30,6 +30,10 @@ final class PaneTerminal {
         didSet { coordinator.onUserInput = onUserInput }
     }
 
+    /// When the user last typed into this pane. Superagent waits for a quiet moment before typing a
+    /// message into a terminal, so it never interleaves with what the person is writing.
+    var lastUserInputAt: Date?
+
     /// Pushes scroll state to the UI (PaneTerminal is intentionally NOT `@Observable`, so we drive
     /// SwiftUI via a plain callback the view stores in `@State`). `atBottom` is true when the
     /// viewport is pinned to the live tail; `unseenLines` counts output that arrived while the user
@@ -389,6 +393,7 @@ final class PaneTerminal {
         // User keystrokes (already in terminal wire form) → forward to tmux.
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
             controller?.sendKeys(to: paneID, bytes: data)
+            owner?.lastUserInputAt = Date()
             onUserInput?() // drive the typing-combo effect (count once per keystroke batch)
         }
 

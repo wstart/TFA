@@ -27,6 +27,10 @@ final class AppModel {
     var axisSelected = false
     /// True when the SSH reverse-tunnel manager is shown in the detail area instead of a terminal.
     var tunnelsSelected = false
+    /// True when the「主管」panel (Super-agent tickets / needs-you / rules) is shown in the detail area.
+    var superagentSelected = false
+    /// The follow-up being written for a ticket (打回 / 回答 / 补充) — the sheet is hosted at the root.
+    var ticketFeedback: TicketFeedbackRequest?
     /// True when a group's Markdown note is shown in the detail area (which group = `groupNoteID`).
     var groupNoteSelected = false
     var groupNoteID: UUID?
@@ -62,6 +66,9 @@ final class AppModel {
     /// Session persistence (~/.tfa/sessions.db) — a disk snapshot of each local terminal so sessions
     /// (and AI conversations) survive a reboot / `tmux kill-server`, which wipe the in-memory server.
     var sessionStore = SessionStore()
+
+    /// Super-agent execution layer (主管 + 工单): runs the effects the engine queues in superagent.db.
+    let superagent = SuperagentRuntime()
 
     /// Per-session right-click menu state — shared by the sidebar row and the terminal area so both
     /// surfaces offer the same actions; its sheets/alerts are hosted once at the root.
@@ -150,6 +157,7 @@ final class AppModel {
         loadEnvironments()
         migrateLegacyKeysIfNeeded() // one-time: name-keyed env/groups/assignees → UUID keys
         startScheduler() // ONE heartbeat: activity sampling + session snapshots
+        startSuperagent()
         // The script 设置「安装 Shell 集成」sources (off main; writes only when it changed).
         Task.detached(priority: .utility) { ShellIntegrationScript.install() }
         activity.captureEnabled = !sidebarCollapsed
@@ -278,6 +286,13 @@ final class AppModel {
         return taken.contains("main") ? Self.lowestUnusedName(taken: taken) : "main"
     }
 
+    /// Add a session that already exists on the local server (made outside the sheet — e.g. a ticket
+    /// terminal) as a dormant row: attached only when selected, so it never steals focus.
+    @discardableResult
+    func openDiscovered(sessionName: String) -> ConnectionSession? {
+        open(TmuxConnection(endpoint: .local, sessionName: sessionName, attachOnly: true), connect: false)
+    }
+
     private func openLocal(sessionName: String, attachOnly: Bool = false, connect: Bool = true,
                            startDirectory: String? = nil) {
         open(TmuxConnection(endpoint: .local, sessionName: sessionName, attachOnly: attachOnly,
@@ -315,7 +330,10 @@ final class AppModel {
             // Shell integration (OSC 133): a long foreground command in a BACKGROUND shell finished —
             // notify with its exit code. Shares the same once-until-viewed bit as the burst path
             // (whichever fires first wins; the other stays quiet).
-            conn.onCommandFinished = { [weak conn] exit, seconds, wasViewing in
+            conn.onCommandFinished = { [weak self, weak conn] exit, seconds, wasViewing in
+                if let self, let conn, let exit, exit != 0, seconds >= Self.commandNotifyMinSeconds {
+                    self.superagentTerminalEvent(conn, "命令失败（exit \(exit)，用时 \(Int(seconds)) 秒）")
+                }
                 guard let conn, !wasViewing, !conn.notifiedSinceViewed,
                       seconds >= Self.commandNotifyMinSeconds else { return }
                 conn.noteNotified()
@@ -324,8 +342,9 @@ final class AppModel {
             // An agent explicitly pinged (bell / OSC notification) while in the background → a stronger,
             // separate system notification carrying the message, so "it needs you" stands out from the
             // routine "output finished".
-            conn.onNeedsAttention = { [weak conn] message in
+            conn.onNeedsAttention = { [weak self, weak conn] message in
                 guard let conn else { return }
+                self?.superagentTerminalEvent(conn, "agent 请求关注：\(message ?? "（无消息）")")
                 NotificationManager.needsAttention(terminal: conn.title, message: message)
             }
             connections.append(conn)
@@ -387,6 +406,13 @@ final class AppModel {
     private func clearToolPanes() {
         axisSelected = false; labSelected = false; skillsSelected = false
         claudeMdSelected = false; tunnelsSelected = false; groupNoteSelected = false
+        superagentSelected = false
+    }
+
+    /// Show the「主管」panel. Mutually exclusive with the other tool panes / a terminal.
+    func openSuperagent() {
+        clearToolPanes(); superagentSelected = true
+        leaveTerminals()
     }
 
     func openLab() {
@@ -1568,6 +1594,7 @@ final class AppModel {
     /// Cleanly tear down every live connection on app quit.
     /// Detach only — never kill sessions here, so they can be resumed on next launch.
     func shutdown() {
+        superagent.stopLoop()
         snapshotMetadataNow() // freshen the roster (cwd/command) so a clean quit restores accurately
         tunnelRunner.stopAll() // terminate ssh -R children so they don't orphan
         cloudflaredRunner.stopAll() // …and cloudflared children likewise

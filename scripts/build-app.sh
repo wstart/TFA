@@ -53,6 +53,13 @@ cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
 if [[ -x "$BIN_DIR/axis-claude" ]]; then
   cp "$BIN_DIR/axis-claude" "$APP/Contents/MacOS/axis-claude"
 fi
+# The `tfa` CLI the 主管 / ticket terminals use; TFA links ~/.tfa/bin/tfa to it at launch. It lives in
+# Contents/Helpers — NOT next to the app binary: the default macOS volume is case-insensitive, so
+# Contents/MacOS/tfa would overwrite Contents/MacOS/TFA.
+if [[ -x "$BIN_DIR/tfa" ]]; then
+  mkdir -p "$APP/Contents/Helpers"
+  cp "$BIN_DIR/tfa" "$APP/Contents/Helpers/tfa"
+fi
 
 # App icon: build AppIcon.icns from Icon.png (repo root) into Resources, if present. The standard
 # macOS iconset needs 16/32/128/256/512 at @1x and @2x; sips downscales the single source PNG to
@@ -116,9 +123,11 @@ if [[ -n "$SIGN_ID" ]] && security find-identity -v -p codesigning 2>/dev/null |
     fi
   done < <(find "$APP/Contents/Resources" -name "*.bundle" -print0)
   # Helper executables are signed on their own (hardened runtime) before the app seals them.
-  if [[ -f "$APP/Contents/MacOS/axis-claude" ]]; then
-    codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP/Contents/MacOS/axis-claude"
-  fi
+  for helper in MacOS/axis-claude Helpers/tfa; do
+    if [[ -f "$APP/Contents/$helper" ]]; then
+      codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP/Contents/$helper"
+    fi
+  done
   codesign --force --options runtime --timestamp \
     --entitlements "$ENTITLEMENTS" --sign "$SIGN_ID" "$APP"
   codesign --verify --strict --verbose=2 "$APP"

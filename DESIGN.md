@@ -20,7 +20,8 @@ work for a Chinese-heavy, dense, long-running terminal UI.
 
 ## Workspace interaction standard (2026-10)
 
-- Sidebar hierarchy: host · project pill + 待处理 button + “+” → terminal filter (with ⌘F search and new group beside it) → 在线/已断开 → the built-in「未分组」folder pinned on top, then group folders → tools. The project is chosen from the host pill's menu.
+- Sidebar hierarchy: host · project pill + 待处理 button + “+” → terminal filter (with ⌘F search and new group beside it) → 在线/已断开 → the pinned「主管」row → the built-in「未分组」folder, then group folders (ticket terminals collect in「工单」) → tools. The project is chosen from the host pill's menu.
+- Super-agent (2026-11): requests go to the「主管」terminal in natural language; it routes them into tickets, each executed in its own terminal + git worktree. People are interrupted only when a ticket needs them (待评审 / 等你回答 / 受阻 / 失败 / 送达失败 / 停下未回报) — those appear in 待处理, the dock's 主管 badge and the 主管 panel; progress stays silent.
 - Projects keep a local folder and stable terminal associations. New terminals inherit the selected folder; board tasks created in a project retain that project even before assignment. “全部项目” clears the filter.
 - Attention inbox is global: terminal errors/attention and unanswered, blocked or queued tasks remain visible across project filters. Viewing a terminal does not resolve an outstanding board question; replying records a task comment.
 - New-session sheet: ordinary shell / Codex / Claude Code; show CLI discovery status before creation. Never infer an exact conversation from “most recent”; use an explicitly bound UUID or the CLI picker.
@@ -167,6 +168,11 @@ else is monochrome ink/stone. Never add a fourth status color.
 
 ### Domain mappings
 
+**Ticket stages** (`Stage.tint` / `Stage.symbol` in `SuperagentStyle.swift`): every "needs a person"
+stage is amber — 等你回答 (questionmark.bubble), 待评审 (checkmark.seal), 受阻 (hand.raised),
+停下未回报 (pause.circle) — except 失败 (xmark.octagon) and 送达失败 (exclamationmark.triangle), which
+are brick. 工作中 is ink (hammer), 排队中 / 空闲 / 已停止 / 已放弃 stone, 已完成 sage.
+
 | Domain | neutral | pending | positive | active | attention | error |
 |--------|---------|---------|----------|--------|-----------|-------|
 | **Connection** | dormant · ended | connecting · reconnecting | connected | — | — | failed |
@@ -235,8 +241,25 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   rounded monospaced value, an optional 6px capsule usage bar (Charcoal; amber past 85%), a caption
   detail. Laid out in a 760pt column (two wide cards, then three small).
 - **Status capsule** (new-session sheet) — a 7px dot + caption on a 10% tint of the same status color.
-- **Tool dock** (模型 / 隧道 / 规则 / Skills / 实验室) — sidebar bottom; equal-width icon+label cells,
-  selected = filled charcoal cell with ivory glyph (mirrors a selected row).
+- **Tool dock** (主管 / 模型 / 隧道 / 规则 / Skills / 实验室) — sidebar bottom; equal-width icon+label cells,
+  selected = filled charcoal cell with ivory glyph (mirrors a selected row). 主管 carries a 7px amber
+  dot (chrome ring) while any ticket needs you.
+- **主管 row** — pinned at the top of the terminal list: a 22px charcoal badge with the
+  `person.crop.rectangle.stack` glyph, 「主管」 in `rowTitle`, and one subtitle line — 「N 个工单需要你」
+  (amber) / 「N 个工单进行中」 / 「未启动 · 点击启动」. The signal column shows an amber count capsule
+  while tickets need you, else the equalizer while the router works. Tapping it when not running
+  starts the router terminal.
+- **Ticket terminal row** — an ordinary terminal row whose subtitle reads `#id 阶段 · ack`; the stage
+  word takes its tint only when the ticket needs you, and a needing ticket gets the same amber wash
+  as a ringing terminal. The live output line still wins while the agent works.
+- **Ticket bar** — 34px strip under the terminal header of a ticket terminal: stage glyph + state
+  tag + `#id 标题`, the branch in a mono Cream chip, the latest question / report / ack in one
+  truncated line, then the stage's actions (待评审: 打回… + prominent 通过; 等你回答: prominent 回答…;
+  stuck: 补充… + prominent 重试; working: 补充…) and a quiet stop glyph. A needing stage tints the
+  strip at 6%. The 主管 terminal gets the same strip with a one-line explanation and 工单面板.
+- **主管 panel** — tool pane in the 760pt column: 主管 card (status, folder, 打开/启动), then 需要你
+  (only when non-empty; one white card per ticket with its actions), 进行中 (compact rows), 问题 (only
+  when effects keep failing), 最近结束, rules & accept mode, schedules, settings, decision log.
 - **Status indicator** — shared spinner-or-glyph component; symbol + tint + VoiceOver label.
 - **Terminal header** — 40px: sidebar toggle, name (`headerTitle`), a state tag (运行中 sage / 需要你
   amber / 连接失败 brick / 空闲·已断开 stone, tinted 12% fill), a muted monospaced `~` path, then small
