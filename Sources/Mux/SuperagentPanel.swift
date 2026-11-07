@@ -43,6 +43,7 @@ struct SuperagentPanel: View {
                         RowList(items: ended) { EndedRow(item: $0) }
                     }
                 }
+                RolesCard()
                 RulesCard()
                 SchedulesCard()
                 SettingsCard()
@@ -157,6 +158,9 @@ private struct NeedsYouCard: View {
     private func meta(_ t: Ticket) -> some View {
         let place = t.dir.isEmpty ? t.repo : t.dir
         return HStack(spacing: Theme.Space.md) {
+            if t.role != Role.developer {
+                Label(t.role, systemImage: "person").lineLimit(1)
+            }
             if !t.branch.isEmpty {
                 Label(t.branch, systemImage: "arrow.triangle.branch").lineLimit(1)
             }
@@ -228,6 +232,8 @@ private struct WorkingRow: View {
     private var line: String {
         if !item.ticket.ack.isEmpty { return item.ticket.ack }
         switch item.stage {
+        case .working(queued: true) where appModel.superagent.role(for: item.ticket).standing:
+            return "排队等「\(item.ticket.role)」空闲"
         case .working(queued: true): return "等待启动"
         case .idle: return "执行终端已停下"
         default: return "已启动，还没确认"
@@ -291,6 +297,121 @@ private struct DecisionRow: View {
             Spacer(minLength: Theme.Space.sm)
             Ago(time: d.createdAt)
         }
+    }
+}
+
+// MARK: - 角色
+
+private struct RoleDraft: Identifiable {
+    let id = UUID()
+    var role: Role
+    var isNew: Bool
+}
+
+/// 主管接单时先选角色（docs/superagent-roles.md）。内置角色的运行方式固定，接什么和主要行为可以改。
+private struct RolesCard: View {
+    @Environment(AppModel.self) private var appModel
+    @State private var editing: RoleDraft?
+    @State private var deleting: Role?
+
+    var body: some View {
+        let sa = appModel.superagent
+        VStack(alignment: .leading, spacing: Theme.Space.md) {
+            Text("角色").font(Theme.Font.rowTitle)
+            Text("主管按「接什么」选角色，再交给这个角色的 Agent；常驻角色一个终端接多张单。没有合适的，主管会先和你对焦再新建。")
+                .font(.caption).foregroundStyle(Theme.textTertiary)
+            ForEach(sa.roles) { r in
+                Hairline()
+                HStack(alignment: .top, spacing: Theme.Space.md) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: Theme.Space.sm) {
+                            Text(r.name).font(Theme.Font.rowTitle).lineLimit(1)
+                            Text(r.traits).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                        }
+                        Text(r.scope).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(2).help(r.scope)
+                    }
+                    Spacer(minLength: Theme.Space.sm)
+                    Button { editing = RoleDraft(role: r, isNew: false) } label: { Image(systemName: "pencil") }
+                        .buttonStyle(.borderless).help("编辑")
+                    if !r.isBuiltin {
+                        Button { deleting = r } label: { Image(systemName: "trash") }
+                            .buttonStyle(.borderless).foregroundStyle(Theme.textTertiary).help("删除")
+                    }
+                }
+            }
+            Button {
+                editing = RoleDraft(role: Role(name: "", scope: "", behavior: "", standing: true, edits: false, review: false), isNew: true)
+            } label: {
+                Label("添加角色", systemImage: "plus")
+            }
+        }
+        .saCard()
+        .sheet(item: $editing) { d in
+            RoleSheet(draft: d) { saved in attempt(sa) { sa.setRole(saved) } }
+        }
+        .alert("删除角色「\(deleting?.name ?? "")」？", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
+            Button("删除", role: .destructive) {
+                if let r = deleting { sa.deleteRole(r.name) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("它的终端不会被关掉；之后主管不能再把单交给它。")
+        }
+    }
+}
+
+private struct RoleSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let draft: RoleDraft
+    /// 保存；返回错误（nil = 成功）。
+    let save: (Role) -> String?
+    @State private var role = Role(name: "", scope: "", behavior: "", standing: true, edits: false, review: false)
+    @State private var error: String?
+
+    private var builtin: Bool { !draft.isNew && draft.role.isBuiltin }
+    private var valid: Bool {
+        !role.name.trimmingCharacters(in: .whitespaces).isEmpty
+            && !role.scope.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !role.behavior.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && role.behavior.count <= Role.maxBehavior
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.lg) {
+            Text(draft.isNew ? "添加角色" : "编辑角色「\(draft.role.name)」").font(Theme.Font.headerTitle)
+            if draft.isNew {
+                Field(title: "名称") {
+                    TextField("例如：运维", text: $role.name).textFieldStyle(.roundedBorder)
+                }
+            }
+            Field(title: "接什么（主管据此选角色）") {
+                TextField("例如：本机环境、构建和发布相关的操作", text: $role.scope, axis: .vertical)
+                    .textFieldStyle(.roundedBorder).lineLimit(1...3)
+            }
+            Field(title: "主要行为") {
+                TextEditor(text: $role.behavior).editorBox().frame(height: 140)
+            }
+            VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                Toggle("常驻：一个终端先后接这个角色的所有单（追问带上下文）", isOn: $role.standing)
+                Toggle("能改文件（否则只读）", isOn: $role.edits)
+                Toggle("交付后待评审（否则交付即结单）", isOn: $role.review)
+            }
+            .toggleStyle(.checkbox).font(.callout).disabled(builtin)
+            HStack(alignment: .firstTextBaseline) {
+                Text(builtin ? "内置角色的运行方式固定。" : "每单一个终端、能改文件的角色会建 git worktree。").foregroundStyle(Theme.textTertiary)
+                Spacer()
+                Text("\(role.behavior.count) / \(Role.maxBehavior)").monospacedDigit()
+                    .foregroundStyle(role.behavior.count > Role.maxBehavior ? Theme.Status.error : Theme.textTertiary)
+            }
+            .font(.caption)
+            SheetButtons(error: error, confirm: "保存", enabled: valid) {
+                error = save(role)
+                if error == nil { dismiss() }
+            }
+        }
+        .padding(Theme.Space.xl)
+        .frame(width: 480)
+        .onAppear { role = draft.role }
     }
 }
 

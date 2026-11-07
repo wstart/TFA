@@ -26,11 +26,11 @@ TFA 不是另写一个多路复用器，而是封装真实的 tmux：通过 tmux
 
 参考 DeepSeek 开源的 [Super-agent 原型](https://github.com/deepseek-ai/dsh-superagent-prototype)（MIT）：**尽量少占用人的注意力，尽量多给价值。**
 
-- 侧栏顶部的「主管」是一个 Claude Code 终端：你用自然语言提需求，它只做路由——接单、挂接、停止、转达，**不读代码也不能改文件**（只放行 `tfa` 命令）。
-- 每个工单一个执行终端（Claude Code，全部放行）+ 一个独立的 git worktree（`~/.tfa/worktrees/<仓库>-<号>`，分支 `tfa/<号>`），默认最多 3 个并行。
+- 侧栏顶部的「主管」是一个 Claude Code 终端：你用自然语言提需求，它只做路由——选角色、接单、挂接、停止、转达，**不读代码也不能改文件**（只放行 `tfa` 命令）。
+- 先定角色再接单：「助理」常驻一个终端，查资料、问答、分析和追问都交给它（不需要项目目录、只读、交付即结单）；「开发」每单一个执行终端（Claude Code，全部放行）+ 一个独立的 git worktree（`~/.tfa/worktrees/<仓库>-<号>`，分支 `tfa/<号>`），改完待评审，默认最多 3 个并行。没有合适的角色时，主管先和你对焦，再新建角色。
 - 执行者用 `tfa report` 结构化回报；只有**待评审、要你回答、受阻、失败**时才通知你，并出现在「待处理」和主管面板里。在工单条上点「通过」结单，「打回…」「回答…」把你的话原样送进执行终端。
 - 规则与主动接单（默认「只观察」）：普通终端里命令失败或 agent 求助时，主管按你写的规则研判，只观察模式只记录「本会接单」。还可以设每天定时提交的请求。
-- 状态在 `~/.tfa/superagent.db`；设计与原理见 [docs/superagent-design.md](docs/superagent-design.md)。
+- 状态在 `~/.tfa/superagent.db`；设计与原理见 [docs/superagent-design.md](docs/superagent-design.md)，角色见 [docs/superagent-roles.md](docs/superagent-roles.md)。
 
 ### 项目工作区与 Agent 协作
 

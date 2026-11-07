@@ -47,13 +47,22 @@ public enum TFACommand {
             return s
         }
 
-        /// 执行者命令的工单：`--ticket N`，否则 `$TFA_TICKET`。
+        /// 执行者命令的工单：`--ticket N`，否则 `$TFA_TICKET`；常驻角色的终端（`$TFA_AGENT`）里是它此刻在做的那张。
         func workerTicket(_ a: Args, _ command: String) throws -> Int64 {
             if let v = a.value("ticket") { return try ticketID(v, command) }
+            if let agent = env["TFA_AGENT"], !agent.isEmpty, (env["TFA_TICKET"] ?? "").isEmpty {
+                guard let id = try engine().currentTicket(agent: agent) else {
+                    throw SuperagentError("这是常驻「\(agent)」的终端，会先后处理多张单：用 --ticket <id> 指明工单（消息开头 [TFA #id] 里的 id）")
+                }
+                return id
+            }
             guard let v = env["TFA_TICKET"], !v.isEmpty else { throw SuperagentError("不在工单终端里（没有 TFA_TICKET）") }
             guard let id = parseTicketID(v) else { throw SuperagentError("TFA_TICKET 不是工单号：\(v)") }
             return id
         }
+
+        /// 在执行终端里（工单终端或常驻角色的终端）。
+        var inWorkerTerminal: Bool { !(env["TFA_TICKET"] ?? "").isEmpty || !(env["TFA_AGENT"] ?? "").isEmpty }
 
         /// 绝对、解析过符号链接的已有目录。
         func directory(_ path: String) throws -> String {
@@ -100,6 +109,13 @@ public enum TFACommand {
             case "-h", "--help": throw CLIError.help("eval")
             default: throw CLIError.usage("未知的子命令 eval \(sub)", command: "eval")
             }
+        case "role":
+            guard let sub = rest.first else { throw CLIError.usage("缺少子命令 set", command: "role") }
+            switch sub {
+            case "set": return try setRole(rest.dropFirst(), c)
+            case "-h", "--help": throw CLIError.help("role")
+            default: throw CLIError.usage("未知的子命令 role \(sub)", command: "role")
+            }
         case "ack": return try ack(rest, c)
         case "report": return try report(rest, c)
         case "handback": return try handback(rest, c)
@@ -116,8 +132,8 @@ public enum TFACommand {
         if resource != "ticket", a.positional.count > 1 { throw CLIError.usage("多余的参数：\(a.positional.dropFirst().joined(separator: " "))", command: "read") }
         switch resource {
         case nil:
-            // 执行终端里（有 TFA_TICKET）读本工单；主管读概览。
-            if a.value("ticket") != nil || !(c.env["TFA_TICKET"] ?? "").isEmpty {
+            // 执行终端里读本工单；主管读概览。
+            if a.value("ticket") != nil || c.inWorkerTerminal {
                 return Outcome(out: try Views.ticket(c.engine(), c.workerTicket(a, "read")))
             }
             return Outcome(out: try Views.overview(c.engine()))
@@ -126,7 +142,7 @@ public enum TFACommand {
             let id: Int64
             if a.positional.count == 2 {
                 id = try ticketID(a.positional[1], "read")
-            } else if a.value("ticket") != nil || !(c.env["TFA_TICKET"] ?? "").isEmpty {
+            } else if a.value("ticket") != nil || c.inWorkerTerminal {
                 id = try c.workerTicket(a, "read")
             } else {
                 throw CLIError.usage("缺少工单号", command: "read")
@@ -134,9 +150,10 @@ public enum TFACommand {
             return Outcome(out: try Views.ticket(c.engine(), id))
         case "candidates": return Outcome(out: try Views.candidates(c.engine()))
         case "rules": return Outcome(out: try Views.rules(c.engine()))
+        case "roles": return Outcome(out: try Views.roles(c.engine()))
         case "projects": return Outcome(out: KnownProjects.render(KnownProjects.list(env: c.env)))
         default:
-            throw CLIError.usage("未知的资源 \(resource!)（可用：ticket、candidates、rules、projects）", command: "read")
+            throw CLIError.usage("未知的资源 \(resource!)（可用：ticket、candidates、rules、roles、projects）", command: "read")
         }
     }
 
@@ -144,26 +161,43 @@ public enum TFACommand {
 
     private static func accept(_ args: ArraySlice<String>, _ c: Context) throws -> Outcome {
         let cmd = "route accept"
-        let a = try parse(args, cmd, values: ["title", "request", "dir", "note", "trigger"], flags: ["no-worktree"])
+        let a = try parse(args, cmd, values: ["title", "request", "dir", "note", "trigger", "role"], flags: ["no-worktree"])
         try noPositional(a, cmd)
         guard let title = a.value("title") else { throw CLIError.usage("缺少 --title（工单标题）", command: cmd) }
         let trigger = a.value("trigger").map(triggerID)
         // 接候选时请求原文和目录可以省略（沿用候选的）。
         let request = a.value("request") ?? (trigger == nil ? c.piped() : nil)
         guard request != nil || trigger != nil else { throw CLIError.usage("缺少 --request（请求原文；也可从 stdin 传入）", command: cmd) }
-        let repo = try a.value("dir").map(c.directory) ?? (trigger == nil ? c.directory(c.cwd) : "")
-        // 执行者全部放行：家目录 / 根目录不是项目。直接把 TFA 已知的项目目录给主管，让它按名字选。
-        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
-        if repo == home || repo == "/" {
-            throw SuperagentError("不能在\(repo == "/" ? "根目录" : "家目录")开工单：用 --dir 指定项目目录。\n"
-                                  + KnownProjects.render(KnownProjects.list(env: c.env)).trimmingCharacters(in: .newlines))
-        }
         let engine = try c.engine()
+        // 没写 --role 是旧用法：按「开发」接。
+        let role = try a.value("role").map { name -> Role in
+            guard let r = try engine.store.role(name) else {
+                throw SuperagentError("没有角色「\(name)」。\n" + (try Views.roles(engine)).trimmingCharacters(in: .newlines))
+            }
+            return r
+        }
+        let repo: String
+        if role?.standing == true {
+            // 常驻角色在自己的目录里干活：--dir 只说明问的是哪个项目，可以不给。
+            repo = try a.value("dir").map(c.directory) ?? ""
+        } else {
+            repo = try a.value("dir").map(c.directory) ?? (trigger == nil ? c.directory(c.cwd) : "")
+            // 执行者全部放行：家目录 / 根目录不是项目。直接把 TFA 已知的项目目录给主管，让它按名字选。
+            let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+            if repo == home || repo == "/" {
+                var message = "不能在\(repo == "/" ? "根目录" : "家目录")开工单：用 --dir 指定项目目录。"
+                if role == nil { message += "不改文件的事（查资料、问答）交给常驻角色：--role \(Role.assistant)，不需要目录。" }
+                throw SuperagentError(message + "\n" + KnownProjects.render(KnownProjects.list(env: c.env)).trimmingCharacters(in: .newlines))
+            }
+        }
         let existed = try trigger.flatMap { try engine.store.trigger($0)?.ticketID } != nil
-        let t = try engine.accept(.init(title: title, request: request ?? "", repo: repo, note: a.value("note") ?? "",
-                                        worktree: a.flags.contains("no-worktree") ? false : nil, triggerID: trigger))
+        let t = try engine.accept(.init(title: title, request: request ?? "", repo: repo, role: role?.name ?? Role.developer,
+                                        note: a.value("note") ?? "", worktree: a.flags.contains("no-worktree") ? false : nil,
+                                        triggerID: trigger))
         if existed, let trigger { return Outcome(out: "候选 \(trigger) 已经接过单：#\(t.id)「\(t.title)」，没有重复建单。\n") }
-        return Outcome(out: "已接单 #\(t.id)「\(t.title)」：执行终端即将启动。\n", changed: true)
+        let target = role?.standing == true ? "交给常驻「\(t.role)」，它空闲时送达" : "执行终端即将启动"
+        let who = t.role == Role.developer ? "" : "（\(t.role)）"
+        return Outcome(out: "已接单 #\(t.id)「\(t.title)」\(who)：\(target)。\n", changed: true)
     }
 
     private static func attach(_ args: ArraySlice<String>, _ c: Context) throws -> Outcome {
@@ -244,6 +278,22 @@ public enum TFACommand {
             return Outcome(out: "只观察：候选 \(trigger) 记为 would_accept，没有建工单（接单模式「\(try engine.store.acceptMode().label)」）。\n", changed: true)
         }
         return Outcome(out: "已忽略候选 \(trigger)。\n", changed: true)
+    }
+
+    private static func setRole(_ args: ArraySlice<String>, _ c: Context) throws -> Outcome {
+        let cmd = "role set"
+        let a = try parse(args, cmd, values: ["name", "scope", "behavior"], flags: ["per-ticket", "edits", "review"])
+        try noPositional(a, cmd)
+        guard let name = a.value("name") else { throw CLIError.usage("缺少 --name（角色名称）", command: cmd) }
+        guard let scope = a.value("scope") else { throw CLIError.usage("缺少 --scope（一句话：这个角色接什么任务）", command: cmd) }
+        guard let behavior = a.value("behavior") ?? c.piped() else {
+            throw CLIError.usage("缺少 --behavior（主要行为；也可从 stdin 传入）", command: cmd)
+        }
+        let role = Role(name: name, scope: scope, behavior: behavior, standing: !a.flags.contains("per-ticket"),
+                        edits: a.flags.contains("edits"), review: a.flags.contains("review"))
+        let r = try c.engine().setRole(role, by: "主管")
+        return Outcome(out: "已\(r.created ? "新建" : "更新")角色「\(r.role.name)」（\(r.role.traits)）。接单用 tfa route accept --role \(r.role.name) …\n",
+                       changed: true)
     }
 
     // MARK: - 执行者
@@ -395,15 +445,19 @@ public enum TFACommand {
         Entry(command: "read ticket", usage: "tfa read ticket [<id>]", about: "工单详情：原始请求、全部消息、最新回报、时间线", worker: false),
         Entry(command: "read candidates", usage: "tfa read candidates", about: "待决定的候选（退回 / 定时 / 推断），附接单或研判命令", worker: false),
         Entry(command: "read rules", usage: "tfa read rules", about: "接单模式、规则版本、启用的规则", worker: false),
+        Entry(command: "read roles", usage: "tfa read roles", about: "现有角色：各自接什么、运行方式、主要行为。接单前按它选 --role", worker: false),
         Entry(command: "read projects", usage: "tfa read projects", about: "TFA 已知的项目目录（各终端所在目录 + 工作区项目），人没说目录时按名字选", worker: false),
         Entry(command: "route accept",
-              usage: "tfa route accept --title T [--request 原文] [--dir 目录] [--note 备注] [--no-worktree] [--trigger tN]",
-              about: "接单并启动执行终端。--dir 默认当前目录；接候选（--trigger）时可省略 --request / --dir", worker: false),
+              usage: "tfa route accept --title T --role 角色 [--request 原文] [--dir 目录] [--note 备注] [--no-worktree] [--trigger tN]",
+              about: "按角色接单：常驻角色交给它的终端（--dir 可省略）；每单角色启动新的执行终端（--dir 默认当前目录）。接候选（--trigger）时可省略 --request / --dir", worker: false),
         Entry(command: "route attach", usage: "tfa route attach <id> [--request 原文]", about: "把人的明确请求转达给已有工单", worker: false),
         Entry(command: "route stop", usage: "tfa route stop <id> [--reason 原因]", about: "停止工单（只在人明确要求时）", worker: false),
         Entry(command: "route ignore", usage: "tfa route ignore --trigger tN --reason 原因", about: "不接一个候选", worker: false),
         Entry(command: "request-status", usage: "tfa request-status <id>", about: "请停下没回报的执行者回报状态", worker: false),
         Entry(command: "retry", usage: "tfa retry <id>", about: "重试受阻 / 失败 / 送达失败 / 停下未回报 / 空闲的工单", worker: false),
+        Entry(command: "role set",
+              usage: "tfa role set --name 名称 --scope 接什么 [--behavior 主要行为] [--per-ticket] [--edits] [--review]",
+              about: "和人对焦后新建或更新角色。默认常驻、只读、直接交付；--per-ticket 每单一个终端，--edits 能改文件，--review 交付后待评审。主要行为可从 stdin 传入", worker: false),
         Entry(command: "eval decide",
               usage: "tfa eval decide --trigger tN --version V --rule id=match|no_match|requires_design_decision [--rule …] --decision accept|ignore [--title T] --reason 原因",
               about: "研判推断出的候选：每条启用的规则判断一次；方向不明确就 requires_design_decision 并 ignore", worker: false),
@@ -432,7 +486,7 @@ public enum TFACommand {
         let router = picked.filter { !$0.worker }, worker = picked.filter(\.worker)
         var s = command.isEmpty ? "tfa — 主管和执行终端与 TFA 交互的命令行\n\n" : ""
         if !router.isEmpty { s += "主管：\n" + section(router) }
-        if !worker.isEmpty { s += (router.isEmpty ? "" : "\n") + "执行者（工单号取 --ticket N，否则 $TFA_TICKET）：\n" + section(worker) }
+        if !worker.isEmpty { s += (router.isEmpty ? "" : "\n") + "执行者（工单号取 --ticket N，否则 $TFA_TICKET；常驻角色的终端里写 --ticket N）：\n" + section(worker) }
         if command.isEmpty {
             s += "\n长文本用 --flag 值 或 --flag=值；省略 --request 时从 stdin 读（可用 heredoc）。工单号写 12 或 \"#12\"。\n"
             s += "出错退出码 1，用法错误退出码 2。\n"

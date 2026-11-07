@@ -220,7 +220,7 @@ extension SuperagentEngine {
                                       text: s.request, repo: s.repo, status: .pending, ticketID: nil, createdAt: at)
                 try store.insertTrigger(trigger)
                 try store.insertRelay(ticketID: nil, text: "[TFA 定时 \(trigger.id)] 「\(s.name)」到点了：\(Self.clip(s.request, 400))（目录 \(s.repo)）。"
-                                      + "接单用 tfa route accept --trigger \(trigger.id) --title …；今天不需要就 tfa route ignore --trigger \(trigger.id) --reason …", at: at)
+                                      + "接单用 tfa route accept --trigger \(trigger.id) --role … --title …；今天不需要就 tfa route ignore --trigger \(trigger.id) --reason …", at: at)
                 try store.enqueue(.relay, "router", at: at)
                 try store.log(nil, "schedule", "\(s.name) 到点 → \(trigger.id)", at: at)
                 fired.append(trigger)

@@ -12,7 +12,10 @@ public enum SuperagentPaths {
     /// 主管 / 执行者的 system prompt 文件（App 启动时写入）。
     public static var promptsDir: URL { home.appendingPathComponent("superagent", isDirectory: true) }
     public static var routerPrompt: URL { promptsDir.appendingPathComponent("router.md") }
-    public static var workerPrompt: URL { promptsDir.appendingPathComponent("worker.md") }
+    /// 每个角色的执行者 prompt（通用规则 + 角色的运行方式与主要行为）。
+    public static func rolePrompt(_ role: String) -> URL { promptsDir.appendingPathComponent("role-\(role).md") }
+    /// 常驻角色的工作目录在这里：`<agentsDir>/<角色>`（不是项目，问到项目时去项目目录读）。
+    public static var agentsDir: URL { home.appendingPathComponent("agents", isDirectory: true) }
     /// `tfa` 命令行的符号链接所在目录（执行终端和主管的 PATH 前缀）。
     public static var binDir: URL { home.appendingPathComponent("bin", isDirectory: true) }
     /// 每个工单的 git worktree 放在这里：`<repo名>-<工单号>`。

@@ -65,6 +65,8 @@ public final class SuperagentEngine {
         public var title: String
         public var request: String
         public var repo: String
+        /// 接这张单的角色（`tfa read roles`）。
+        public var role: String = Role.developer
         public var note: String = ""
         /// nil = 用设置里的默认值。
         public var worktree: Bool?
@@ -72,9 +74,9 @@ public final class SuperagentEngine {
         public var triggerID: String?
         public var by: String = "主管"
 
-        public init(title: String, request: String, repo: String, note: String = "", worktree: Bool? = nil,
-                    triggerID: String? = nil, by: String = "主管") {
-            self.title = title; self.request = request; self.repo = repo; self.note = note
+        public init(title: String, request: String, repo: String, role: String = Role.developer, note: String = "",
+                    worktree: Bool? = nil, triggerID: String? = nil, by: String = "主管") {
+            self.title = title; self.request = request; self.repo = repo; self.role = role; self.note = note
             self.worktree = worktree; self.triggerID = triggerID; self.by = by
         }
     }
@@ -90,6 +92,7 @@ public final class SuperagentEngine {
         guard !request.isEmpty || r.triggerID != nil else { throw SuperagentError("缺少 --request（请求原文）") }
         guard Self.words(r.note) <= 30 else { throw SuperagentError("路由备注最多 30 词：只写路由背景或人的明确约束，不写实现方案") }
         return try store.transaction {
+            let role = try requireRole(r.role)
             let at = now()
             var trigger: Trigger
             if let tid = r.triggerID {
@@ -105,7 +108,7 @@ public final class SuperagentEngine {
             }
             let repo = r.repo.isEmpty ? trigger.repo : r.repo
             let id = try createTicket(trigger: &trigger, title: title, request: request.isEmpty ? trigger.text : request,
-                                      repo: repo, note: r.note, worktree: r.worktree, by: r.by, rules: [:])
+                                      repo: repo, note: r.note, worktree: r.worktree, by: r.by, rules: [:], role: role)
             return try requireTicket(id)
         }
     }
@@ -132,11 +135,13 @@ public final class SuperagentEngine {
             var t = try requireTicket(id)
             guard t.status == .open else { throw SuperagentError("工单 #\(id) 已经结束") }
             let at = now()
+            // 常驻 Agent 同时管着别的单：只有它此刻正在做这张单时才中断。
+            let interrupt = try !(store.role(t.role)?.standing ?? false) || inTurn(view(t))
             try end(&t, .stopped, by: by, at: at)
             try store.dropUndelivered(id)
             try store.dropEffect(.deliver, String(id))
             try store.dropEffect(.launch, String(id))
-            if !t.session.isEmpty { try store.enqueue(.stop, String(id), at: at) }
+            if !t.session.isEmpty, interrupt { try store.enqueue(.stop, String(id), at: at) }
             try store.log(id, "stopped", reason.isEmpty ? "\(by) 停止了工单" : "\(by) 停止了工单：\(reason)", at: at)
         }
     }
@@ -245,8 +250,13 @@ public final class SuperagentEngine {
             if r.state == .ready { t.attention = nil }
             if let ask { t.attention = String(ask.prefix(500)) }
             t.updatedAt = at
+            // 不需要评审的角色（如助理）：ready 就是交付，工单自动结束——除非人的跟进还排着没送到。
+            let role = try store.role(t.role)
+            let delivered = try r.state == .ready && role?.review == false && store.undelivered(id).isEmpty
             if r.state == .dropped {
                 try end(&t, .dropped, by: "执行者", at: at)
+            } else if delivered {
+                try end(&t, .done, by: t.role, at: at)
             } else {
                 try store.saveTicket(t)
             }
@@ -255,6 +265,7 @@ public final class SuperagentEngine {
             let head = "[TFA] 工单 #\(id)「\(t.title)」"
             var relay: String?
             switch r.state {
+            case .ready where delivered: relay = "\(head)（\(t.role)）已交付，工单已自动结束：\(Self.clip(summary, 600))"
             case .ready: relay = "\(head)已就绪待评审：\(Self.clip(summary, 300))"
             case .blocked: relay = "\(head)受阻：\(Self.clip(summary, 300))"
             case .failed: relay = "\(head)失败：\(Self.clip(summary, 300))"
@@ -281,7 +292,7 @@ public final class SuperagentEngine {
             try store.insertTrigger(trigger)
             try store.log(id, "handback", "退回 \(trigger.id)：\(reason)", at: at)
             try queueRelay(id, "[TFA] 工单 #\(id) 退回了一个超出范围的请求（候选 \(trigger.id)）：\(Self.clip(request, 300))；原因：\(Self.clip(reason, 120))。"
-                           + "接单用 tfa route accept --trigger \(trigger.id) --title …，不接用 tfa route ignore --trigger \(trigger.id) --reason …；不要挂回 #\(id)。", at: at)
+                           + "接单用 tfa route accept --trigger \(trigger.id) --role … --title …，不接用 tfa route ignore --trigger \(trigger.id) --reason …；不要挂回 #\(id)。", at: at)
             return trigger.id
         }
     }
@@ -326,11 +337,16 @@ public final class SuperagentEngine {
             t.session = session
             t.dir = dir
             t.branch = branch
-            // 启动途中工单被停掉 / 结束了：刚起来的 agent 立即中断，不让它在没人要的工单上干活。
+            // 启动途中工单被停掉：刚起来的 agent 立即中断，不让它在没人要的工单上干活。
+            // 它自己在启动途中就交付了（直接交付的角色）或放弃了：不用中断。
             guard t.status == .open else {
                 try store.saveTicket(t)
-                try store.enqueue(.stop, String(id), at: at)
-                try store.log(id, "launched", "工单已结束，中断刚启动的 agent", at: at)
+                if t.status == .stopped {
+                    try store.enqueue(.stop, String(id), at: at)
+                    try store.log(id, "launched", "工单已结束，中断刚启动的 agent", at: at)
+                } else {
+                    try store.log(id, "launched", "执行终端 \(session)（启动途中已经交付）", at: at)
+                }
                 return
             }
             t.deliveryError = nil
@@ -509,19 +525,29 @@ public final class SuperagentEngine {
 
     /// 建 Ticket + Mandate + 待启动的 Assignment，并入队 launch（调用方在事务里）。
     func createTicket(trigger: inout Trigger, title: String, request: String, repo: String, note: String,
-                      worktree: Bool?, by: String, rules: [String: String]) throws -> Int64 {
-        guard !repo.isEmpty else { throw SuperagentError("缺少 --dir（工单要改的目录）") }
-        // 执行者全部放行：家目录或根目录不是一个项目，不能让它在那里干活。
+                      worktree: Bool?, by: String, rules: [String: String], role: Role? = nil) throws -> Int64 {
+        let role = try role ?? requireRole(Role.developer)
         let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
-        guard URL(fileURLWithPath: repo).standardizedFileURL.path != home, repo != "/" else {
-            throw SuperagentError("工单目录不能是家目录或根目录：用 --dir 指明要改的项目目录")
+        let notProject = repo.isEmpty || repo == "/" || URL(fileURLWithPath: repo).standardizedFileURL.path == home
+        var repo = repo
+        if role.standing {
+            // 常驻角色在自己的目录里干活：目录只是「问的是哪个项目」，家目录 / 根目录等于没给。
+            if notProject { repo = "" }
+        } else {
+            guard !repo.isEmpty else { throw SuperagentError("缺少 --dir（工单要改的目录）") }
+            // 执行者全部放行：家目录或根目录不是一个项目，不能让它在那里干活。
+            guard !notProject else {
+                throw SuperagentError("工单目录不能是家目录或根目录：用 --dir 指明要改的项目目录")
+            }
         }
         let at = now()
         let version = try store.policyVersion()
         let mandate = try Self.json(["strength": trigger.strength.rawValue, "trigger": trigger.id,
                                      "policy_version": version, "by": by, "rules": rules])
-        let ticket = Ticket(id: 0, title: title, request: request, note: note,
-                            repo: repo, dir: "", branch: "", worktree: try worktree ?? store.settings().worktree,
+        // 只有每单一个终端、能改文件的角色才建 worktree（只读的角色不需要隔离改动）。
+        let isolate = !role.standing && role.edits ? try worktree ?? store.settings().worktree : false
+        let ticket = Ticket(id: 0, title: title, role: role.name, request: request, note: note,
+                            repo: repo, dir: "", branch: "", worktree: isolate,
                             status: .open, endedBy: nil, endedAt: nil,
                             ack: "", attention: nil, reportState: nil, reportSummary: "", reportPath: nil, reportAt: nil,
                             deliveryError: nil, nudged: false, notifiedStage: nil, mandate: mandate, triggerID: trigger.id,
@@ -533,7 +559,7 @@ public final class SuperagentEngine {
                                  rules: try Self.json(rules), at: at)
         _ = try store.insertAssignment(ticketID: id, reason: "accepted", at: at)
         try store.enqueue(.launch, String(id), at: at)
-        try store.log(id, "accepted", "\(by) 接单：\(title)", at: at)
+        try store.log(id, "accepted", "\(by) 接单：\(title)（\(role.name)）", at: at)
         return id
     }
 

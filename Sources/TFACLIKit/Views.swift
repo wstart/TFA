@@ -23,10 +23,12 @@ enum Views {
         return s
     }
 
-    /// `#12 [待评审] 标题 · 目录 · 最后回报摘要`
+    /// `#12 [待评审] 标题 · 目录 · 最后回报摘要`；不是「开发」的单在标题后写角色：`#13 [工作中] 标题 · 助理`。
     static func line(_ v: TicketView) -> String {
         let t = v.ticket
-        var s = "#\(t.id) [\(v.stage.label)] \(t.title) · \(t.repo)"
+        var s = "#\(t.id) [\(v.stage.label)] \(t.title)"
+        if t.role != Role.developer { s += " · \(t.role)" }
+        if !t.repo.isEmpty { s += " · \(t.repo)" }
         if let e = t.deliveryError { s += " · \(clip(e, 80))" }
         if !t.reportSummary.isEmpty { s += " · \(clip(t.reportSummary, 80))" }
         if let q = t.attention { s += " · 问：\(clip(q, 80))" }
@@ -39,7 +41,9 @@ enum Views {
         let v = try engine.view(id)
         let t = v.ticket
         var s = "#\(t.id)「\(t.title)」 \(v.stage.label)\(t.endedBy.map { "（由\($0)结束）" } ?? "")\n"
-        s += "目录：\(t.repo)\n"
+        let role = try engine.store.role(t.role)
+        s += "角色：\(t.role)\(role.map { "（\($0.traits)）" } ?? "")\n"
+        s += "目录：\(t.repo.isEmpty ? "没有（不针对某个项目）" : t.repo)\n"
         if !t.dir.isEmpty { s += "工作目录：\(t.dir)\(t.branch.isEmpty ? "" : "（分支 \(t.branch)）")\n" }
         if !t.session.isEmpty { s += "终端：\(t.session)\n" }
         if let m = mandate(t.mandate) { s += m + "\n" }
@@ -104,7 +108,7 @@ enum Views {
             s += "\n\(t.id) [\(strength(t.strength))] 来源 \(t.source) · 目录 \(t.repo) · \(time(t.createdAt))\n\(t.text)\n"
             switch t.strength {
             case .explicit:
-                s += "→ 接单：tfa route accept --trigger \(t.id) --title …；不接：tfa route ignore --trigger \(t.id) --reason …\n"
+                s += "→ 接单：tfa route accept --trigger \(t.id) --role … --title …；不接：tfa route ignore --trigger \(t.id) --reason …\n"
             case .inferred:
                 let verdicts = rules.map { " --rule \($0.id)=match|no_match|requires_design_decision" }.joined()
                 s += "→ 研判：tfa eval decide --trigger \(t.id) --version \(version)\(verdicts) --decision accept|ignore [--title …] --reason …\n"
@@ -122,6 +126,17 @@ enum Views {
         guard !enabled.isEmpty else { return s + "启用的规则：没有\n" }
         s += "启用的规则（\(enabled.count)）：\n"
         for r in enabled { s += "\n\(r.id)「\(r.name)」\n\(r.instruction)\n" }
+        return s
+    }
+
+    // MARK: - 角色
+
+    static func roles(_ engine: SuperagentEngine) throws -> String {
+        let roles = try engine.store.roles()
+        var s = "现有角色（\(roles.count)，接单时按「接什么」选一个，写 --role 名称；都不合适就先和人对焦，再 tfa role set 新建）：\n"
+        for r in roles {
+            s += "\n\(r.name)（\(r.traits)）\n接什么：\(r.scope)\n主要行为：\n\(r.behavior)\n"
+        }
         return s
     }
 

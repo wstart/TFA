@@ -20,6 +20,9 @@ final class SuperagentRuntime {
     private(set) var mode: AcceptMode = .observe
     private(set) var policyVersion = ""
     private(set) var schedules: [Schedule] = []
+    private(set) var roles: [Role] = Role.builtins
+    /// 常驻角色的终端（会话名）：侧栏把它们归进「角色」分组。
+    private(set) var agentSessions: Set<String> = []
     /// 「主管」终端的 tmux 会话名（没开 = nil）。
     private(set) var routerSession: String?
     /// 打开数据库失败等：面板顶部显示。
@@ -30,9 +33,15 @@ final class SuperagentRuntime {
     }
     var openTickets: [TicketView] { views.filter { $0.ticket.isOpen } }
 
-    /// 某个终端（会话名）对应的工单。
+    /// 某个终端（会话名）对应的工单。常驻角色的终端先后处理多张单：等人的优先，然后是打开的，最后是最近结束的。
     func ticket(forSession name: String) -> TicketView? {
-        views.first { $0.ticket.session == name && !$0.ticket.session.isEmpty }
+        let mine = views.filter { $0.ticket.session == name && !$0.ticket.session.isEmpty }
+        return mine.first { $0.stage.needsPerson != nil } ?? mine.first { $0.ticket.isOpen } ?? mine.first
+    }
+
+    /// 工单的角色（角色被删了就按「开发」）。
+    func role(for t: Ticket) -> Role {
+        roles.first { $0.name == t.role } ?? Role.builtins.first { $0.name == Role.developer }!
     }
 
     // MARK: 依赖（AppModel 注入；测试注入假的）
@@ -44,14 +53,16 @@ final class SuperagentRuntime {
     /// 人刚在这个终端里打过字 → 先别往里打（会和人的输入混在一起）。
     @ObservationIgnored var userTypedRecently: ((_ session: String) -> Bool)?
     @ObservationIgnored var postNotification: ((_ title: String, _ body: String) -> Void)?
-    /// 执行终端里启动 agent 的命令行（kickoff = 第一条消息）。
-    @ObservationIgnored var workerCommand: (_ ticket: Ticket, _ kickoff: String) -> String = SuperagentRuntime.claudeWorkerCommand
+    /// 执行终端里启动 agent 的命令行（kickoff = 第一条消息）。nil = Claude Code，按工单的角色。
+    @ObservationIgnored var workerCommand: ((_ ticket: Ticket, _ kickoff: String) -> String)?
     @ObservationIgnored var routerCommand: () -> String = SuperagentRuntime.claudeRouterCommand
     /// 送达后等回显的时间（测试可调小）。
     @ObservationIgnored var echoWait: Double = 2.0
     /// agent 启动的最长等待。
     @ObservationIgnored var launchWait: Double = 15
     @ObservationIgnored var worktreeRoot = SuperagentPaths.worktreesDir
+    /// 常驻角色各自的目录：`<agentsRoot>/<角色>`。
+    @ObservationIgnored var agentsRoot = SuperagentPaths.agentsDir
     @ObservationIgnored var clock: () -> Double = { Date().timeIntervalSince1970 }
 
     @ObservationIgnored private var passing = false
@@ -104,9 +115,9 @@ final class SuperagentRuntime {
 
     /// prompt 文件 + `~/.tfa/bin/tfa` → App 包里的 `tfa`（开发构建：和 Mux 同目录）。
     private func installSupport() {
-        let acceptance = settings.acceptance
+        let acceptance = settings.acceptance, roles = roles
         Task.detached(priority: .utility) {
-            SuperagentPrompts.install(acceptance: acceptance)
+            SuperagentPrompts.install(acceptance: acceptance, roles: roles)
             Self.installCLI()
         }
     }
@@ -148,8 +159,13 @@ final class SuperagentRuntime {
     func saveSettings(_ s: Settings) {
         let acceptanceChanged = s.acceptance != settings.acceptance
         act { try $0.store.saveSettings(s) }
-        if acceptanceChanged { Task.detached(priority: .utility) { SuperagentPrompts.install(acceptance: s.acceptance) } }
+        let roles = roles
+        if acceptanceChanged { Task.detached(priority: .utility) { SuperagentPrompts.install(acceptance: s.acceptance, roles: roles) } }
     }
+
+    /// 新建 / 更新 / 删除角色（面板）。
+    func setRole(_ r: Role) { act { _ = try $0.setRole(r) } }
+    func deleteRole(_ name: String) { act { try $0.deleteRole(name) } }
 
     /// 最近一次操作的错误（界面弹出后清掉）。
     var actionError: String?
@@ -234,6 +250,8 @@ final class SuperagentRuntime {
         if let snap {
             let router = snap.first(where: \.isRouter)?.session
             if router != routerSession { routerSession = router }
+            let agents = Set(snap.filter { $0.agent != nil }.map(\.session))
+            if agents != agentSessions { agentSessions = agents }
         }
         await reconcile(open: open, snap: snap)
         // 先通知 / 中断 / 转达 / 送达，最后才启动新的（唤醒优先于新建）。
@@ -264,7 +282,7 @@ final class SuperagentRuntime {
                 lostPasses[t.id] = nil; exitedPasses[t.id] = nil
                 continue
             }
-            guard let pane = snap.first(where: { $0.ticket == t.id }) else {
+            guard let pane = pane(for: t, in: snap) else {
                 lostPasses[t.id, default: 0] += 1
                 if lostPasses[t.id]! >= 2 { lostPasses[t.id] = nil; try? engine.sessionLost(t.id) }
                 continue
@@ -313,7 +331,9 @@ final class SuperagentRuntime {
         case .stop:
             // 快照偶尔失败：停止命令不能丢，稍后再来。
             guard let snap else { return .later(3) }
-            guard let id = Int64(e.key), let pane = snap.first(where: { $0.ticket == id }) else { return .done }
+            guard let id = Int64(e.key), let t = try? engine.store.ticket(id), let pane = pane(for: t, in: snap) else { return .done }
+            // 常驻 Agent 已经在做别的单了：不打断它。
+            if role(for: t).standing, (try? engine.agentBusy(t.role, excluding: id)) ?? true { return .done }
             let tmux = self.tmux
             await Task.detached { Self.interrupt(tmux, pane.pane) }.value
             return .done
@@ -349,12 +369,16 @@ final class SuperagentRuntime {
         let wake = a.reason != "accepted"
         let busy = (try? engine.busyCount(excluding: id)) ?? 0
         if busy >= settings.slots + (wake ? 1 : 0) { return .later(3) }
+        let role = role(for: t)
+        // 每次启动前写好角色的 prompt：角色可能刚由主管新建，或被人改过。
+        if workerCommand == nil { _ = try? SuperagentPrompts.installRole(role, acceptance: settings.acceptance) }
+        if role.standing { return await performStandingLaunch(t, a, role, snap: snap) }
 
         let tmux = self.tmux
         let root = worktreeRoot
         let existing = snap.first { $0.ticket == id }
         let kickoff = "[TFA #\(id)] 你负责工单 #\(id)「\(t.title)」。先运行 tfa read ticket 读取请求原文和全部消息，然后开始。"
-        let commandLine = workerCommand(t, kickoff)
+        let commandLine = command(t, role, kickoff)
         let wait = launchWait
         let taken = Set(snap.map(\.session))
         let sentAt = clock()
@@ -378,12 +402,78 @@ final class SuperagentRuntime {
         }
     }
 
+    /// 常驻角色：一个终端先后处理这个角色的所有单，一次一张。终端没有（或 agent 退出了）就按角色定义
+    /// 生成它；它在跑就把新单的开场白打进去。同一终端里已经知道的单（跟进 / 重试）交给 deliver。
+    private func performStandingLaunch(_ t: Ticket, _ a: Assignment, _ role: Role, snap: [SuperagentPane]) async -> Outcome {
+        guard let engine else { return .later(3) }
+        let id = t.id
+        if (try? engine.agentBusy(role.name, excluding: id)) ?? true { return .later(3) }
+        // 快照可能是这一轮开头的：同一轮里前一张单也许刚建了这个角色的终端。
+        let tmux = self.tmux
+        let live = await Task.detached(priority: .userInitiated) { tmux.snapshot() }.value ?? snap
+        let existing = live.first { $0.agent == role.name }
+        let kickoff = "[TFA #\(id)·a\(a.id)] 新工单 #\(id)「\(t.title)」交给你（\(role.name)）。先运行 tfa read ticket \(id) 读取请求原文和全部消息，然后开始；本单的 tfa 命令都带 --ticket \(id)。"
+        let dir = agentsRoot.appendingPathComponent(role.name, isDirectory: true).path
+        let sentAt = clock()
+        if let pane = existing, !pane.isPlainShell {
+            // 同一会话里已经交给过它的单：排队的消息走 deliver（开头带工单号）。
+            if a.reason != "accepted", pane.session == t.session {
+                do { try engine.launched(id, session: pane.session, dir: dir, branch: "", agentStarted: false, sentAt: sentAt) }
+                catch { return .failed("\(error)") }
+                return .done
+            }
+            if let wait = gate(pane) { return wait }
+            switch await typeAndVerify(pane.pane, kickoff, marker: "#\(id)·a\(a.id)") {
+            case .dialog:
+                if dialogStuck(key: EffectKind.launch.rawValue + String(id)) {
+                    try? engine.deliveryBlocked(id, reason: "「\(role.name)」的终端在等人确认一个对话框，新工单送不进去")
+                }
+                return .later(5)
+            case .notReady: return .later(3)
+            case .notEchoed: return .failed("没有在「\(role.name)」的终端 \(pane.session) 里看到新工单的开场白")
+            case .delivered: break
+            }
+            dialogSince[EffectKind.launch.rawValue + String(id)] = nil
+            do { try engine.launched(id, session: pane.session, dir: dir, branch: "", agentStarted: true, sentAt: sentAt) }
+            catch { return .failed("\(error)") }
+            return .done
+        }
+        // 还没有这个角色的终端（或里面的 agent 退出了）：按角色定义生成。
+        let commandLine = command(t, role, kickoff)
+        let wait = launchWait
+        let key = existing?.pane ?? ""
+        let mayRetype = key.isEmpty || clock() - (retypedAt[key] ?? 0) > 30
+        if existing != nil {
+            guard mayRetype else { return .later(10) }
+            retypedAt[key] = clock()
+        }
+        let name = role.name
+        let result = await Task.detached(priority: .userInitiated) {
+            Self.launch(tmux, ticket: t, existing: existing, taken: Set(live.map(\.session)), root: URL(fileURLWithPath: dir),
+                        commandLine: commandLine, wait: wait, mayRetype: mayRetype, agent: name)
+        }.value
+        switch result {
+        case .success(let r):
+            do { try engine.launched(id, session: r.session, dir: r.dir, branch: "", agentStarted: r.started, sentAt: sentAt) }
+            catch { return .failed("\(error)") }
+            if r.created {
+                agentSessions.insert(r.session)
+                onSessionCreated?(r.session, false)
+            }
+            return .done
+        case .failure(let e):
+            return .failed("\(e)")
+        }
+    }
+
     private func performDeliver(_ e: Effect, _ id: Int64, snap: [SuperagentPane]?) async -> Outcome {
         guard let engine, let snap else { return .later(3) }
         guard let t = try? engine.store.ticket(id), t.isOpen else { return .done }
         let pending = (try? engine.store.undelivered(id)) ?? []
         guard let last = pending.last else { return .done }
-        guard let pane = snap.first(where: { $0.ticket == id }) else { return .later(5) }
+        guard let pane = pane(for: t, in: snap) else { return .later(5) }
+        // 常驻 Agent 在做别的单：跟进等它这一轮结束再送。
+        if role(for: t).standing, (try? engine.agentBusy(t.role, excluding: id)) ?? true { return .later(3) }
         if let wait = gate(pane) { return wait }
         // 唤醒一个已经停下（交付 / 受阻 / 失败 / 未回报）的工单：占一个槽，人的跟进可以多用 1 个。
         if [.ready, .blocked, .failed, .waiting].contains(t.reportState),
@@ -430,8 +520,9 @@ final class SuperagentRuntime {
     }
 
     /// 同一个副作用连续撞上对话框超过 `dialogPatience`：只报一次。
-    private func dialogStuck(_ e: Effect) -> Bool {
-        let key = e.kind.rawValue + e.key
+    private func dialogStuck(_ e: Effect) -> Bool { dialogStuck(key: e.kind.rawValue + e.key) }
+
+    private func dialogStuck(key: String) -> Bool {
         guard let since = dialogSince[key] else { dialogSince[key] = clock(); return false }
         guard since > 0, clock() - since >= Self.dialogPatience else { return false }
         dialogSince[key] = -1 // 报过了；送达后清掉
@@ -485,11 +576,16 @@ final class SuperagentRuntime {
     typealias Launched = (session: String, dir: String, branch: String, started: Bool, created: Bool)
 
     /// 准备目录 → 找到或建执行终端 → 前台是 shell 就打入 agent 命令并等它起来。
+    /// `agent` = 常驻角色的名字：终端以角色命名、打上 `@tfa_agent`，目录就是 `root`（角色自己的目录）。
     nonisolated static func launch(_ tmux: SuperagentTmux, ticket t: Ticket, existing: SuperagentPane?, taken: Set<String>,
-                                   root: URL, commandLine: String, wait: Double, mayRetype: Bool = true) -> Result<Launched, Error> {
+                                   root: URL, commandLine: String, wait: Double, mayRetype: Bool = true,
+                                   agent: String? = nil) -> Result<Launched, Error> {
         do {
             var dir = t.dir, branch = t.branch
-            if dir.isEmpty || !FileManager.default.fileExists(atPath: dir) {
+            if agent != nil {
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                (dir, branch) = (root.path, "")
+            } else if dir.isEmpty || !FileManager.default.fileExists(atPath: dir) {
                 (dir, branch) = try SuperagentTmux.prepareDirectory(repo: t.repo, ticket: t.id, worktree: t.worktree, root: root,
                                                                     fresh: t.dir.isEmpty)
             }
@@ -497,8 +593,8 @@ final class SuperagentRuntime {
             var target = existing?.pane ?? ""
             var created = false
             if existing == nil {
-                session = SuperagentTmux.sessionName("工单\(t.id)·\(t.title.prefix(14))", taken: taken)
-                target = try tmux.newSession(name: session, dir: dir, ticket: t.id, command: commandLine)
+                session = SuperagentTmux.sessionName(agent ?? "工单\(t.id)·\(t.title.prefix(14))", taken: taken)
+                target = try tmux.newSession(name: session, dir: dir, ticket: agent == nil ? t.id : nil, agent: agent, command: commandLine)
                 created = true
             }
             if let p = existing, !p.isPlainShell { return .success((session, dir, branch, false, false)) }
@@ -562,6 +658,17 @@ final class SuperagentRuntime {
         if pv != policyVersion { policyVersion = pv }
         let sc = (try? store.schedules()) ?? []
         if sc != schedules { schedules = sc }
+        let ro = (try? store.roles()) ?? Role.builtins
+        if ro != roles { roles = ro }
+    }
+
+    /// 工单的 agent 窗格：每单角色认 `@tfa_ticket`，常驻角色认 `@tfa_agent`。
+    func pane(for t: Ticket, in snap: [SuperagentPane]) -> SuperagentPane? {
+        role(for: t).standing ? snap.first { $0.agent == t.role } : snap.first { $0.ticket == t.id }
+    }
+
+    private func command(_ t: Ticket, _ role: Role, _ kickoff: String) -> String {
+        workerCommand?(t, kickoff) ?? Self.claudeWorkerCommand(t, role: role, kickoff: kickoff)
     }
 
     // MARK: - 命令行
@@ -575,11 +682,14 @@ final class SuperagentRuntime {
         return p
     }
 
-    /// 执行终端：Claude Code，全部放行，附加执行者 prompt；`tfa` 在 PATH 上，TFA_TICKET 指明工单。
-    nonisolated static func claudeWorkerCommand(_ t: Ticket, _ kickoff: String) -> String {
-        "\(envPrefix) TFA_TICKET=\(t.id) claude --dangerously-skip-permissions "
-            + "--settings '{\"skipDangerousModePermissionPrompt\":true}' "
-            + "--append-system-prompt-file \(SuperagentTmux.quote(SuperagentPaths.workerPrompt.path)) \(SuperagentTmux.quote(kickoff))"
+    /// 执行终端：Claude Code，附加角色的执行者 prompt，不弹权限确认；只读的角色禁用编辑类工具。
+    /// `tfa` 在 PATH 上；每单角色用 TFA_TICKET 指明工单，常驻角色用 TFA_AGENT 指明角色（工单号写在每条消息里）。
+    nonisolated static func claudeWorkerCommand(_ t: Ticket, role: Role, kickoff: String) -> String {
+        let who = role.standing ? "TFA_AGENT=\(SuperagentTmux.quote(role.name))" : "TFA_TICKET=\(t.id)"
+        let readOnly = role.edits ? "" : "--disallowedTools 'Edit,Write,NotebookEdit' "
+        return "\(envPrefix) \(who) claude --dangerously-skip-permissions "
+            + "--settings '{\"skipDangerousModePermissionPrompt\":true}' \(readOnly)"
+            + "--append-system-prompt-file \(SuperagentTmux.quote(SuperagentPaths.rolePrompt(role.name).path)) \(SuperagentTmux.quote(kickoff))"
     }
 
     /// 主管：Claude Code，只放行 `tfa` 命令（dontAsk：其余一律拒绝、不弹确认，也不继承人的默认 auto 模式），

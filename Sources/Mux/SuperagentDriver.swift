@@ -10,6 +10,8 @@ struct SuperagentPane: Equatable, Sendable {
     var ticket: Int64?
     /// `@tfa_role` = router：「主管」终端。
     var isRouter: Bool
+    /// `@tfa_agent` 会话选项：这个会话是哪个常驻角色的终端（它先后处理这个角色的所有工单）。
+    var agent: String? = nil
     /// 最近一次输出的时间（epoch 秒，`window_activity`）。
     var activity: Int
     /// 前台命令（`pane_current_command`）。
@@ -59,7 +61,7 @@ struct SuperagentTmux: Sendable {
     /// nil = 查询失败（不能据此判断会话没了）；[] = 服务器没在跑（会话确实都没了）。
     func snapshot() -> [SuperagentPane]? {
         let r = run(["list-panes", "-a", "-F",
-                     "#{pane_id}\u{1f}#{@tfa_pane}\u{1f}#{window_active}#{pane_active}\u{1f}#{@tfa_ticket}\u{1f}#{@tfa_role}\u{1f}#{window_activity}\u{1f}#{pane_current_command}\u{1f}#{session_name}"])
+                     "#{pane_id}\u{1f}#{@tfa_pane}\u{1f}#{window_active}#{pane_active}\u{1f}#{@tfa_ticket}\u{1f}#{@tfa_role}\u{1f}#{window_activity}\u{1f}#{pane_current_command}\u{1f}#{@tfa_agent}\u{1f}#{session_name}"])
         guard r.status == 0 else {
             let e = r.err.lowercased()
             return e.contains("no server running") || e.contains("error connecting") ? [] : nil
@@ -67,11 +69,11 @@ struct SuperagentTmux: Sendable {
         var tagged: [String: SuperagentPane] = [:], active: [String: SuperagentPane] = [:]
         var marked: Set<String> = [], order: [String] = []
         for line in r.out.split(separator: "\n") {
-            let f = line.split(separator: "\u{1f}", maxSplits: 7, omittingEmptySubsequences: false)
-            guard f.count == 8 else { continue }
-            let session = String(f[7])
+            let f = line.split(separator: "\u{1f}", maxSplits: 8, omittingEmptySubsequences: false)
+            guard f.count == 9 else { continue }
+            let session = String(f[8])
             let pane = SuperagentPane(session: session, pane: String(f[0]), ticket: Int64(f[3]), isRouter: f[4] == "router",
-                                      activity: Int(f[5]) ?? 0, command: String(f[6]))
+                                      agent: f[7].isEmpty ? nil : String(f[7]), activity: Int(f[5]) ?? 0, command: String(f[6]))
             if !order.contains(session) { order.append(session) }
             if !f[1].isEmpty { marked.insert(session) }
             if f[0] == f[1] { tagged[session] = pane }
@@ -85,7 +87,8 @@ struct SuperagentTmux: Sendable {
     @discardableResult
     /// `command` 给了就让 tmux 直接用它开会话（交互式登录 shell 里跑，退出后留下一个 shell）——不往还在
     /// 初始化的 shell 里打字：那样回车可能被吞，下一次再打就和上一次拼成一行。
-    func newSession(name: String, dir: String, ticket: Int64? = nil, router: Bool = false, command: String? = nil) throws -> String {
+    func newSession(name: String, dir: String, ticket: Int64? = nil, router: Bool = false, agent: String? = nil,
+                    command: String? = nil) throws -> String {
         var args = ["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, "-c", dir, "-x", "160", "-y", "48"]
         if let command {
             let shell = defaultShell()
@@ -99,6 +102,7 @@ struct SuperagentTmux: Sendable {
         var tags = [("@tfa_pane", pane)]
         if let ticket { tags.append(("@tfa_ticket", String(ticket))) }
         if router { tags.append(("@tfa_role", "router")) }
+        if let agent { tags.append(("@tfa_agent", agent)) }
         for (option, value) in tags {
             let r = run(["set-option", "-t", "=\(name):", option, value])
             guard r.status == 0 else {

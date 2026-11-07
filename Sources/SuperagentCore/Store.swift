@@ -64,6 +64,14 @@ public final class SuperagentStore {
             CREATE INDEX IF NOT EXISTS event_ticket ON event(ticket_id, id);
             CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+        // 角色（docs/superagent-roles.md）之前的库没有 role 列：旧工单都是「开发」。
+        func hasRole() throws -> Bool { try db.query("PRAGMA table_info(ticket)").contains { $0.text(1) == "role" } }
+        if try !hasRole() {
+            // App 和 tfa 可能同时打开旧库：另一个连接先加上了就不算错。
+            do { try db.exec("ALTER TABLE ticket ADD COLUMN role TEXT NOT NULL DEFAULT '\(Role.developer)'") } catch {
+                if try !hasRole() { throw error }
+            }
+        }
     }
 
     // MARK: - Tickets
@@ -71,11 +79,11 @@ public final class SuperagentStore {
     private static let ticketColumns = """
         id,title,request,note,repo,dir,branch,worktree,status,ended_by,ended_at,ack,attention,
         report_state,report_summary,report_path,report_at,delivery_error,nudged,notified_stage,
-        mandate,trigger_id,session,turn_at,created_at,updated_at
+        mandate,trigger_id,session,turn_at,created_at,updated_at,role
         """
 
     private static func ticket(_ r: SQLRow) -> Ticket {
-        Ticket(id: r.int(0), title: r.text(1), request: r.text(2), note: r.text(3), repo: r.text(4),
+        Ticket(id: r.int(0), title: r.text(1), role: r.text(26), request: r.text(2), note: r.text(3), repo: r.text(4),
                dir: r.text(5), branch: r.text(6), worktree: r.int(7) != 0,
                status: TicketStatus(rawValue: r.text(8)) ?? .open, endedBy: r.optText(9), endedAt: r.optDouble(10),
                ack: r.text(11), attention: r.optText(12), reportState: r.optText(13).flatMap(ReportState.init),
@@ -99,12 +107,12 @@ public final class SuperagentStore {
 
     func insertTicket(_ t: Ticket) throws -> Int64 {
         try db.run("""
-            INSERT INTO ticket (title,request,note,repo,dir,branch,worktree,status,mandate,trigger_id,created_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO ticket (title,request,note,repo,dir,branch,worktree,status,mandate,trigger_id,created_at,updated_at,role)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             [.text(t.title), .text(t.request), .text(t.note), .text(t.repo), .text(t.dir), .text(t.branch),
              .bool(t.worktree), .text(t.status.rawValue), .text(t.mandate), .opt(t.triggerID),
-             .real(t.createdAt), .real(t.updatedAt)])
+             .real(t.createdAt), .real(t.updatedAt), .text(t.role)])
         return db.lastInsertID
     }
 
@@ -377,6 +385,27 @@ public final class SuperagentStore {
             try setKV("settings.acceptance", s.acceptance ? "1" : "0")
             try setKV("settings.idleSeconds", String(Int(s.idleSeconds)))
         }
+    }
+
+    /// 内置角色（人改过的用改过的版本）在前，然后是新建的角色。
+    public func roles() throws -> [Role] {
+        var saved: [Role] = []
+        if let json = try kv("roles"), let data = json.data(using: .utf8) {
+            saved = (try? JSONDecoder().decode([Role].self, from: data)) ?? []
+        }
+        let builtins = Role.builtins.map { b in saved.first { $0.name == b.name } ?? b }
+        return builtins + saved.filter { !$0.isBuiltin }
+    }
+
+    public func role(_ name: String) throws -> Role? {
+        try roles().first { $0.name == name }
+    }
+
+    /// 只存人改过的内置角色和新建的角色：内置角色的默认值随版本更新。
+    func saveRoles(_ list: [Role]) throws {
+        let changed = list.filter { r in !Role.builtins.contains(r) }
+        let data = try JSONEncoder().encode(changed)
+        try setKV("roles", String(decoding: data, as: UTF8.self))
     }
 
     public func rules() throws -> [Rule] {

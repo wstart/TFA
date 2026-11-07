@@ -3,6 +3,7 @@
 > 研究对象：DeepSeek 开源原型 `deepseek-ai/dsh-superagent-prototype`（MIT，commit 8c32a9d，2026-10-31），
 > 对应 DeepSeek 文章《Super-agent 设计探索》。本地克隆在 `~/Desktop/research/dsh-superagent-prototype`。
 > 方法：4 个研究 agent 并行通读 9 篇设计文档、全部 prompt 与约 1.2 万行 TypeScript，本文是汇总。
+> 后续：按角色派发（常驻「助理」+ 每单「开发」，主管先选角色再接单）见 [superagent-roles.md](superagent-roles.md)。
 > 状态：**已实施（第 1–3 期，2026-11）**。确认结果：三期全做；主管用 Claude Code；执行终端全部放行；默认每个工单一个 git worktree；界面围绕主管 + 工单重排。实现与方案的差异见文末「实现说明」。
 
 ---

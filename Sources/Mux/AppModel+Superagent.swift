@@ -2,11 +2,14 @@ import Foundation
 import SuperagentCore
 import TmuxKit
 
-/// AppModel ↔ SuperagentRuntime：执行终端出现在侧栏「工单」分组里（不抢焦点），主管终端固定在顶部；
+/// AppModel ↔ SuperagentRuntime：执行终端出现在侧栏「工单」分组里、常驻角色的终端在「角色」分组里（不抢焦点），
+/// 主管终端固定在顶部；
 /// 人正在打字的终端不往里打字；进入「需要你」时发系统通知。
 extension AppModel {
     /// 工单终端自动归入的分组名。
     static let ticketGroupName = "工单"
+    /// 常驻角色（助理等）的终端归入的分组名。
+    static let agentGroupName = "角色"
     static let routerDirKey = "superagent.routerDir"
 
     func startSuperagent() {
@@ -35,7 +38,8 @@ extension AppModel {
         return superagent.ticket(forSession: conn.controller.connection.sessionName)
     }
 
-    /// 新的执行 / 主管终端：作为休眠行加入侧栏（选中时才 attach），执行终端放进「工单」分组。
+    /// 新的执行 / 主管终端：作为休眠行加入侧栏（选中时才 attach），执行终端放进「工单」分组，
+    /// 常驻角色的终端放进「角色」分组。
     func adoptSuperagentSession(_ name: String, isRouter: Bool) {
         let conn: ConnectionSession
         if let existing = localConnection(named: name) {
@@ -46,10 +50,11 @@ extension AppModel {
         }
         guard !isRouter, group(for: conn) == nil else { return }
         let hostKey = HostTarget.local.persistKey
-        if !groups.contains(where: { $0.name == Self.ticketGroupName && $0.hostKey == hostKey }) {
-            groups.append(TerminalGroup(name: Self.ticketGroupName, hostKey: hostKey))
+        let groupName = superagent.agentSessions.contains(name) ? Self.agentGroupName : Self.ticketGroupName
+        if !groups.contains(where: { $0.name == groupName && $0.hostKey == hostKey }) {
+            groups.append(TerminalGroup(name: groupName, hostKey: hostKey))
         }
-        if let g = groups.first(where: { $0.name == Self.ticketGroupName && $0.hostKey == hostKey }) { assign(conn, toGroup: g.id) }
+        if let g = groups.first(where: { $0.name == groupName && $0.hostKey == hostKey }) { assign(conn, toGroup: g.id) }
     }
 
     /// 主管终端的目录（`tfa route accept` 默认的工单目录）。没设过时：选中的工作区项目 → 当前终端所在的

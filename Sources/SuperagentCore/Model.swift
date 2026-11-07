@@ -1,7 +1,7 @@
 import Foundation
 
 // 领域模型（docs/superagent-design.md）。只有这些概念：请求(Trigger)、工单(Ticket)、派工(Assignment)、
-// 输入(Input)、回报(Report)、待你决定(Attention)、决定(Decision)、规则(Policy)。
+// 输入(Input)、回报(Report)、待你决定(Attention)、决定(Decision)、规则(Policy)、角色(Role，docs/superagent-roles.md)。
 
 /// Worker 回报的状态。`waiting` 只由 TFA 自己记录（执行终端停下了却没回报）。
 public enum ReportState: String, CaseIterable, Sendable {
@@ -66,11 +66,13 @@ public enum Stage: Equatable, Sendable {
 public struct Ticket: Equatable, Sendable, Identifiable {
     public var id: Int64
     public var title: String
+    /// 接这张单的角色（`Role.name`）。
+    public var role: String = Role.developer
     /// 原始请求原文——worker 从这里推导需求，路由备注不能替代它。
     public var request: String
     /// 路由备注（≤30 词），只写路由背景或人的明确约束。
     public var note: String
-    /// 请求所指的目录（仓库）。
+    /// 请求所指的目录（仓库）；常驻角色的单可以没有（空）。
     public var repo: String
     /// 实际工作目录（git worktree 或 repo 本身）；空 = 尚未准备。
     public var dir: String
@@ -286,6 +288,65 @@ public struct Schedule: Equatable, Sendable, Codable, Identifiable {
         self.id = id; self.name = name; self.enabled = enabled; self.time = time
         self.request = request; self.repo = repo; self.lastFired = lastFired
     }
+}
+
+// MARK: - 角色
+
+/// 一类 Agent 的定义：主要行为（写进它的 system prompt）+ 运行方式。主管接单时先选角色，
+/// TFA 按定义生成（启动）这个角色的 Agent，再把工单交给它（docs/superagent-roles.md）。
+public struct Role: Equatable, Sendable, Codable, Identifiable {
+    /// 名称即 id：主管在命令里写 `--role 助理`，也是常驻终端的名字。
+    public var name: String
+    /// 一句话：接什么任务（主管据此选角色）。
+    public var scope: String
+    /// 主要行为。
+    public var behavior: String
+    /// 常驻：一个终端串行处理这个角色的所有工单，追问自带上下文；否则每单一个终端 + 目录。
+    public var standing: Bool
+    /// 能改文件（全部放行）；否则禁用编辑类工具，只读。
+    public var edits: Bool
+    /// ready 后进「待评审」等人通过；否则 ready 就是交付，工单自动结束。
+    public var review: Bool
+
+    public init(name: String, scope: String, behavior: String, standing: Bool, edits: Bool, review: Bool) {
+        self.name = name; self.scope = scope; self.behavior = behavior
+        self.standing = standing; self.edits = edits; self.review = review
+    }
+
+    public var id: String { name }
+    public var isBuiltin: Bool { Self.builtins.contains { $0.name == name } }
+
+    /// 「常驻 · 只读 · 直接交付」
+    public var traits: String {
+        [standing ? "常驻" : "每单一个终端", edits ? "能改文件" : "只读", review ? "待评审" : "直接交付"].joined(separator: " · ")
+    }
+
+    public static let maxName = 12
+    public static let maxScope = 200
+    public static let maxBehavior = 2000
+
+    public static let assistant = "助理"
+    public static let developer = "开发"
+
+    /// 内置角色：运行方式固定，接什么和主要行为可以在面板里改。
+    public static let builtins: [Role] = [
+        Role(name: assistant,
+             scope: "查资料、问答、分析、总结，以及和项目无关的事；关于某个项目或代码的问题（只读）。不接要提交的改动。",
+             behavior: """
+             - 先给结论，再给要点和依据；引用网上的信息注明来源和抓取时间，查不到就直说。
+             - 问到某个项目时，到工单写明的目录里读代码和文档，读最少的必要内容。
+             - 发现要改代码或文件才能完成，用 tfa handback 退回，由主管改派「开发」。
+             - 追问不重新从头查：先用前面的结果，只补查新问的部分。
+             """,
+             standing: true, edits: false, review: false),
+        Role(name: developer,
+             scope: "要提交的改动：代码、配置、脚本、仓库里的文档。每单一个终端和 git worktree，改完待评审。",
+             behavior: """
+             - 用项目已有的模式、库和工具函数，只改请求需要的部分，改动小而聚焦。
+             - 修 bug 先复现再修；改动前后跑相关的构建和测试，没跑的检查在回报里写明原因。
+             """,
+             standing: false, edits: true, review: true),
+    ]
 }
 
 /// 用户可调的少量设置（一个默认值适合几乎所有人）。
