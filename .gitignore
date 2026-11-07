@@ -7,6 +7,8 @@ DerivedData/
 docs/.tmp/
 /tmp-research/
 *.app
+# Release zip written by scripts/build-app.sh (NOTARIZE=1); it is uploaded to GitHub Releases, not committed
+/TFA.app.zip
 # Editor swap / backup files
 *.swp
 *.swo
