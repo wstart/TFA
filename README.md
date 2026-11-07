@@ -1,232 +1,53 @@
 # TFA — 可视化的 tmux 终端管理器（macOS）
 
-> TFA（Terminal For AI）是一个原生 macOS（SwiftUI）应用，为真实 tmux 会话提供一个可视化、
-> 易用的管理界面——在一个窗口里管理大量本地与远程终端，断线不丢、随时重连。
+> TFA（Terminal For AI）是一个原生 macOS 应用：在一个窗口里管理大量本地与远程终端，断线不丢、随时重连。
+> 底层是真实的 tmux（控制模式 `tmux -CC`），TFA 只做可视化与管理。
 
 ![TFA — 在一个原生窗口里管理大量本地 / 远程 tmux 终端](docs/screenshot.png)
 
-> 📦 [**下载最新版 TFA.app**](https://github.com/wstart/TFA/releases/latest) · **Apple Silicon** · macOS 14+ · 需本机已安装 `tmux`
+## 📦 安装
 
-### 安装
+[**下载最新版 TFA.app**](https://github.com/wstart/TFA/releases/latest)，解压后拖入「应用程序」，双击打开。
 
-1. 解压 `TFA.app.zip`，拖入「应用程序」。
-2. 依赖 `tmux`：`brew install tmux`（没装的话 App 内也会提示）。
-3. **双击打开**即可——已用 Developer ID 签名并经 Apple 公证,无需右键绕过 Gatekeeper。
-4. 仅支持 **Apple Silicon（M 系列）**；暂不提供 Intel 版。
+- 系统：macOS 14+，仅 Apple Silicon（M 系列）。
+- 依赖：`brew install tmux`（没装时 App 会提示）。
+- 已签名并经 Apple 公证；在设置（⌘,）里可一键检查更新。
 
-TFA 不是另写一个多路复用器，而是封装真实的 tmux：通过 tmux 的**控制模式**（`tmux -CC`）
-与一个真正的 tmux server 通信。因此它保留了 tmux 的全部能力——会话持久、可脚本化、远程稳定——
-同时提供一个原生、克制、可访问的图形界面。
+## ✨ 核心特性
 
----
+- **一个终端 = 一个 tmux 会话**：退出 App 只 detach，会话保留，下次启动恢复。
+- **断线不丢**：SSH 抖动、管道中断后自动重连；tmux 服务器崩溃或重启电脑后，可从「已断开」一键恢复会话和屏幕历史，AI 终端自动续接对话。
+- **管理大量终端**：侧栏实时显示每个终端是否在输出；⌘K 快速切换，⌘F 跨终端搜索，⌘] 跳到需要你的终端；可拖拽分组。
+- **本地 + SSH 远程**：支持密码、主机指纹、2FA 等交互式登录。
+- **主管 + 工单**：用自然语言提需求，主管派给执行终端去做（改代码的工单用独立 git worktree），只在需要你时通知。
+- **AI 工具箱**：项目工作区、Claude Code / Codex 规则与 Skills 编辑、本地模型 axis-model 与命令行助手 axis-claude、SSH 反向隧道与 Cloudflare 公网隧道、Token 用量统计。
 
-## ✨ 核心理念
+完整说明见 [docs/features.md](docs/features.md)。
 
-### 主管 + 工单（Super-agent）
+## 🤖 主管 + 工单
 
-参考 DeepSeek 开源的 [Super-agent 原型](https://github.com/deepseek-ai/dsh-superagent-prototype)（MIT）：**尽量少占用人的注意力，尽量多给价值。**
+参考 DeepSeek 开源的 [Super-agent 原型](https://github.com/deepseek-ai/dsh-superagent-prototype)（MIT）。
 
-- 侧栏顶部的「主管」是一个 Claude Code 终端：你用自然语言提需求，它只做路由——选角色、接单、挂接、停止、转达，**不读代码也不能改文件**（只放行 `tfa` 命令）。
-- 先定角色再接单：「助理」常驻一个终端，查资料、问答、分析和追问都交给它（不需要项目目录、只读、交付即结单）；「开发」每单一个执行终端（Claude Code，全部放行）+ 一个独立的 git worktree（`~/.tfa/worktrees/<仓库>-<号>`，分支 `tfa/<号>`），改完待评审，默认最多 3 个并行。没有合适的角色时，主管先和你对焦，再新建角色。
-- 执行者用 `tfa report` 结构化回报；只有**待评审、要你回答、受阻、失败**时才通知你，并出现在「待处理」和主管面板里。在工单条上点「通过」先把工单分支合并进主仓库当前分支（通常是 main）再结单——有冲突或没提交的改动就不合并，工单留在待评审并告诉你原因；「打回…」「回答…」把你的话原样送进执行终端。
-- 规则与主动接单（默认「只观察」）：普通终端里命令失败或 agent 求助时，主管按你写的规则研判，只观察模式只记录「本会接单」。还可以设每天定时提交的请求。
-- 状态在 `~/.tfa/superagent.db`；设计与原理见 [docs/superagent-design.md](docs/superagent-design.md)，角色见 [docs/superagent-roles.md](docs/superagent-roles.md)。
+1. 在侧栏顶部的「主管」终端里提需求。主管只负责派单，不读代码、不改文件。
+2. 主管按角色接单：「助理」做问答和调研；「开发」每单一个终端和独立 git worktree（分支 `tfa/<号>`）。
+3. 执行者只在**待评审、要你回答、受阻、失败**时通知你。
+4. 点「通过」把工单分支合并进主仓库当前分支并结单；点「打回」或「回答」把你的话送回执行终端。
 
-### 项目工作区与 Agent 协作
+原理见 [docs/superagent-design.md](docs/superagent-design.md)，角色见 [docs/superagent-roles.md](docs/superagent-roles.md)。
 
-- 侧栏项目选择器旁的文件夹按钮管理工作区：添加项目目录、关联已有终端、编辑项目规则。选择项目后过滤终端，新会话默认从该目录启动；选择「全部项目」查看全部内容。
-- 「待处理」入口汇总全部项目的终端错误和关注请求，支持直达终端。
-- 侧栏「+」可「启动终端」或「启动 axis-claude」（内置的命令行编程助手，用本机 axis-model 大模型，不需要账号和联网）。
-- 在工作区管理中可为终端绑定 Codex 会话 UUID。未绑定时恢复打开会话选择器，避免同目录多个 Agent 恢复错对话。
-- Skills 显示来源和同名提示；Codex 同时读取个人与共享目录。依赖默认标为「未检测」，不代表全部外部服务已经配置。
-- 规则与 Skills 的未保存草稿在工具切换期间留在内存，正常退出会检查；强制结束进程无法保证保留草稿。
+## ⌨️ 快捷键
 
-- **一个终端 = 一个 tmux 会话**，每个终端有自己独立的 `tmux -CC` 连接，各自实时流动；切换
-  只是换显示，不需要 `switch-client`。
-- **封装而非重写**：所有终端能力来自真实 tmux，TFA 只做可视化与管理。
-- **断线不丢**：这正是 tmux 的意义所在。SSH 抖动、管道中断，只要会话还在，TFA 会自动重连。
-- **分层、低耦合**：核心协议层 `TmuxKit` 不依赖任何 UI（仅 Foundation + Observation），便于复用或替换前端。
+| 键 | 作用 | | 键 | 作用 |
+|---|---|---|---|---|
+| ⌘T | 新建终端 | | ⌘F | 跨终端搜索 |
+| ⌘W | 关闭（detach，会话保活） | | ⌘K | 快速切换面板 |
+| ⌘1–9 | 选第 N 个终端 | | ⌘] | 跳到下一个需要你的终端（待处理优先） |
+| ⌘⌥← / → | 上一个 / 下一个终端 | | ⌘⇧] | 跳到下一个待处理（等待 / 受阻）终端 |
+| ⌘\ | 折叠 / 展开侧边栏 | | | |
+| ⌘ + / − / 0 | 字号 增 / 减 / 重置 | | ⌘, | 设置（含快捷键速查） |
+| ⌘S | 编辑器内保存（CLAUDE.md / SKILL.md） | | ⌘R | 失败态重试连接 |
 
----
-
-## 🧩 功能一览
-
-**终端管理**
-- 扁平的终端侧边栏（一个会话一行），点选切换。右键菜单：**重命名 / 环境变量 / 拷贝・粘贴环境变量 /
-  重启 session / 克隆 session / 文件管理器 / 在 Finder 打开当前文件夹 / Close（detach 保活）/ Kill（确认后销毁）**。
-- `+`（或 ⌘T）新建本地终端:弹窗里**命名**（预填防撞的 `mux-N`、可改、不能空）并**选起始文件夹**（`new-session -c`）；网络图标新建 **SSH** 远程终端。
-- 标题栏显示会话名、连接状态、ssh host、窗格尺寸，以及活动终端的**当前工作目录**。
-- **启动续跑 + 懒加载**：打开 app 时发现本机已存在的 tmux 会话；发现的会话先作**休眠占位**，
-  **选中时才真正连接**，会话再多也秒开；并自动选中**上次激活**的那个终端。
-- **退出保活**：退出 app 只 detach、不杀会话，下次启动恢复。
-- **会话持久化（崩了也能找回来、能恢复）**：把每个本地终端的会话清单 + scrollback 定期存进
-  SQLite（`~/.tfa/sessions.db`，按 `@tfa_id` 关联）。终端的会话**意外没了**(tmux 服务器崩溃、被 kill、重启电脑)时,
-  侧栏这一行**原地保留**为「已断开」——还在原分组里、显示原文件夹,断开那一刻的屏幕历史立即存档;侧栏顶部的
-  「在线 / 已断开」切换可单独查看（「已断开」页顶部有**全部恢复**，tmux 服务器整个丢失后一键找回所有终端）。选中只显示结束页(原文件夹 + 最后输出预览),点**恢复会话**(⌘R)才在原文件夹重建同名会话
-  （同 `@tfa_id` → 环境变量/分组自动回连）:**AI 终端续接对话**（axis-claude / Claude Code: `--continue`；Codex: 恢复绑定 UUID，未绑定则打开会话选择器）,
-  普通终端回放历史文本。记录永久保留,直到右键「移除」。保存:每分钟记录全部会话的名字 + 文件夹,开机基线 + 每小时 + 优雅退出完整快照。
-- **每会话环境变量**：右键终端 →「环境变量…」为该会话单独设置环境变量（tmux `set-environment`），
-  持久化、(重)连接时自动注入。可「保存并重启 shell」或右键「重启 session」让当前 shell 立即生效；
-  也支持在会话间**拷贝 / 粘贴环境变量**（走系统剪贴板，`KEY=VALUE` 兼容 `.env`；也认 JSON——
-  `{"env": {…}}`（Claude Code settings.json 原样）或扁平 `{"KEY": "VALUE"}` 对象，一次整套导入）。
-- **克隆 session**：按同一套配置（endpoint / host / 环境变量等）快速开一个新会话。
-- **文件管理器**：右键本地会话以其**当前工作目录**为根打开一个独立窗口——目录树 + 编辑器
-  （md / py 语法高亮，其余纯文本），可新建 / 移到废纸篓 / 在 Finder 打开 / **一键在 VS Code 打开**
-  （自动探测，未装置灰）。展开文件夹即重新读盘、窗口回焦整树刷新——agent 刚生成的文件即时可见。
-- **历史查看器（⌘⇧H）**：claude / vim / less 等全屏程序跑在终端的「备用屏」上、本身没有回滚——过去滚不上去看日志。
-  一键（头部 🕘 / ⌘⇧H）把该终端 tmux 里保留的历史（≤2000 行，带原色）抓成快照，在独立深色终端里自由上翻，`Esc` 关闭。
-  内置「**过程记录**」页：每终端一份 append-only 事件时间线——每条命令（命令行 + 退出码 + 耗时，需 Shell 集成）、
-  attention、连接 / 断开，最新在上，✓/✗ 按退出码着色。
-- **Shell 集成（OSC 133，设置里一键安装）**：装到 `~/.zshrc` 后 TFA **精确**知道 shell 在提示符还是在跑命令、
-  每条命令的退出码——侧栏忙闲不再靠猜（静默编译也算忙、提示符即空闲），后台长命令完成弹通知带退出码与耗时。
-
-**管理大量终端**
-- **侧边栏过滤框**：按名字 / 当前命令实时过滤 + 计数。
-- **⌘K 快速切换**：键盘优先的模糊命令面板（子序列匹配名字 + 命令，↑↓/↵/esc）。
-- **侧边栏实时活动 + 特效**：每行**实时显示是否在输出**——读 tmux `#{window_activity}`，覆盖**所有会话**
-  （包括尚未打开 / attach 的）。活动中的行：左侧品牌色细条 + 行底微高亮 + 右侧跳动的**均衡器**动效 +
-  副标题：忙时显示**最新输出一行**，空闲时显示**当前文件夹**；输出结束闪绿 ✓ / 后台新输出亮**未读圆点**（并发 macOS 通知）。
-  **⌘]** 跳到下一个**需要你**的终端（等待回复 / 受阻优先，其次有新输出），**⌘⇧]** 只跳待处理。尊重系统「减弱动态」。
-- **跨终端搜索（⌘F）**：并发 `capture-pane` 抓取所有终端文本，分组高亮，一键跳转。
-- **分组**：把会话拖入可折叠分组（按 host 作用域隔离）。**点分组名**打开该分组的 Markdown **说明页**
-  （写「这组做什么、每个 session 负责什么」，编辑 / 预览切换，⌘S 保存）；点箭头折叠 / 展开。
-
-**健壮性**
-- **断线自动重连**：非用户主动的断开 → 若会话仍在（本地查会话列表 / ssh 有界重试）→ 退避
-  （0.5/1/2/4/8/8s，≤6 次）用 `attach-session` 重连；确实没了 / 重试耗尽 → 非阻断 toast + 移除。
-- **失败态 + Retry**：连接失败显示**真实错误文本**与「Retry Connection」按钮（不再永久转圈）；
-  重连中显示「Reconnecting… (attempt N)」。
-- **断线 toast**：终端不会无故消失，会告诉你原因。
-- **输出流控**：连接启用 tmux `pause-after` 背压——某终端疯狂输出（`yes`、大日志）不会撑爆内存或
-  拖垮界面（旧 tmux 会静默降级）。
-- **干净退出**：正常退出或被信号（`pkill` / 崩溃）终止时都会回收所有 `tmux -CC` 子进程，避免 pty 泄漏。
-
-**外观 / 可访问性（见 [DESIGN.md](DESIGN.md)）**
-- **设计系统**：统一的间距 / 圆角 / 字体 / 状态色 token（`Theme.swift`）——三层暖色纸栈 + 墨色强调 + 单一 dust blue 点缀，见 [DESIGN.md](DESIGN.md)。
-- **统一状态指示**：连接状态用 **形状 + 颜色 + 标签**（非纯色，色盲友好），侧边栏与标题栏共用。
-- **终端主题**：固定深色终端皮肤 + 品牌色光标 + **大号浅色会话名水印**（一眼认出当前终端）。
-- **可访问性**：图标按钮 / 行 / 状态均有 VoiceOver 标签；装饰元素对辅助技术隐藏。
-- **设置（⌘,）**：键入特效开关、字号，附快捷键速查表；**应用内检查更新**——一键对比 GitHub Releases，
-  新版一键下载（公证包，codesign + bundle id 校验，失败自动回滚）原地替换并重启，tmux 会话无损。
-
-**🤖 axis-claude（内置命令行编程助手）**
-
-TFA 自带一个精简版的终端编程助手 `axis-claude`（`TFA.app/Contents/MacOS/axis-claude`），后端是本机 axis-model，
-适合不能使用 Claude Code 的环境。侧栏「+」→「启动 axis-claude」即可新建。
-
-- 工具：Read / Write / Edit / Bash / Glob / Grep / LS；默认自动授权，不逐次询问；加 `--ask` 则 Write / Edit / Bash 执行前询问（`y` 是 / `a` 本会话总是允许 / `n` 否）
-- 自动读取 `~/.claude/CLAUDE.md`、项目 `CLAUDE.md` / `AGENTS.md`；系统提示保持稳定，命中 axis-model 前缀缓存
-- 对话保存在 `~/.axis-claude/sessions/`（每轮工具调用后、终端被关闭前都会保存），`axis-claude --continue` 续接；`-p "<提示>"` 一次性执行
-- 命令：`/resume [编号]` 列出并恢复本目录的历史对话，`/compact` 把长对话压缩成摘要以释放上下文，`/clear` 新对话、`/help`、`/exit`
-- 每轮结束显示一行用量：输入 / 输出 token、缓存命中率、当前上下文大小；启动时若 axis-model 没运行或没加载模型会直接提示
-- 多行粘贴作为一条消息发送；Ctrl-C 中断当前回复或命令，提示符下连按两次或 Ctrl-D 退出
-- 环境变量：`AXIS_BASE_URL`（默认 `http://127.0.0.1:1234`）、`AXIS_MODEL`（默认 `axis_model`）
-
-**🧰 侧边栏工具区**
-
-侧边栏底部互斥入口，各自在详情区打开一个工具面板：
-
-- **模型（axis-model）**：管理本机的 [axis-model](https://github.com/wstart/axis-model) 推理服务（Apple Silicon 上跑 MLX 大模型）。
-  没装时「一键安装」：把仓库下载到 `~/axis-model` 并在新终端里运行 `install.sh`，过程可见。装好后显示运行状态（运行中 / 待命 / 已停止），
-  可启动 / 停止 / 重启服务、切换模型，查看每分钟请求与 token、缓存命中率、内存；落后新版本时提示并一键更新。
-- **隧道（SSH 反向端口转发）**：把本机端口通过 `ssh -N -R` **反向暴露到远程服务器**——服务器访问「远程端口」即打到本机「本地端口」。
-  多条配置(IP / 账号 / 密码 / 登录端口 / 远程端口 / 本地端口),密码进**钥匙串**;每条有**启停开关**、**开机自动拉起**、
-  **断线指数退避自动重连**、**GatewayPorts(允许外网访问)开关**、**实时连接日志**。复用 SSH_ASKPASS 注入密码,退出回收子进程。
-  另有 **Cloudflare 公网隧道**(cloudflared quick tunnel,免账号):填本地端口一键打通成公网
-  `https://<random>.trycloudflare.com` 地址,行内点开 / 复制,启停·自启·重连·日志同上;拿到链接即可访问,地址每次重启会变。
-- **Agent 全局规则编辑器**：可切换编辑 Claude Code 的 `~/.claude/CLAUDE.md` 与 Codex 的 `~/.codex/AGENTS.md`，Markdown 语法高亮、⌘S 保存、
-  从磁盘重新加载，文件不存在则保存时自动创建。
-- **Skills 管理**：可切换浏览 `~/.claude/skills` 与 `~/.codex/skills`（宽松卡片式列表：名称 + 描述），编辑各 skill 的
-  `SKILL.md` 及附带脚本（md / py / shell / json 语法高亮，自动解析符号链接 skill）；`SKILL.md` 默认**渲染预览**
-  ——Markdown 表格画成对齐网格，「编辑 / 预览」一键切换；顶部**搜索框**按名称 / 描述实时过滤。
-- **🧪 实验室（Lab）**：实验功能的容器，目前包含：
-  - **系统监控**：实时 CPU / 内存 / 负载 / 运行时间 + GPU 型号（全公开 API；GPU 利用率 macOS 无公开 API，故仅显示型号）。
-  - **Token 用量**：[ccusage](https://github.com/ryoppippi/ccusage) 的 Swift 移植（Claude Code + Codex 两源），
-    读本机 `~/.claude` / `~/.codex` 的记录，按日 / 周 / 月 / 会话统计 token 与估算成本。顶部有「总花费 / 总 Tokens」
-    概览卡 + **Token 构成条**（Input / Output / Cache 占比）；「日」视图是 **GitHub 贡献图式的每日热力图**（颜色越深花费越多）。
-  - **PTY / 进程监控**：pty 用量 / 上限、TFA 的 `tmux -CC` 客户端与孤儿数、残留探针 socket，
-    并可一键清理孤儿客户端释放 pty（只针对客户端：tmux 服务器进程的命令行和孤儿客户端长得一样，会按服务器 pid 和终端排除，绝不会被清理）。
-
----
-
-## 🏗 架构
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│ SwiftUI App  (target: Mux，依赖 SwiftTerm)                     │
-│                                                               │
-│  RootView ── 侧边栏(过滤/状态/活动点) │ 标题栏 │ 终端区 │ 搜索/⌘K │
-│  AppModel ── 顶层状态：终端列表/选择/字号/搜索                  │
-│  ConnectionSession ── 1 个连接 = 1 个终端 + 重连 + 窗格注册表    │
-│  PaneTerminal ── 1 个 SwiftTerm 视图 + 水合 + 光标不变式         │
-└───────────────────────────┬──────────────────────────────────┘
-                            │  @Observable 绑定
-        ┌───────────────────▼────────────────────────┐
-        │ TmuxKit  (library，纯 Swift，无 UI 依赖)     │
-        │                                             │
-        │  TmuxController ── 应用事件流到 @Observable    │
-        │                    TmuxState(会话/窗口/窗格)  │
-        │  TmuxControlClient ── 协议解析 + FIFO 命令队列 │
-        │  TmuxProtocolParser ── %output/%begin/%end/%  │
-        │  PtyProcessTransport ─ 本地: `tmux -CC`        │
-        │                     └ 远程: `ssh host tmux -CC`│
-        │  LayoutParser / TmuxServer / Models           │
-        └───────────────────┬─────────────────────────┘
-                            │ PTY (raw) ← 控制协议字节流
-                       真实 tmux server
-```
-
-- **每个 tmux 窗格（`%id`）** ↔ 一个 SwiftTerm 视图：把 `%output` 字节喂进去渲染，用户键盘输入经
-  `send-keys -H`（十六进制，二进制安全）回传 tmux。窗格注册表**按连接隔离**（`%id` 只在单 server 内唯一）。
-- **TmuxKit 零 UI 依赖**（仅 Foundation + Observation），便于将来替换前端；SwiftTerm 只在 app target 用到。
-
----
-
-## 🎯 两个关键难点
-
-### 1) 光标不变式
-`capture-pane` 恢复屏幕文本但**不恢复光标**，且它与 CUP 都是相对 tmux **真实窗格尺寸**度量的。
-若 SwiftTerm 引擎的网格与 tmux 窗格尺寸不一致（例如后台会话仍是默认 24 行，或被其它客户端
-reconcile 成别的尺寸），光标就会落到错误的行。
-
-**约束**：任何 capture / CUP 之前，必须先把引擎钉到 tmux 的 `paneSize`。该不变量收口在
-`PaneTerminal.pinEngineToPaneSize()` **一处**——每条触碰光标的路径都必须经过它，重构时不会悄悄回归。
-
-### 2) 断线自动重连
-`ConnectionSession` 在非用户主动的断开时换上一个全新的 `TmuxController`（`attach-session`），
-bump `generation` 触发重水合；退避策略 `backoffDelay(attempt:)` 是纯函数。语义保证：
-**掉线 → 重连；kill → 只 finalize 一次，不死循环；用户主动 detach → 不重连**。
-
----
-
-## 📁 目录结构
-
-```
-Package.swift
-Sources/
-  TmuxKit/            # 核心：协议解析、模型、PTY 传输、状态控制器(无 UI 依赖)
-    Transport.swift / ControlProtocol.swift / ControlClient.swift
-    TmuxController.swift / TmuxState(Models.swift) / LayoutParser.swift
-    TmuxServer.swift / Connection.swift / PTY.swift / Errors.swift
-  AxisClaude/         # axis-claude 命令行编程助手（只依赖 Foundation）
-  Mux/                # SwiftUI 应用
-    MuxApp.swift / RootView.swift / SidebarView.swift / TerminalAreaView.swift
-    AppModel.swift / ConnectionSession.swift / PaneTerminal.swift / TerminalPaneView.swift
-    SearchView.swift / QuickSwitchView.swift / SettingsView.swift / Theme.swift
-    Lab.swift（实验室：系统监控 / PTY 监控）/ Notifications.swift（输出完成通知）
-    ClaudeMd.swift（全局 / 项目规则）/ Skills.swift（Skills 管理 + 语法高亮编辑器）
-    Workspace.swift（项目工作区 / 待处理中心）/ EditorSafety.swift（编辑保护）
-    AxisModel.swift（模型面板：axis-model 安装 / 状态 / 控制）
-    CCUsage*.swift（Token 用量：ccusage 的 Swift 移植，Claude + Codex 两源）
-docs/
-  tmux-control-protocol.md     # tmux 控制协议规格（编码依据）
-  swiftterm-integration.md     # SwiftTerm 集成规格
-DESIGN.md             # 设计系统单一真源（token / 状态模型 / 组件 / 终端主题）
-```
-
----
-
-## 🛠 构建 / 运行 / 打包
+## 🛠 从源码构建
 
 ```sh
 swift build                      # 编译全部（含 app）
@@ -241,104 +62,14 @@ open TFA.app
 > **依赖**：本机已安装 `tmux`（控制模式必需）。远程功能依赖系统 `ssh` 与你既有的 SSH 配置 / 密钥。
 > 工具链：Swift 6，各 target `.swiftLanguageMode(.v5)`，SwiftTerm 1.13.0（仅 app）。
 
----
+## 📚 文档
 
-## ⌨️ 快捷键
-
-| 键 | 作用 | | 键 | 作用 |
-|---|---|---|---|---|
-| ⌘T | 新建终端 | | ⌘F | 跨终端搜索 |
-| ⌘W | 关闭（detach，会话保活） | | ⌘K | 快速切换面板 |
-| ⌘1–9 | 选第 N 个终端 | | ⌘] | 跳到下一个需要你的终端（待处理优先） |
-| ⌘⌥← / → | 上一个 / 下一个终端 | | ⌘⇧] | 跳到下一个待处理（等待 / 受阻）终端 |
-| ⌘\ | 折叠 / 展开侧边栏 | | | |
-| ⌘ + / − / 0 | 字号 增 / 减 / 重置 | | ⌘, | 设置（含快捷键速查） |
-| ⌘S | 编辑器内保存（CLAUDE.md / SKILL.md） | | ⌘R | 失败态重试连接 |
-
----
-
-## 🔬 技术要点（均按真实 tmux 3.6a 字节验证）
-
-- `tmux -CC` **必须真 PTY**（纯管道会 `tcgetattr failed`）→ `openpty` + `cfmakeraw`（关回显）+
-  `posix_spawn(SETSID)`；输入 `send-keys -t %ID -H <hex>`，尺寸 `refresh-client -C WxH`。
-- 协议：`%output` 八进制解码、`%begin/%end/%error` 帧、`%`-通知、DCS 握手；命令回复按
-  `flags==1` 块 FIFO 配对（`ControlClient` 抛出真实 `%error`/`%exit` 文本，横幅显示真因）。
-- 远程：`ssh -tt … env PATH=… tmux -CC`——一次性命令走 `shell -c` 不读登录配置，显式带上
-  Homebrew / 系统 bin 目录，避免 macOS 远程主机找不到 `tmux`。
-- SwiftTerm 1.13.0：`view.feed(byteArray:)` 喂字节；输入经 delegate `send(source:data:)`；
-  Swift-6 需 `@MainActor TerminalViewDelegate`。
-- 终端主题用**固定 sRGB 深色**前 / 背景（不随系统外观漂移），避免新建窗格首帧出现浅 / 深错色条带。
-
----
-
-## 🗺 状态 / 路线图
-
-- [x] **协议层** — 控制协议解析 / PTY 传输 / 控制客户端 / 状态控制器
-- [x] **本地 MVP** — 本地 `tmux -CC`、侧边栏、SwiftTerm 单窗格、新建 / 切换 / 重命名 / 关闭
-- [x] **跨终端搜索** — 并发搜索，分组高亮跳转
-- [x] **健壮性** — 自动重连 / 失败态 + Retry / 断线 toast / 退出回收子进程
-- [x] **界面 / 可访问性** — 设计系统 + 统一状态 + 活动点 + 过滤 + ⌘K + 增强标题栏 + 终端主题
-- [x] **远程 SSH** — `ssh -tt … tmux -CC` + 交互式登录（密码 / 主机指纹 / 2FA），检测控制模式开场符后交接
-- [x] **交互打磨** — 跨 host 跳转跟随、活动导航、detach 撤销、拖拽分组、字号 HUD、设置窗口
-- [x] **性能** — 懒加载 attach（按需连接）、tmux 流控（`pause-after` 背压）
-- [x] **输出特效 + 通知** — 输出中脉冲 / 结束闪 ✓ / 后台完成系统通知
-- [x] **每会话环境变量** — `set-environment` + 重启生效 + 会话间拷贝 / 粘贴 + 克隆 session
-- [x] **侧边栏工具区** — Claude Code / Codex 全局规则编辑器 + 双目录 Skills 管理（语法高亮编辑器 + 搜索）
-- [x] **文件管理器** — 右键本地会话以其当前目录打开独立窗口，浏览 + 编辑（md / py 高亮）
-- [x] **侧边栏实时活动** — 每行实时显示是否在输出（覆盖未 attach 会话）+ 均衡器动效 / 最新输出行 / 当前文件夹
-- [x] **「需要关注」检测** — agent 停下等你时（响铃 / OSC 通知）侧栏标黄 + 系统通知，⌘] / ⌘⇧] 跳转
-- [x] **可重排分组** — 拖文件夹头 / 右键上移下移，按 host 持久化
-- [x] **本地模型** — 「模型」面板管理 axis-model（一键安装 / 启停 / 切模型 / 运行数据）+ 内置 axis-claude 命令行编程助手
-- [x] **稳定终端身份** — `@tfa_id` 永久 UUID 为键，改名 / 重启不丢环境变量 · 分组
-- [x] **关窗驻留菜单栏** — 关主窗口不退出，活动检测 / 待接管提醒常驻后台
-- [x] **会话持久化** — 重启 / `tmux kill-server` 后恢复会话 + scrollback（SQLite），AI 终端自动续接对话
-- [x] **SSH 反向端口转发** — 「隧道」面板:多配置、开机自启、断线重连、GatewayPorts、连接日志
-- [x] **设计系统** — 按 DESIGN.md 全面换肤(暖色凸版浅色外壳 + 固定深色终端 + 统一状态色标准)
-- [x] **实验室** — 系统监控 / Token 用量（ccusage 移植）/ PTY · 进程监控
-- [ ] **下一步** — axis-claude 更多工具（MCP / 子任务）、实验室更多实验
-
----
-
-## 📜 更新记录
-
-每版一句话，详细见 [`CHANGELOG.md`](CHANGELOG.md)。
-
-- **v0.18.0** — 项目工作区、Agent 启动器、待处理中心、Codex 会话绑定恢复，以及规则 / Skills 编辑保护与来源管理。
-
-- **v0.17.0** — **Cloudflare 公网隧道**(一键把本机端口打通成公网 HTTPS 地址);**Shell 集成**(OSC 133:精确忙/闲 + 命令完成通知带退出码);**过程记录**(⌘⇧H 每终端的命令级事件时间线);派发可靠性(送达验证 / shell 目标闸门 / 终端死亡观察);通知去重 + 界面信号减法。
-- **v0.16.3** — **应用内检查更新**(设置 → 一键对比 GitHub Releases,新版一键下载校验、原地替换并重启,tmux 会话无损)。
-- **v0.16.2** — 环境变量**JSON 导入**(粘贴 `{"env": {…}}` / 扁平 JSON 一次整套导入);**VS Code 直通**(文件管理器 / 文件右键 / session 右键);修复:文件管理器缓存不失效导致 agent 新建的文件显示不出来。
-- **v0.16.1** — **分组说明**(点分组名 → 该分组的 Markdown 说明页:这组做什么、每个 session 负责什么);**Skills 面板优化**(SKILL.md 渲染预览、表格对齐成网格,列表宽松化);右键「在 Finder 中打开当前文件夹」;修复:启动恢复上次激活的终端(不再随机跳)。
-- **v0.16.0** — **历史查看器**(⌘⇧H:把 claude / vim 等全屏程序滚走的历史抓成快照,可自由上翻);**新建会话弹窗**(必须命名 + 选起始文件夹);**Token 用量可视化**(概览卡 + 构成条 + 每日热力图);外观精修(三层暖色纸栈)。
-- **v0.15.2** — **正式签名 + Apple 公证**(Developer ID,双击即开、隐私授权升级不再重置);大幅减少「访问其他 App 数据」弹窗。
-- **v0.15.1** — 修复:在工具面板（任务 / 隧道等）上点回当前 session 无法切回终端界面（同值选择短路,改走统一的 `activateTerminal`）。
-- **v0.15.0** — **会话持久化**（重启 / `tmux kill-server` 后恢复：会话 + scrollback 存 SQLite，AI 终端自动 `claude --continue` 续接对话）；**SSH 反向端口转发**管理（侧栏「隧道」面板：多配置、开机自启、断线重连、GatewayPorts、连接日志）；**全面换肤**——按 DESIGN.md 的暖色凸版浅色外壳 + 固定深色终端、系统字体（中英一致）、统一状态色标准；启动原生全屏；终端区右键 = 侧栏会话右键。
-- **v0.14.0** — **稳定终端身份**（`@tfa_id`）：环境变量 / 分组 / 看板指派改用永久 UUID 为键，改名 · 重启不再丢数据；任务看板 **⌘⇧T** + 看板↔终端互跳，**⌘]** 优先跳待处理终端；**关窗驻留菜单栏**（调度不停）；大幅**减少动画**（键入特效默认关）+ 启动 / 运行性能优化（单一心跳、流水线 attach、回滚封顶）；侧栏精简为「文件夹 + 状态」；移除分屏多终端同屏。
-- **v0.13.0** — 新增**任务看板**（Kanban）：把任务指派给终端 agent 并派发，agent 经 `tfa-task` CLI / skill 逐步回报到共享 SQLite 看板（按状态/终端分组、待接管标黄、回复推送、忙时排队）；agent「需要关注」检测、可拖拽重排分组、新建终端选起始文件夹。
-- **v0.12.0** — 实时活动检测融入侧边栏：每行显示是否在输出（覆盖未打开的会话）+ 均衡器动效 / 最新输出行；Skills 加搜索；新建终端可选起始文件夹；移除 v0.11.0 的「办公室」可视化。
-- **v0.11.0** — 实验室新增「办公室」可视化：每个会话是一个像素小人，按分组分区，在忙的坐办公桌打字、空闲的在休息区走动，可拖拽改分组（Marvis 风亮色卡片）。
-- **v0.10.1** — 修复文件管理器打开大 / 深目录时递归爆栈崩溃（改惰性加载）；SSH 密码合并存单条钥匙串 + 机器绑定加密备份，大幅减少重装后反复授权。
-- **v0.10.0** — 新增文件管理器：右键本地会话以其当前目录打开独立窗口，浏览 + 编辑文件（md / py 高亮，其余纯文本）。
-- **v0.9.0** — 环境变量可在会话间拷贝 / 粘贴、右键重启 session 重载；实验室加 PTY / 进程监控；修复信号退出导致的 pty 泄漏。
-- **v0.8.0** — 克隆 session；标题栏显示当前工作目录；修复会话改名后环境变量 / 分组丢失。
-- **v0.7.0** — 新增 CLAUDE.md 规则编辑器、Skills 目录树（语法高亮）；修复 Homebrew 远程主机连不上。
-- **v0.6.0** — 新增 Skills 管理面板（查看 / 编辑 / 新建 / 删除）。
-- **v0.5.0 / 0.5.1** — 实验室「Token 用量」（ccusage 的 Swift 移植，Claude + Codex 两源）；加载提速 + 原生表格。
-- **v0.4.0 / 0.4.1** — 实验室上线（系统监控）；每会话环境变量，可「保存并重启 shell」即时生效。
-- **v0.3.0** — 输出活动特效（脉冲 / 完成闪 ✓）+ 后台完成系统通知。
-- **v0.2.0 / 0.2.1** — 懒加载 attach + tmux 流控；自绘分组三角、拖拽分组反馈。
-- **v0.1.0** — 首个公开版本：tmux 控制模式封装、断线重连、本地 + SSH、管理大量终端。
-
----
-
-## 📚 延伸阅读
-
+- [`docs/features.md`](docs/features.md) — 完整功能说明
 - [`CHANGELOG.md`](CHANGELOG.md) — 版本变更记录
+- [`docs/architecture.md`](docs/architecture.md) — 架构、关键难点、目录结构、技术要点
 - [`DESIGN.md`](DESIGN.md) — 设计系统（token、状态模型、组件、终端主题）
 - [`docs/tmux-control-protocol.md`](docs/tmux-control-protocol.md) — tmux 控制协议规格
 - [`docs/swiftterm-integration.md`](docs/swiftterm-integration.md) — SwiftTerm 集成规格
-
----
 
 ## 📄 License
 
