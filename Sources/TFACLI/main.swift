@@ -1,6 +1,7 @@
 import Foundation
 import notify
 import SuperagentCore
+import TFACLIKit
 
 /// 管道 / heredoc 传入的长文本。stdin 是终端，或 1 秒内既没数据也没 EOF（agent 的工具可能给一个
 /// 永不关闭的管道）→ nil，避免卡死。分块读：读到 EOF，或连续 1 秒没有新数据就停（有数据却不关的管道也不卡）。

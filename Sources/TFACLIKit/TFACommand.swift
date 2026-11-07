@@ -4,17 +4,17 @@ import SuperagentCore
 /// `tfa` 的全部逻辑：解析参数 → 调 `SuperagentEngine`（写）或读视图 → 返回要打印的内容。
 /// 不碰进程级状态（环境、cwd、stdin 由 main.swift 传入；打印、通知、退出码也由它处理），便于测试。
 /// 输出给 LLM agent 读：短、中文、无歧义。
-enum TFACommand {
-    struct Outcome: Equatable {
-        var code: Int32 = 0
-        var out = ""
-        var err = ""
+public enum TFACommand {
+    public struct Outcome: Equatable {
+        public var code: Int32 = 0
+        public var out = ""
+        public var err = ""
         /// 写入成功：main 发 Darwin 通知，App 立刻跑一轮 Pass。
-        var changed = false
+        public var changed = false
     }
 
     /// `stdin`：管道 / heredoc 传入的文本；stdin 是终端或没有数据时返回 nil。只在缺少必需的长文本时才调用。
-    static func run(_ args: [String], env: [String: String], cwd: String, stdin: @escaping () -> String?) -> Outcome {
+    public static func run(_ args: [String], env: [String: String], cwd: String, stdin: @escaping () -> String?) -> Outcome {
         let c = Context(env: env, cwd: cwd, stdin: stdin)
         do {
             return try dispatch(args[...], c)
@@ -134,8 +134,9 @@ enum TFACommand {
             return Outcome(out: try Views.ticket(c.engine(), id))
         case "candidates": return Outcome(out: try Views.candidates(c.engine()))
         case "rules": return Outcome(out: try Views.rules(c.engine()))
+        case "projects": return Outcome(out: KnownProjects.render(KnownProjects.list(env: c.env)))
         default:
-            throw CLIError.usage("未知的资源 \(resource!)（可用：ticket、candidates、rules）", command: "read")
+            throw CLIError.usage("未知的资源 \(resource!)（可用：ticket、candidates、rules、projects）", command: "read")
         }
     }
 
@@ -151,6 +152,12 @@ enum TFACommand {
         let request = a.value("request") ?? (trigger == nil ? c.piped() : nil)
         guard request != nil || trigger != nil else { throw CLIError.usage("缺少 --request（请求原文；也可从 stdin 传入）", command: cmd) }
         let repo = try a.value("dir").map(c.directory) ?? (trigger == nil ? c.directory(c.cwd) : "")
+        // 执行者全部放行：家目录 / 根目录不是项目。直接把 TFA 已知的项目目录给主管，让它按名字选。
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        if repo == home || repo == "/" {
+            throw SuperagentError("不能在\(repo == "/" ? "根目录" : "家目录")开工单：用 --dir 指定项目目录。\n"
+                                  + KnownProjects.render(KnownProjects.list(env: c.env)).trimmingCharacters(in: .newlines))
+        }
         let engine = try c.engine()
         let existed = try trigger.flatMap { try engine.store.trigger($0)?.ticketID } != nil
         let t = try engine.accept(.init(title: title, request: request ?? "", repo: repo, note: a.value("note") ?? "",
@@ -388,6 +395,7 @@ enum TFACommand {
         Entry(command: "read ticket", usage: "tfa read ticket [<id>]", about: "工单详情：原始请求、全部消息、最新回报、时间线", worker: false),
         Entry(command: "read candidates", usage: "tfa read candidates", about: "待决定的候选（退回 / 定时 / 推断），附接单或研判命令", worker: false),
         Entry(command: "read rules", usage: "tfa read rules", about: "接单模式、规则版本、启用的规则", worker: false),
+        Entry(command: "read projects", usage: "tfa read projects", about: "TFA 已知的项目目录（各终端所在目录 + 工作区项目），人没说目录时按名字选", worker: false),
         Entry(command: "route accept",
               usage: "tfa route accept --title T [--request 原文] [--dir 目录] [--note 备注] [--no-worktree] [--trigger tN]",
               about: "接单并启动执行终端。--dir 默认当前目录；接候选（--trigger）时可省略 --request / --dir", worker: false),

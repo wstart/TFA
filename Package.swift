@@ -15,10 +15,16 @@ var targets: [Target] = [
         name: "SuperagentCore",
         swiftSettings: [.swiftLanguageMode(.v5)]
     ),
-    // `tfa`: the command line the 主管 (router) and the ticket workers use to talk to TFA.
+    // `tfa`: the command line the 主管 (router) and the ticket workers use to talk to TFA. The logic is a
+    // library so its tests link (a test bundle can't test two executable targets — Mux and the CLI).
+    .target(
+        name: "TFACLIKit",
+        dependencies: ["SuperagentCore"],
+        swiftSettings: [.swiftLanguageMode(.v5)]
+    ),
     .executableTarget(
         name: "TFACLI",
-        dependencies: ["SuperagentCore"],
+        dependencies: ["TFACLIKit", "SuperagentCore"],
         swiftSettings: [.swiftLanguageMode(.v5)]
     ),
     // SwiftUI app (depends on SwiftTerm for the terminal view).
@@ -70,7 +76,7 @@ if FileManager.default.fileExists(atPath: "Tests/SuperagentCoreTests") {
 if FileManager.default.fileExists(atPath: "Tests/TFACLITests") {
     targets.append(.testTarget(
         name: "TFACLITests",
-        dependencies: ["TFACLI", "SuperagentCore"],
+        dependencies: ["TFACLIKit", "SuperagentCore"],
         swiftSettings: [.swiftLanguageMode(.v5)]
     ))
 }

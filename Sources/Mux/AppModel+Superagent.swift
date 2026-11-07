@@ -52,9 +52,16 @@ extension AppModel {
         if let g = groups.first(where: { $0.name == Self.ticketGroupName && $0.hostKey == hostKey }) { assign(conn, toGroup: g.id) }
     }
 
-    /// 主管终端的目录（`tfa route accept` 默认的工单目录）。
+    /// 主管终端的目录（`tfa route accept` 默认的工单目录）。没设过时：选中的工作区项目 → 当前终端所在的
+    /// 目录（不是家目录时）→ 家目录。家目录不能开工单，主管会用 `tfa read projects` 按名字找项目。
     var routerDirectory: String {
-        get { UserDefaults.standard.string(forKey: Self.routerDirKey) ?? FileManager.default.homeDirectoryForCurrentUser.path }
+        get {
+            if let saved = UserDefaults.standard.string(forKey: Self.routerDirKey) { return saved }
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            if let project = WorkspaceStore.shared.selected?.path, !project.isEmpty { return project }
+            if let cwd = selectedConnection?.currentPath, cwd != home, ticket(for: selectedConnection!) == nil { return cwd }
+            return home
+        }
         set { UserDefaults.standard.set(newValue, forKey: Self.routerDirKey) }
     }
 

@@ -14,7 +14,7 @@ public enum SuperagentPrompts {
 
 ## 工具
 只通过 Bash 运行 `tfa`。每次 Bash 只跑一条 tfa 命令，不用管道、`&&` 或 `;`。原文含换行或引号时省略 `--request`，用 heredoc 从标准输入传入（只用于 accept 和 attach）：`tfa route accept --title T <<'EOF'`，下一行起写原文，最后一行 `EOF`。
-- `tfa read`（总览）、`tfa read ticket <id>`、`tfa read candidates`、`tfa read rules`
+- `tfa read`（总览）、`tfa read ticket <id>`、`tfa read candidates`、`tfa read rules`、`tfa read projects`（TFA 已知的项目目录）
 - `tfa route accept --title T --request "原文" [--dir PATH] [--note N] [--no-worktree] [--trigger tN]`
 - `tfa route attach <id> --request "原文"`
 - `tfa route stop <id> [--reason R]`
@@ -27,7 +27,7 @@ public enum SuperagentPrompts {
 - 闲聊、关于 TFA 本身的问题：直接回答，不建工单。
 - 工作请求：先 `tfa read` 查重，同一工作已有进行中的工单就不再接。一条消息里有几件独立的事，就各 accept 一次。
   - `--request` 放人的原话，不改写不概括；`--title` 简短。
-  - `--dir` 默认是你的当前目录，人指明别的目录才填；人要求直接在仓库里改才加 `--no-worktree`。
+  - `--dir`：人给了路径就用它；只说了项目名（如「TFA」）或你的当前目录是家目录时，先 `tfa read projects`，选名字唯一明显匹配的那个；拿不准再问人一句。人要求直接在仓库里改才加 `--no-worktree`。
   - `--note` 最多 30 词，只写路由背景或人的明确约束，不写实现指示。
   - 接单后回一句「已派工单 #N「标题」」。
 - 人明确指向某个工单（写了 #编号，或说「刚才那个」且只有一个工单符合）：`tfa route attach <id> --request "原文"`，转达对该工单问题的回答或打回意见也用它。只是主题相似算新工作。
