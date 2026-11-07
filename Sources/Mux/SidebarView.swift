@@ -15,7 +15,7 @@ private enum SidebarDrag {
     }
 }
 
-/// The left panel: a host switcher + action buttons up top (rebuild.md #1/#2), a filter field, and
+/// The left panel: one header row (host · project scope + filter field, 待处理, 「+」), and
 /// the terminal list organized into collapsible groups (#6). Click to switch; right-click a row to
 /// rename / move to a group / close / kill.
 struct SidebarView: View {
@@ -67,19 +67,12 @@ struct SidebarView: View {
         @Bindable var model = appModel
         VStack(spacing: 0) {
             SidebarHeader(
+                filter: $filter,
                 onAddHost: { sshHost = ""; sshUser = ""; sshPassword = ""; sshArgs = ""; showHostSheet = true },
                 onManageServers: { showServerSheet = true },
-                onManageProjects: { showProjects = true }
+                onManageProjects: { showProjects = true },
+                onNewGroup: { startNewGroup() }
             )
-
-            // Filter field, with the cross-pane search (⌘F) and new-group actions beside it.
-            HStack(spacing: Theme.Space.sm) {
-                FilterField(text: $filter)
-                HeaderButton(system: "magnifyingglass", help: "Search across all panes (⌘F)") { appModel.isShowingSearch = true }
-                HeaderButton(system: "folder.badge.plus", help: "New group") { startNewGroup() }
-            }
-            .padding(.horizontal, Theme.Space.md)
-            .padding(.bottom, Theme.Space.sm)
             let endedCount = appModel.visibleConnections.filter(\.isEnded).count
             if endedCount > 0 {
                 SegmentedBar(selection: $showEnded, options: [
@@ -464,96 +457,54 @@ struct SidebarView: View {
     }
 }
 
-/// Top of the left panel: the host · project pill (one menu for both), the 待处理 button, and the
-/// charcoal「+」(rebuild.md #1/#2).
+/// Top of the left panel, one row: the scope field (host · project menu on the left, the live
+/// terminal filter on the right), the 待处理 button, and the charcoal「+」(rebuild.md #1/#2).
 private struct SidebarHeader: View {
     @Environment(AppModel.self) private var appModel
+    @Binding var filter: String
     let onAddHost: () -> Void
     let onManageServers: () -> Void
     let onManageProjects: () -> Void
+    let onNewGroup: () -> Void
+
+    /// The pointer is over the scope (host · project) half — it gets a cream wash so it reads as
+    /// its own control, separate from the filter text beside it.
+    @State private var scopeHovered = false
 
     private var hasServers: Bool {
         appModel.knownHosts.contains { if case .ssh = $0 { return true }; return false }
     }
 
     var body: some View {
-        @Bindable var store = WorkspaceStore.shared
         HStack(spacing: Theme.Space.sm) {
-            Menu {
-                Section("主机") {
-                    ForEach(Array(appModel.knownHosts.enumerated()), id: \.offset) { _, host in
-                        Button {
-                            appModel.selectHost(host)
-                        } label: {
-                            Label(hostName(host), systemImage: appModel.currentHost == host ? "checkmark" : host.icon)
-                        }
-                    }
-                    Button { onAddHost() } label: { Label("Add Host…", systemImage: "plus") }
-                    if hasServers {
-                        Button { onManageServers() } label: { Label("Manage Servers…", systemImage: "server.rack") }
-                    }
-                }
-                Section("项目") {
-                    Picker("项目", selection: $store.selectedID) {
-                        Text("全部项目").tag(nil as UUID?)
-                        ForEach(store.projects) { Text($0.name).tag(Optional($0.id)) }
-                    }
-                    .pickerStyle(.inline)
-                    .labelsHidden()
-                    Button { onManageProjects() } label: { Label("管理项目…", systemImage: "folder.badge.gearshape") }
-                }
-            } label: {
-                // White pill — the sidebar's anchor: host glyph with a status dot · host · project ·
-                // chevron. Slightly taller and bolder than the controls around it.
-                HStack(spacing: Theme.Space.sm) {
-                    Image(systemName: appModel.currentHost.icon)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.textSecondary)
-                        .overlay(alignment: .bottomTrailing) {
-                            Circle()
-                                .fill(hostDot)
-                                .frame(width: 6, height: 6)
-                                .overlay(Circle().stroke(Theme.surface, lineWidth: 1.5))
-                                .offset(x: 3, y: 2)
-                        }
-                    Text(hostName(appModel.currentHost))
-                        .font(.system(size: 14, weight: .semibold))
-                        .lineLimit(1)
-                        .layoutPriority(1)
-                    // The project only shows when one narrows the list; "全部项目" is the quiet default.
-                    if let project = store.selected {
-                        Text("· \(project.name)")
-                            .font(Theme.Font.rowSubtitle)
-                            .foregroundStyle(Theme.textTertiary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(Theme.textSecondary)
-                }
-                .foregroundStyle(Theme.textPrimary)
-                .padding(.horizontal, 10)
-                .frame(height: 32)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
-                // Nav-level control → Cool Stone border (DESIGN.md), one step stronger than card Linen.
-                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.borderStrong, lineWidth: 1))
-                .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
+            // One white field, two jobs: WHICH terminals (host · project, a menu) and, of those, which
+            // match the typed text. A Linen hairline splits the halves. The scope keeps its full width
+            // first; the filter takes the rest.
+            HStack(spacing: 0) {
+                scopeMenu
+                    .layoutPriority(1)
+                Rectangle()
+                    .fill(Theme.border)
+                    .frame(width: 1, height: 16)
+                FilterField(text: $filter)
+                    .frame(minWidth: 64) // keeps the whole「筛选终端」placeholder
             }
-            // `.button` + plain draws the custom label as-is (`.borderlessButton` reduces it to text).
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .help("切换主机与项目")
+            .frame(height: 32)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+            // Nav-level control → Cool Stone border (DESIGN.md), one step stronger than card Linen.
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.borderStrong, lineWidth: 1))
 
             AttentionButton()
 
             // New terminal — a filled charcoal square (v2 primary action); a menu of the two launch
-            // kinds, each opening the「新建会话」sheet. axis-claude runs against the LOCAL model only.
+            // kinds, each opening the「新建会话」sheet, plus a new group folder. axis-claude runs
+            // against the LOCAL model only.
             Menu {
                 Button { appModel.newTerminal() } label: { Label("启动终端", systemImage: "terminal") }
                 Button { appModel.newTerminal(axisClaude: true) } label: { Label("启动 axis-claude", systemImage: "cpu") }
                     .disabled(appModel.currentHost != .local)
+                Divider()
+                Button { onNewGroup() } label: { Label("新建分组…", systemImage: "folder.badge.plus") }
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 13, weight: .semibold))
@@ -566,12 +517,103 @@ private struct SidebarHeader: View {
             .buttonStyle(.plain)
             .menuIndicator(.hidden)
             .fixedSize()
-            .help("New terminal on \(appModel.currentHost.label) (⌘T)")
-            .accessibilityLabel("新建终端")
+            .help("New terminal on \(appModel.currentHost.label) (⌘T) · 新建分组")
+            .accessibilityLabel("新建终端或分组")
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.top, Theme.Space.md)
-        .padding(.bottom, Theme.Space.md)
+        .padding(.bottom, Theme.Space.sm)
+    }
+
+    /// The scope half of the field: host glyph with a status dot · host · project · chevron. One
+    /// menu for hosts and projects.
+    private var scopeMenu: some View {
+        @Bindable var store = WorkspaceStore.shared
+        return Menu {
+            Section("主机") {
+                ForEach(Array(appModel.knownHosts.enumerated()), id: \.offset) { _, host in
+                    Button {
+                        appModel.selectHost(host)
+                    } label: {
+                        Label(hostName(host), systemImage: appModel.currentHost == host ? "checkmark" : host.icon)
+                    }
+                }
+                Button { onAddHost() } label: { Label("Add Host…", systemImage: "plus") }
+                if hasServers {
+                    Button { onManageServers() } label: { Label("Manage Servers…", systemImage: "server.rack") }
+                }
+            }
+            Section("项目") {
+                Picker("项目", selection: $store.selectedID) {
+                    Text("全部项目").tag(nil as UUID?)
+                    ForEach(store.projects) { Text($0.name).tag(Optional($0.id)) }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+                Button { onManageProjects() } label: { Label("管理项目…", systemImage: "folder.badge.gearshape") }
+            }
+        } label: {
+            // The longest wording that fits whole: 本机 · 项目 → the project alone (the host still shows
+            // as the glyph) → the project cut short → the glyph alone, at the narrowest sidebar. The
+            // project only shows when one narrows the list; "全部项目" is the quiet default.
+            let host = hostName(appModel.currentHost)
+            let project = store.selected?.name
+            ViewThatFits(in: .horizontal) {
+                scopeLabel(host, detail: project)
+                scopeLabel(project ?? host)
+                scopeLabel(project ?? host, truncates: true)
+                scopeLabel(nil)
+            }
+            .foregroundStyle(Theme.textPrimary)
+            .padding(.leading, 10)
+            .padding(.trailing, Theme.Space.md)
+            .frame(maxHeight: .infinity)
+            .background(scopeHovered ? Theme.surface2 : .clear,
+                        in: UnevenRoundedRectangle(topLeadingRadius: Theme.Radius.md, bottomLeadingRadius: Theme.Radius.md))
+            .contentShape(Rectangle())
+        }
+        // `.button` + plain draws the custom label as-is (`.borderlessButton` reduces it to text).
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .onHover { scopeHovered = $0 }
+        .help(store.selected.map { "\(hostName(appModel.currentHost)) · \($0.name) — 切换主机与项目" } ?? "切换主机与项目")
+    }
+
+    /// One wording of the scope label: host glyph with a status dot, then (if any) the title, an
+    /// optional muted detail and the menu chevron. Whole words unless `truncates`, which may cut the
+    /// title down to about two characters.
+    private func scopeLabel(_ title: String?, detail: String? = nil, truncates: Bool = false) -> some View {
+        HStack(spacing: Theme.Space.xs) {
+            Image(systemName: appModel.currentHost.icon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.textSecondary)
+                .overlay(alignment: .bottomTrailing) {
+                    Circle()
+                        .fill(hostDot)
+                        .frame(width: 6, height: 6)
+                        .overlay(Circle().stroke(Theme.surface, lineWidth: 1.5))
+                        .offset(x: 3, y: 2)
+                }
+                .padding(.trailing, Theme.Space.xxs) // room for the dot before the name
+            if let title {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: !truncates, vertical: false)
+                    .frame(idealWidth: truncates ? 28 : nil, alignment: .leading)
+                if let detail {
+                    Text("· \(detail)")
+                        .font(Theme.Font.rowSubtitle)
+                        .foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        }
     }
 
     private func hostName(_ host: AppModel.HostTarget) -> String {
@@ -579,30 +621,11 @@ private struct SidebarHeader: View {
         return host.label
     }
 
-    /// The host pill's status dot — sage for the always-available local host, neutral for a remote
+    /// The scope's host status dot — sage for the always-available local host, neutral for a remote
     /// host (its live state is shown per-terminal in the list).
     private var hostDot: Color {
         if case .local = appModel.currentHost { return Theme.Status.positive }
         return Theme.Status.neutral
-    }
-}
-
-private struct HeaderButton: View {
-    let system: String
-    let help: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: system)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Theme.textTertiary)
-                .frame(width: 28, height: 28)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(help)
-        .accessibilityLabel(help)
     }
 }
 
@@ -735,20 +758,18 @@ private struct EndedActionsRow: View {
     }
 }
 
-/// A native-feeling search field that live-filters the terminal list.
+/// The filter half of the header's scope field: live-filters the terminal list (distinct from ⌘F,
+/// which searches the text inside every pane). The surrounding field draws the surface and border.
 private struct FilterField: View {
     @Binding var text: String
+    @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: Theme.Space.sm) {
-            // A filter-semantics glyph (not a magnifier) so it reads as "narrow this list", visually
-            // distinct from the magnifyingglass beside it, which triggers full-text search across panes.
-            Image(systemName: "line.3.horizontal.decrease")
-                .foregroundStyle(Theme.textTertiary)
-                .font(.system(size: 12, weight: .medium))
+        HStack(spacing: Theme.Space.xs) {
             TextField("筛选终端", text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
+                .focused($focused)
             if !text.isEmpty {
                 Button { text = "" } label: {
                     Image(systemName: "xmark.circle.fill")
@@ -758,10 +779,11 @@ private struct FilterField: View {
                 .accessibilityLabel("Clear filter")
             }
         }
-        .padding(.horizontal, 10)
-        .frame(height: 28)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
+        .padding(.horizontal, Theme.Space.md)
+        .frame(maxHeight: .infinity)
+        // The whole half is the click target, not just the text line.
+        .contentShape(Rectangle())
+        .onTapGesture { focused = true }
         .accessibilityLabel("Filter terminals")
     }
 }

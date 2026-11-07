@@ -20,7 +20,7 @@ work for a Chinese-heavy, dense, long-running terminal UI.
 
 ## Workspace interaction standard (2026-10)
 
-- Sidebar hierarchy: host · project pill + 待处理 button + “+” → terminal filter (with ⌘F search and new group beside it) → 在线/已断开 → the pinned「主管」row → the built-in「未分组」folder, then group folders (ticket terminals collect in「工单」) → tools. The project is chosen from the host pill's menu.
+- Sidebar hierarchy: one header row — the scope field (host · project menu | terminal filter) + 待处理 button + “+” (启动终端 / 启动 axis-claude / 新建分组) → 在线/已断开 → the pinned「主管」row → the built-in「未分组」folder, then group folders (ticket terminals collect in「工单」) → tools. The project is chosen from the scope field's menu; ⌘F search lives in the 终端 menu and the terminal footer.
 - Super-agent (2026-11): requests go to the「主管」terminal in natural language; it routes them into tickets, each executed in its own terminal + git worktree. People are interrupted only when a ticket needs them (待评审 / 等你回答 / 受阻 / 失败 / 送达失败 / 停下未回报) — those appear in 待处理, the dock's 主管 badge and the 主管 panel; progress stays silent.
 - Projects keep a local folder and stable terminal associations. New terminals inherit the selected folder; board tasks created in a project retain that project even before assignment. “全部项目” clears the filter.
 - Attention inbox is global: terminal errors/attention and unanswered, blocked or queued tasks remain visible across project filters. Viewing a terminal does not resolve an outstanding board question; replying records a task comment.
@@ -39,7 +39,7 @@ styling choice respects which tier it's in. The tiers must stay visibly distinct
 |-------|-----------|-----------|-------|-----|
 | **Chrome** (cream) | Cream `#f4f2ea` | Ink `#141413` | Sidebar, titlebar, tool dock, quiet chips | One tier warmer than canvas — frames the workspace |
 | **Chrome** (canvas) | Ivory `#faf9f5` | Ink `#141413` | Main content: terminal header, model panel, tunnels, lab | The neutral working ground |
-| **Chrome** (cards) | White `#ffffff` | Ink `#141413` | Cards, inputs, list rows, host pill, sheets | Elevated surfaces floating on canvas |
+| **Chrome** (cards) | White `#ffffff` | Ink `#141413` | Cards, inputs, list rows, scope field, sheets | Elevated surfaces floating on canvas |
 | **Terminal** (fixed dark) | `#1D2026` | `#DBDEE5` | The terminal pane only | ANSI/TUI palettes are tuned for dark; a cream terminal makes `ls` colors, vim, claude TUIs illegible |
 
 The dark terminal is **not** system-appearance-driven — it's a fixed sRGB color so a freshly-created
@@ -61,7 +61,7 @@ are what views actually reference — never raw `NSColor.windowBackgroundColor` 
 |------|-------|----------------|------|
 | Ivory Canvas | `#faf9f5` | `canvas` | Main-content background — the neutral working ground |
 | Cream Chrome | `#f4f2ea` | `chrome` / `surface2` | Sidebar / titlebar / tool dock / quiet chips — one tier warmer than canvas |
-| Pure White | `#ffffff` | `surface` | Cards, input fields, list/board rows, host pill, elevated containers |
+| Pure White | `#ffffff` | `surface` | Cards, input fields, list/board rows, scope field, elevated containers |
 | Warm Parchment | `#f0eee6` | — | Legacy quiet fill (kept; new washes use Cream) |
 | Ink Black | `#141413` | `textPrimary` | Primary text, high-emphasis labels |
 | Charcoal | `#1f1e1d` | `brand` / emphasis | Filled buttons, active emphasis, focus — the monochrome "annotation" weight |
@@ -212,16 +212,17 @@ signature looping animation**:
 
 Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
 
-- **Sidebar** — Cream chrome; hosts the host pill, filter pill, terminal list, and tool dock.
-- **Host pill** — the sidebar's anchor: White, 32px tall, Cool Stone border (nav-level), 9.6px; host
-  glyph with a sage/stone status dot, 「本机」/host in 14 semibold, the project name (only when one is
-  selected), and an up-down chevron. One menu for hosts and projects. Followed by the 待处理 button and
-  a 32px filled-charcoal `+` (menu: 启动终端 / 启动 axis-claude).
+- **Sidebar** — Cream chrome; hosts the scope field, terminal list, and tool dock.
+- **Scope field** — the sidebar's anchor, one row: White, 32px tall, Cool Stone border (nav-level),
+  9.6px, split by a 16px Linen hairline. Left half = the host · project menu: host glyph with a
+  sage/stone status dot, 「本机」/host in 13 semibold, the project in muted caption (only when one is
+  selected), and an up-down chevron; a Cream wash on hover. As the sidebar narrows it steps down to
+  the project alone, then the project cut short, then the glyph alone. Right half = the live filter
+  (「筛选终端」, at least 64px so the placeholder stays whole; distinct from ⌘F search). Followed by
+  the 待处理 button and a 32px filled-charcoal `+` (menu: 启动终端 / 启动 axis-claude / 新建分组…).
 - **待处理 button** — a tray glyph in the header; amber with a small count badge while terminals ask
   for you or fail to connect, muted otherwise; opens the attention center.
-- **Filter row** — the filter field plus quiet ⌘F search and new-group icons beside it.
 - **在线 / 已断开 switch** — full-width segmented bar: a Linen well with the chosen half raised in white.
-- **Filter pill** — White capsule + Linen border, 9.6px; live-filters the list (distinct from ⌘F search).
 - **Sidebar terminal row** — a 22px rounded-square **kind badge** (agents — axis-claude / Claude /
   Codex — solid Charcoal with an ivory glyph; shells and ssh a White chip with a Linen hairline;
   ended/dormant faded), then `rowTitle` name + `rowSubtitle` (cwd shown as `~` and, when deep, only
