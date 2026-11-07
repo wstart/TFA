@@ -62,6 +62,10 @@ final class SuperagentRuntime {
     @ObservationIgnored private var exitedPasses: [Int64: Int] = [:]
     /// 副作用第一次撞上对话框的时间（-1 = 已经报过）。
     @ObservationIgnored private var dialogSince: [String: Double] = [:]
+    /// 往已有终端里重新打启动命令的时间（按窗格）：30 秒内不叠着再打。
+    @ObservationIgnored private var retypedAt: [String: Double] = [:]
+    @ObservationIgnored private var routerTypedAt = Date.distantPast
+    @ObservationIgnored private var routerOpening: Task<String?, Never>?
     @ObservationIgnored private var lastVersion: Int64 = -1
     @ObservationIgnored private var passCount = 0
 
@@ -177,9 +181,21 @@ final class SuperagentRuntime {
 
     /// 打开（或建）「主管」终端：Claude Code，只允许 `tfa` 命令、禁用编辑。返回会话名。
     func openRouter(dir: String) async -> String? {
+        // 连点两下：第二次等第一次的结果，不并发建两个（同名会话会建失败）。
+        if let inFlight = routerOpening { return await inFlight.value }
+        let task = Task { @MainActor in await self.openRouterOnce(dir: dir) }
+        routerOpening = task
+        defer { routerOpening = nil }
+        return await task.value
+    }
+
+    private func openRouterOnce(dir: String) async -> String? {
         let tmux = self.tmux
         let command = routerCommand()
-        let made = await Task.detached(priority: .userInitiated) { Self.makeRouter(tmux, dir: dir, command: command) }.value
+        // 30 秒内刚打过启动命令：shell 可能还没执行它，别再打一遍（会拼成一行）。
+        let mayRetype = Date().timeIntervalSince(routerTypedAt) > 30
+        routerTypedAt = Date()
+        let made = await Task.detached(priority: .userInitiated) { Self.makeRouter(tmux, dir: dir, command: command, mayRetype: mayRetype) }.value
         switch made {
         case .success(let name):
             if routerSession != name { routerSession = name }
@@ -342,8 +358,14 @@ final class SuperagentRuntime {
         let wait = launchWait
         let taken = Set(snap.map(\.session))
         let sentAt = clock()
+        let key = existing?.pane ?? ""
+        let mayRetype = key.isEmpty || clock() - (retypedAt[key] ?? 0) > 30
+        if existing?.isPlainShell == true {
+            guard mayRetype else { return .later(10) } // 上一次打的启动命令还没跑起来
+            retypedAt[key] = clock()
+        }
         let result = await Task.detached(priority: .userInitiated) {
-            Self.launch(tmux, ticket: t, existing: existing, taken: taken, root: root, commandLine: commandLine, wait: wait)
+            Self.launch(tmux, ticket: t, existing: existing, taken: taken, root: root, commandLine: commandLine, wait: wait, mayRetype: mayRetype)
         }.value
         switch result {
         case .success(let r):
@@ -427,18 +449,16 @@ final class SuperagentRuntime {
 
     // 阻塞的 tmux 步骤（在后台线程上跑）。
 
-    nonisolated static func makeRouter(_ tmux: SuperagentTmux, dir: String, command: String) -> Result<String, Error> {
+    nonisolated static func makeRouter(_ tmux: SuperagentTmux, dir: String, command: String, mayRetype: Bool) -> Result<String, Error> {
         let snap = tmux.snapshot() ?? []
         if let existing = snap.first(where: \.isRouter) {
             // 主管终端还在，但 Claude Code 已经退出（回到 shell）：重新启动它。
-            if existing.isPlainShell { tmux.type(existing.pane, "cd \(SuperagentTmux.quote(dir)) && \(command)") }
+            if existing.isPlainShell, mayRetype { tmux.type(existing.pane, "cd \(SuperagentTmux.quote(dir)) && \(command)") }
             return .success(existing.session)
         }
         let name = SuperagentTmux.sessionName("主管", taken: Set(snap.map(\.session)))
         do {
-            let pane = try tmux.newSession(name: name, dir: dir, router: true)
-            waitForPrompt(tmux, pane)
-            tmux.type(pane, command)
+            _ = try tmux.newSession(name: name, dir: dir, router: true, command: command)
             return .success(name)
         } catch { return .failure(error) }
     }
@@ -466,7 +486,7 @@ final class SuperagentRuntime {
 
     /// 准备目录 → 找到或建执行终端 → 前台是 shell 就打入 agent 命令并等它起来。
     nonisolated static func launch(_ tmux: SuperagentTmux, ticket t: Ticket, existing: SuperagentPane?, taken: Set<String>,
-                                   root: URL, commandLine: String, wait: Double) -> Result<Launched, Error> {
+                                   root: URL, commandLine: String, wait: Double, mayRetype: Bool = true) -> Result<Launched, Error> {
         do {
             var dir = t.dir, branch = t.branch
             if dir.isEmpty || !FileManager.default.fileExists(atPath: dir) {
@@ -478,13 +498,16 @@ final class SuperagentRuntime {
             var created = false
             if existing == nil {
                 session = SuperagentTmux.sessionName("工单\(t.id)·\(t.title.prefix(14))", taken: taken)
-                target = try tmux.newSession(name: session, dir: dir, ticket: t.id)
+                target = try tmux.newSession(name: session, dir: dir, ticket: t.id, command: commandLine)
                 created = true
-                waitForPrompt(tmux, target)
             }
             if let p = existing, !p.isPlainShell { return .success((session, dir, branch, false, false)) }
-            if !created { tmux.run(["send-keys", "-t", target, "-X", "cancel"]) } // 在 copy-mode 里就先退出
-            tmux.type(target, "cd \(SuperagentTmux.quote(dir)) && \(commandLine)")
+            if !created {
+                // 已有终端回到了 shell：在里面重新启动 agent。上一次打的命令可能还没执行完——不叠着再打。
+                guard mayRetype else { throw SuperagentTmux.Failure(description: "刚打过启动命令，等它起来") }
+                tmux.run(["send-keys", "-t", target, "-X", "cancel"]) // 在 copy-mode 里就先退出
+                tmux.type(target, "cd \(SuperagentTmux.quote(dir)) && \(commandLine)")
+            }
             let deadline = Date().addingTimeInterval(wait)
             var startedAt: Date?
             while Date() < deadline {
@@ -511,17 +534,6 @@ final class SuperagentRuntime {
         } catch { return .failure(error) }
     }
 
-    /// 新会话：等 shell 画出提示符（最多 5 秒），再往里打命令。
-    nonisolated static func waitForPrompt(_ tmux: SuperagentTmux, _ target: String) {
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline {
-            if !tmux.capture(target, lines: 5).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Thread.sleep(forTimeInterval: 0.4)
-                return
-            }
-            Thread.sleep(forTimeInterval: 0.2)
-        }
-    }
 
     // MARK: - 读视图
 

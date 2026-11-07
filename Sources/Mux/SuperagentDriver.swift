@@ -83,8 +83,15 @@ struct SuperagentTmux: Sendable {
 
     /// 建一个后台会话（不抢焦点），打上工单 / 主管标记，并记下 agent 窗格。返回窗格 id。
     @discardableResult
-    func newSession(name: String, dir: String, ticket: Int64? = nil, router: Bool = false) throws -> String {
-        let r = run(["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, "-c", dir, "-x", "160", "-y", "48"])
+    /// `command` 给了就让 tmux 直接用它开会话（交互式登录 shell 里跑，退出后留下一个 shell）——不往还在
+    /// 初始化的 shell 里打字：那样回车可能被吞，下一次再打就和上一次拼成一行。
+    func newSession(name: String, dir: String, ticket: Int64? = nil, router: Bool = false, command: String? = nil) throws -> String {
+        var args = ["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, "-c", dir, "-x", "160", "-y", "48"]
+        if let command {
+            let shell = defaultShell()
+            args += [shell, "-lic", "\(command); exec \(Self.quote(shell)) -l"]
+        }
+        let r = run(args)
         guard r.status == 0 else { throw Failure(description: "建终端失败：\(r.err.trimmingCharacters(in: .whitespacesAndNewlines))") }
         let pane = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
         // `=name:` — set-option resolves a pane-style target; a bare `=name` reports "no such session".
@@ -100,6 +107,13 @@ struct SuperagentTmux: Sendable {
             }
         }
         return pane
+    }
+
+    /// tmux 的 default-shell（用户在 tmux 里平时用的 shell），取不到就用 $SHELL。
+    func defaultShell() -> String {
+        let v = run(["show-options", "-gv", "default-shell"]).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !v.isEmpty, FileManager.default.isExecutableFile(atPath: v) { return v }
+        return ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     }
 
     /// 打一行字并提交：文本和回车分开发（agent TUI 会把「文本+回车」整块当成多行粘贴）。
