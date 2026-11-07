@@ -220,6 +220,54 @@ struct SuperagentTmux: Sendable {
         return (FileManager.default.fileExists(atPath: dir) ? dir : path, branch)
     }
 
+    /// 通过时把工单分支合并进主仓库当前检出的分支（工单分支就是从它分出来的，通常是 main）。
+    /// 工单目录还有没提交的改动、主仓库在分离 HEAD 或有没完成的合并、合并会冲突：都不动主仓库，抛出原因。
+    /// 冲突用 `merge-tree` 预演，主仓库工作区里永远不会留下冲突标记。返回一句结果（写进时间线）。
+    static func mergeBranch(repo: String, branch: String, dir: String, message: String) throws -> String {
+        let git = "/usr/bin/git"
+        func trimmed(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let top = exec(git, ["-C", repo, "rev-parse", "--show-toplevel"])
+        guard top.status == 0 else { throw Failure(description: "\(repo) 不是 git 仓库") }
+        let toplevel = trimmed(top.out)
+        func g(_ args: String...) -> (status: Int32, out: String, err: String) { exec(git, ["-C", toplevel] + args) }
+
+        if FileManager.default.fileExists(atPath: dir) {
+            // 新建了却没 add 的文件也算：不然分支「没有新提交」，工单结了，文件却留在工单目录里。
+            let dirty = exec(git, ["-C", dir, "status", "--porcelain"]).out
+                .split(separator: "\n").map { String($0.dropFirst(3)) }
+            if !dirty.isEmpty {
+                throw Failure(description: "工单目录还有没提交的改动（\(dirty.prefix(3).joined(separator: "、"))\(dirty.count > 3 ? " 等 \(dirty.count) 个文件" : "")），"
+                              + "没有合并。打回让执行者提交后再通过。")
+            }
+        }
+        let head = g("symbolic-ref", "--quiet", "--short", "HEAD")
+        guard head.status == 0 else { throw Failure(description: "主仓库 \(toplevel) 处于分离 HEAD，不知道合并到哪个分支，没有合并。") }
+        let target = trimmed(head.out)
+        if g("rev-parse", "--quiet", "--verify", "MERGE_HEAD").status == 0 {
+            throw Failure(description: "主仓库 \(toplevel) 有一个没完成的合并，没有合并 \(branch)。")
+        }
+        switch g("merge-base", "--is-ancestor", branch, "HEAD").status {
+        case 0: return "\(branch) 没有新提交，不用合并"
+        case 1: break
+        default: throw Failure(description: "找不到分支 \(branch)，没有合并。")
+        }
+        let preview = g("merge-tree", "--write-tree", "--name-only", "--no-messages", "HEAD", branch)
+        if preview.status == 1 {
+            let files = preview.out.split(separator: "\n").dropFirst().map(String.init)
+            throw Failure(description: "\(branch) 合并到 \(target) 会冲突（\(files.prefix(3).joined(separator: "、"))），没有合并。"
+                          + "打回让执行者先合并 \(target) 解决冲突。")
+        }
+        guard preview.status == 0 else { throw Failure(description: "预演合并失败：\(trimmed(preview.err))") }
+        let merge = g("merge", "--no-edit", "-m", message, branch)
+        guard merge.status == 0 else {
+            // 只撤销自己开的合并（开始前已确认没有别的合并在进行）。
+            if g("rev-parse", "--quiet", "--verify", "MERGE_HEAD").status == 0 { _ = g("merge", "--abort") }
+            throw Failure(description: "合并 \(branch) 到 \(target) 失败：\(trimmed(merge.err.isEmpty ? merge.out : merge.err))")
+        }
+        let sha = trimmed(g("rev-parse", "--short", "HEAD").out)
+        return "已把 \(branch) 合并到 \(target)（\(sha)）"
+    }
+
     /// 单引号转义，给打进 shell 的命令行用。
     static func quote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 }

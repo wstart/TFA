@@ -299,14 +299,14 @@ public final class SuperagentEngine {
 
     // MARK: - 人的命令（App 界面）
 
-    /// 通过：结果被人接受，工单完成。
-    public func approve(_ id: Int64, by: String = "你") throws {
+    /// 通过：结果被人接受，工单完成。`merged` = App 已把工单分支合并进主仓库的那句结果（记进时间线）。
+    public func approve(_ id: Int64, by: String = "你", merged: String? = nil) throws {
         try store.transaction {
             var t = try requireTicket(id)
             guard t.status == .open else { throw SuperagentError("工单 #\(id) 已经结束") }
             let at = now()
             try end(&t, .done, by: by, at: at)
-            try store.log(id, "approved", "\(by) 通过", at: at)
+            try store.log(id, "approved", merged.map { "\(by) 通过；\($0)" } ?? "\(by) 通过", at: at)
         }
     }
 

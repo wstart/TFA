@@ -184,7 +184,9 @@ private struct NeedsYouCard: View {
         return HStack(spacing: Theme.Space.sm) {
             switch item.stage.needsPerson {
             case .review:
-                Button("通过") { sa.approve(t.id) }.buttonStyle(.borderedProminent)
+                Button(sa.merging.contains(t.id) ? "合并中…" : "通过") { sa.approve(t.id) }.buttonStyle(.borderedProminent)
+                    .disabled(sa.merging.contains(t.id))
+                    .help(t.branch.isEmpty ? "结单" : "把 \(t.branch) 合并进主仓库当前分支，然后结单")
                 Button("打回…") { write(.reject) }
             case .answer:
                 Button("回答…") { write(.answer) }.buttonStyle(.borderedProminent)

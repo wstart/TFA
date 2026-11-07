@@ -74,7 +74,9 @@ struct TicketBar: View {
         switch stage {
         case .person(.review):
             Button("打回…") { appModel.ticketFeedback = .init(ticketID: t.id, kind: .reject) }
-            Button("通过") { sa.approve(t.id) }.buttonStyle(.borderedProminent)
+            Button(sa.merging.contains(t.id) ? "合并中…" : "通过") { sa.approve(t.id) }.buttonStyle(.borderedProminent)
+                .disabled(sa.merging.contains(t.id))
+                .help(t.branch.isEmpty ? "结单" : "把 \(t.branch) 合并进主仓库当前分支，然后结单")
         case .person(.answer):
             Button("回答…") { appModel.ticketFeedback = .init(ticketID: t.id, kind: .answer) }.buttonStyle(.borderedProminent)
         case .person(.blocked), .person(.failed), .person(.delivery), .person(.stalled), .idle:

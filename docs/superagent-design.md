@@ -183,7 +183,7 @@ TFA 天然具备 Super-agent 的「执行层」，缺的是「授权层」和「
 |---|---|---|
 | CLI 往命令表插命令、等 App 执行 | CLI 直接调用同一份 `SuperagentEngine`，在 `BEGIN IMMEDIATE` 事务里写 `superagent.db`，提交后发 Darwin 通知让 App 立刻跑一轮 Pass | 领域逻辑仍只有一份（单一写入者是「同一个引擎」而不是「同一个进程」）；App 没开时主管/执行者也能读写，少一个往返和超时 |
 | relay 用 IM 回复人 | 主管自己在终端里对人说话，所以没有 `reply` 网关；relay 把回报打进主管终端 | TFA 的人就坐在终端前 |
-| ready 即结单 | ready 进「待评审」，人点「通过」才结单，「打回」把意见送回执行终端 | 本地评审是 TFA 的交付环节 |
+| ready 即结单 | ready 进「待评审」，人点「通过」才结单（有工单分支就先合并进主仓库当前分支，合并不了不结单），「打回」把意见送回执行终端 | 本地评审是 TFA 的交付环节 |
 | 只靠结构化回报 | 屏幕信号只做兜底：停下 `idleSeconds`（默认 90 秒）没回报先催一次，仍不回报记「停下未回报」；agent 退出、会话丢失各自处理 | 终端无法强制结构化，兜底避免工单悄悄卡死 |
 
 代码位置：`Sources/SuperagentCore`（模型、存储、引擎、规则、prompt）、`Sources/TFACLI`（`tfa`）、`Sources/Mux/Superagent*.swift`（tmux 驱动、Pass 循环、界面）、`Sources/Mux/AppModel+Superagent.swift`（侧栏/通知接入）。

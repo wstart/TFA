@@ -135,6 +135,13 @@ struct RootView: View {
         } message: {
             Text("钥匙串读取失败（通常是 App 重新签名 / 重装导致）。检测到本地加密备份中有 \(appModel.backupPasswordCount) 个已保存的 SSH 密码，是否恢复？恢复后会重新写入钥匙串。")
         }
+        // 点「通过」却没能合并工单分支：在哪儿点的都能看到原因（工单条下面没有面板的横幅）。
+        .alert("没有合并", isPresented: Binding(get: { appModel.superagent.mergeError != nil },
+                                              set: { if !$0 { appModel.superagent.mergeError = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(appModel.superagent.mergeError ?? "")
+        }
     }
 
     private var clampedSidebarWidth: CGFloat {

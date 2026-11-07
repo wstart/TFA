@@ -149,7 +149,25 @@ final class SuperagentRuntime {
 
     // MARK: - 人的操作（界面）
 
-    func approve(_ id: Int64) { act { try $0.approve(id) } }
+    /// 通过：有工单分支就先把它合并进主仓库当前分支，合并成功才结单；合并不了工单留在「待评审」，
+    /// 原因放进 `mergeError`。返回的 Task 给测试等结果。
+    @discardableResult
+    func approve(_ id: Int64) -> Task<Void, Never> {
+        Task { @MainActor in
+            guard let engine = self.engine, !self.merging.contains(id), let t = try? engine.store.ticket(id), t.isOpen else { return }
+            guard !t.branch.isEmpty else { return self.act { try $0.approve(id) } }
+            self.merging.insert(id)
+            let message = "Merge \(t.branch) (#\(id) \(t.title))"
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try SuperagentTmux.mergeBranch(repo: t.repo, branch: t.branch, dir: t.dir, message: message) }
+            }.value
+            self.merging.remove(id)
+            switch result {
+            case .success(let note): self.act { try $0.approve(id, merged: note) }
+            case .failure(let e): self.mergeError = "工单 #\(id) 仍在待评审：\(e)"
+            }
+        }
+    }
     func feedback(_ id: Int64, _ text: String) { act { try $0.feedback(id, text: text) } }
     func stop(_ id: Int64) { act { try $0.stop(id, by: "你") } }
     func retry(_ id: Int64) { act { try $0.retry(id) } }
@@ -169,6 +187,10 @@ final class SuperagentRuntime {
 
     /// 最近一次操作的错误（界面弹出后清掉）。
     var actionError: String?
+    /// 正在合并工单分支的工单（「通过」按钮显示「合并中…」）。
+    private(set) var merging: Set<Int64> = []
+    /// 点「通过」却没能合并的原因（根视图弹窗显示，关掉后清空）。
+    var mergeError: String?
 
     private func act(_ body: (SuperagentEngine) throws -> Void) {
         guard let engine else { return }
