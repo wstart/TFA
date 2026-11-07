@@ -29,6 +29,13 @@ final class AppModel {
     var tunnelsSelected = false
     /// True when the「主管」panel (Super-agent tickets / needs-you / rules) is shown in the detail area.
     var superagentSelected = false
+    /// True when「我的清单」(the work list) is shown in the detail area; `worklistTaskID` = the task card pushed
+    /// inside it (nil = the list), `worklistShowsSettings` = open with the bottom「设置」fold expanded.
+    var worklistSelected = false
+    var worklistTaskID: Int64?
+    var worklistShowsSettings = false
+    /// The task-level follow-up being written (打回任务) — the sheet is hosted at the root.
+    var taskFeedback: TaskFeedbackRequest?
     /// The follow-up being written for a ticket (打回 / 回答 / 补充) — the sheet is hosted at the root.
     var ticketFeedback: TicketFeedbackRequest?
     /// True when a group's Markdown note is shown in the detail area (which group = `groupNoteID`).
@@ -158,6 +165,9 @@ final class AppModel {
         migrateLegacyKeysIfNeeded() // one-time: name-keyed env/groups/assignees → UUID keys
         startScheduler() // ONE heartbeat: activity sampling + session snapshots
         startSuperagent()
+        // 首屏是「我的清单」（迁移失败时回退到旧的主管面板）。不再自动选中上次的终端：它仍记在
+        // lastActiveStableID 里，点它时照常连接。
+        openWorklist()
         // The script 设置「安装 Shell 集成」sources (off main; writes only when it changed).
         Task.detached(priority: .utility) { ShellIntegrationScript.install() }
         activity.captureEnabled = !sidebarCollapsed
@@ -178,11 +188,8 @@ final class AppModel {
             if self.connections.isEmpty {
                 self.openLocal(sessionName: "main")          // nothing live, nothing to restore → fresh default
             }
-            // Restore the terminal that was active last launch (by permanent stableID); fall back to
-            // the first if it's gone. Selecting triggers its lazy attach.
-            let lastID = UserDefaults.standard.string(forKey: Self.lastActiveStableIDKey)
-            self.selectedConnectionID = self.connections.first(where: { $0.stableID == lastID })?.id
-                ?? self.connections.first?.id
+            // No terminal is selected at launch: the work list is the first screen. The last-active
+            // terminal stays recorded (lastActiveStableID) and attaches when clicked.
         }
     }
 
@@ -406,7 +413,19 @@ final class AppModel {
     private func clearToolPanes() {
         axisSelected = false; labSelected = false; skillsSelected = false
         claudeMdSelected = false; tunnelsSelected = false; groupNoteSelected = false
-        superagentSelected = false
+        superagentSelected = false; worklistSelected = false
+    }
+
+    /// 「我的清单」可用：启动时的工单 → 任务迁移成功。失败时清单页不开，回退到旧的主管面板（注意事项 K-05）。
+    var worklistAvailable: Bool { superagent.worklistAvailable }
+
+    /// Show「我的清单」: the list, or one task's card (`task`), optionally scrolled to the settings fold.
+    func openWorklist(task: Int64? = nil, settings: Bool = false) {
+        guard worklistAvailable else { return openSuperagent() }
+        clearToolPanes(); worklistSelected = true
+        worklistTaskID = task
+        worklistShowsSettings = settings
+        leaveTerminals()
     }
 
     /// Show the「主管」panel. Mutually exclusive with the other tool panes / a terminal.
@@ -727,36 +746,54 @@ final class AppModel {
         activateTerminal(vis[((cur + delta) % n + n) % n].id)
     }
 
-    /// Jump to the next terminal that needs eyes (⌘]), wrapping around. Priority: a terminal that's
-    /// explicitly WAITING for you (bell / agent ask) beats one that merely has unseen output — one
-    /// key patrols everything, most urgent first. No-op when nothing is pending.
+    /// ⌘]: jump to the next thing that needs eyes. Tasks that need you come first (their cards, in
+    /// `tasksNeedingYou` order), then a terminal explicitly WAITING for you (bell / agent ask), then one that
+    /// merely has unseen output — one key patrols everything, most urgent first (注意事项 F-15). No-op when
+    /// nothing is pending.
     func selectNextUnseen() {
-        let vis = visibleConnections
-        guard !vis.isEmpty else { return }
-        let start = vis.firstIndex { $0.id == selectedConnectionID } ?? -1
-        for off in 1...vis.count where vis[(start + off) % vis.count].needsAttention {
-            activateTerminal(vis[(start + off) % vis.count].id)
-            return
-        }
-        for off in 1...vis.count where vis[(start + off) % vis.count].hasUnseenOutput {
-            activateTerminal(vis[(start + off) % vis.count].id)
-            return
+        patrolTasks { wrap in
+            self.selectNextTerminal(wrap: wrap) { $0.needsAttention } || self.selectNextTerminal(wrap: wrap) { $0.hasUnseenOutput }
         }
     }
 
-    /// Number of terminals currently waiting for the user (agent pinged in the background).
-    var attentionCount: Int { connections.filter { $0.needsAttention }.count }
+    /// Number of things explicitly waiting for the user: terminals that pinged in the background + tasks that need you.
+    var attentionCount: Int { connections.filter { $0.needsAttention }.count + superagent.tasksNeedingYou.count }
 
-    /// Jump to the next terminal that's explicitly waiting for you (bell / OSC notification). Cycles
-    /// through them; selecting clears that one's flag (markViewed).
+    /// ⌘⇧]: the next task card that needs you, then the next terminal explicitly waiting for you (bell / OSC
+    /// notification). Selecting a terminal clears its flag (markViewed).
     func selectNextAttention() {
-        let vis = visibleConnections
-        guard !vis.isEmpty else { return }
-        let start = vis.firstIndex { $0.id == selectedConnectionID } ?? -1
-        for off in 1...vis.count where vis[(start + off) % vis.count].needsAttention {
-            activateTerminal(vis[(start + off) % vis.count].id)
+        patrolTasks { wrap in self.selectNextTerminal(wrap: wrap) { $0.needsAttention } }
+    }
+
+    /// One patrol order: task card 1 → … → task card N → the terminals → back to task card 1. `terminals(wrap)`
+    /// moves to the next qualifying terminal (true when it found one); without tasks it's the old terminal-only cycle.
+    private func patrolTasks(thenTerminals terminals: (_ wrap: Bool) -> Bool) {
+        let tasks = worklistAvailable ? superagent.tasksNeedingYou : []
+        guard !tasks.isEmpty else { _ = terminals(true); return }
+        if worklistSelected, let current = worklistTaskID, let i = tasks.firstIndex(where: { $0.id == current }) {
+            if i + 1 < tasks.count { openWorklist(task: tasks[i + 1].id) }      // the next card
+            else if !terminals(true) { openWorklist(task: tasks[0].id) }         // cards done: the terminals, else wrap
             return
         }
+        // On a terminal: finish the terminals after it first, then back to the first card. Elsewhere: the first card.
+        if !worklistSelected, selectedConnectionID != nil, terminals(false) { return }
+        openWorklist(task: tasks[0].id)
+    }
+
+    /// Select the first visible terminal after the current one that matches; `wrap` = continue from the top
+    /// after the last. False when none matched.
+    @discardableResult
+    private func selectNextTerminal(wrap: Bool, where match: (ConnectionSession) -> Bool) -> Bool {
+        let vis = visibleConnections
+        guard !vis.isEmpty else { return false }
+        let start = vis.firstIndex { $0.id == selectedConnectionID } ?? -1
+        let span = wrap ? vis.count : vis.count - 1 - start
+        guard span > 0 else { return false }
+        for off in 1...span where match(vis[(start + off) % vis.count]) {
+            activateTerminal(vis[(start + off) % vis.count].id)
+            return true
+        }
+        return false
     }
 
     /// Restart a session's shell so it reloads the latest saved environment. Re-pushes the stored

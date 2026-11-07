@@ -62,14 +62,27 @@ enum NotificationManager {
         UNUserNotificationCenter.current().add(request)
     }
 
-    /// A ticket entered「需要你」(review / answer / blocked / failed …) — one per transition.
-    static func superagent(title: String, body: String) {
+    /// A ticket or task entered「需要你」(review / answer / blocked / failed …) — one per transition. `task` = the
+    /// task the notification is about (task × stage notifications); clicking it opens that task card (G-04).
+    static func superagent(title: String, body: String, task: Int64? = nil) {
         guard available else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         content.sound = .default
+        if let task { content.userInfo = ["task": task] }
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// Hook up the center's delegate (clicking a notification). Silent without a bundle — the center is unusable then.
+    static func install(delegate: UNUserNotificationCenterDelegate) {
+        guard available else { return }
+        UNUserNotificationCenter.current().delegate = delegate
+    }
+
+    /// The task number a `superagent(title:body:task:)` notification carries; nil for every other notification.
+    nonisolated static func task(in response: UNNotificationResponse) -> Int64? {
+        (response.notification.request.content.userInfo["task"] as? NSNumber)?.int64Value
     }
 }

@@ -18,7 +18,7 @@ extension AppModel {
             guard let conn = self?.localConnection(named: session), let at = conn.lastUserInputAt else { return false }
             return Date().timeIntervalSince(at) < 20
         }
-        superagent.postNotification = { title, body in NotificationManager.superagent(title: title, body: body) }
+        superagent.postNotification = { title, body, task in NotificationManager.superagent(title: title, body: body, task: task) }
         superagent.start()
     }
 

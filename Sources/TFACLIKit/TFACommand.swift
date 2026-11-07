@@ -64,6 +64,19 @@ public enum TFACommand {
         /// 在执行终端里（工单终端或常驻角色的终端）。
         var inWorkerTerminal: Bool { !(env["TFA_TICKET"] ?? "").isEmpty || !(env["TFA_AGENT"] ?? "").isEmpty }
 
+        /// 在主管终端里（App 启动主管时设 `TFA_ROLE=router`）。
+        var isRouter: Bool { env["TFA_ROLE"] == "router" }
+
+        /// 清单只由人改（注意事项 E-01 / H-01）：主管不能分配 / 勾 / 通过 / 打回 / 取消，执行终端连 task add 也不能。
+        func requirePerson(_ command: String) throws {
+            if isRouter { throw SuperagentError("主管不能用 tfa \(command)：谁来做由人在清单里决定，你只能在 tfa task add 里 --suggest") }
+            try requireNotWorker(command)
+        }
+
+        func requireNotWorker(_ command: String) throws {
+            if inWorkerTerminal { throw SuperagentError("执行终端不能用 tfa \(command)：只做自己的清单项，要新任务用 tfa handback") }
+        }
+
         /// 绝对、解析过符号链接的已有目录。
         func directory(_ path: String) throws -> String {
             guard let p = resolve(path, cwd: cwd) else { throw SuperagentError("目录不存在：\(path)") }
@@ -119,6 +132,7 @@ public enum TFACommand {
         case "ack": return try ack(rest, c)
         case "report": return try report(rest, c)
         case "handback": return try handback(rest, c)
+        case "task": return try task(rest, c)
         default:
             return Outcome(code: 2, err: "tfa: 未知命令 \(head)\n\n" + help(""))
         }
@@ -311,23 +325,28 @@ public enum TFACommand {
 
     private static func report(_ args: ArraySlice<String>, _ c: Context) throws -> Outcome {
         let cmd = "report"
-        let a = try parse(args, cmd, values: ["ticket", "state", "summary", "ask", "report"])
+        let a = try parse(args, cmd, values: ["ticket", "state", "summary", "ask", "report", "item"])
         try noPositional(a, cmd)
         guard let raw = a.value("state") else { throw CLIError.usage("缺少 --state", command: cmd) }
         guard let state = ReportState(rawValue: raw) else {
             throw CLIError.usage("--state 只能是 progress|ready|blocked|failed|dropped：\(raw)", command: cmd)
         }
         guard let summary = a.value("summary") else { throw CLIError.usage("缺少 --summary（一句话结果）", command: cmd) }
+        // 工作清单：勾掉任务里的第 n 项（`Item.ord`）；项不归这张工单时由引擎报错（注意事项 D-01）。
+        let item = try a.value("item").map { v -> Int in
+            guard let n = Int(v), n > 0 else { throw CLIError.usage("--item 要写清单项序号（整数，从 1 起）：\(v)", command: cmd) }
+            return n
+        }
         let id = try c.workerTicket(a, cmd)
         let path = try a.value("report").map { p -> String in
             guard let r = resolve(p, cwd: c.cwd) else { throw SuperagentError("报告文件不存在：\(p)") }
             return r
         }
         let ask = a.value("ask")
-        try c.engine().report(id, .init(state: state, summary: summary, ask: ask, reportPath: path))
+        try c.engine().report(id, .init(state: state, summary: summary, ask: ask, reportPath: path, item: item))
         let asked = !(ask ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let tail = state == .dropped ? "：工单已结束，停止工作。" : asked ? "，问题会转给人。" : "。"
-        return Outcome(out: "已回报 \(state.rawValue)\(tail)\n", changed: true)
+        return Outcome(out: "已回报 \(state.rawValue)\(item.map { "（第 \($0) 项）" } ?? "")\(tail)\n", changed: true)
     }
 
     private static func handback(_ args: ArraySlice<String>, _ c: Context) throws -> Outcome {
@@ -339,8 +358,10 @@ public enum TFACommand {
             throw CLIError.usage("缺少 --request（要退回的请求原文；也可从 stdin 传入）", command: cmd)
         }
         let id = try c.workerTicket(a, cmd)
-        let trigger = try c.engine().handback(id, request: request, reason: reason)
-        return Outcome(out: "已退回：候选 \(trigger)，由主管决定是否接单；不要在本工单里做它。\n", changed: true)
+        // 属于任务的工单退回 → 新任务 A-N 等人分配（注意事项 C-08）；其余 → 主管的候选 tN。
+        let ref = try c.engine().handback(id, request: request, reason: reason)
+        if ref.hasPrefix("A-") { return Outcome(out: "已退回：成为新任务 \(ref)，等人定谁来做；不要在本工单里做它。\n", changed: true) }
+        return Outcome(out: "已退回：候选 \(ref)，由主管决定是否接单；不要在本工单里做它。\n", changed: true)
     }
 
     // MARK: - 参数
@@ -391,11 +412,11 @@ public enum TFACommand {
         return a
     }
 
-    private static func noPositional(_ a: Args, _ command: String) throws {
+    static func noPositional(_ a: Args, _ command: String) throws {
         guard a.positional.isEmpty else { throw CLIError.usage("多余的参数：\(a.positional.joined(separator: " "))", command: command) }
     }
 
-    private static func onePositional(_ a: Args, _ command: String, _ what: String) throws -> String {
+    static func onePositional(_ a: Args, _ command: String, _ what: String) throws -> String {
         guard let first = a.positional.first else { throw CLIError.usage("缺少\(what)", command: command) }
         guard a.positional.count == 1 else { throw CLIError.usage("多余的参数：\(a.positional.dropFirst().joined(separator: " "))", command: command) }
         return first
@@ -438,11 +459,13 @@ public enum TFACommand {
         let usage: String
         let about: String
         let worker: Bool
+        /// 只给人（清单里的决定）：主管终端和执行终端里会被拒绝（注意事项 E-01）。
+        var person = false
     }
 
     private static let entries: [Entry] = [
-        Entry(command: "read", usage: "tfa read", about: "概览：需要你的工单 → 其他打开的工单 → 待决定的候选", worker: false),
-        Entry(command: "read ticket", usage: "tfa read ticket [<id>]", about: "工单详情：原始请求、全部消息、最新回报、时间线", worker: false),
+        Entry(command: "read", usage: "tfa read", about: "概览：任务（需要你 / 进行中 / 待分配）→ 需要你的工单 → 其他打开的工单 → 待决定的候选", worker: false),
+        Entry(command: "read ticket", usage: "tfa read ticket [<id>]", about: "工单详情：原始请求、所属任务和它负责的清单项、全部消息、最新回报、时间线", worker: false),
         Entry(command: "read candidates", usage: "tfa read candidates", about: "待决定的候选（退回 / 定时 / 推断），附接单或研判命令", worker: false),
         Entry(command: "read rules", usage: "tfa read rules", about: "接单模式、规则版本、启用的规则", worker: false),
         Entry(command: "read roles", usage: "tfa read roles", about: "现有角色：各自接什么、运行方式、主要行为。接单前按它选 --role", worker: false),
@@ -461,12 +484,32 @@ public enum TFACommand {
         Entry(command: "eval decide",
               usage: "tfa eval decide --trigger tN --version V --rule id=match|no_match|requires_design_decision [--rule …] --decision accept|ignore [--title T] --reason 原因",
               about: "研判推断出的候选：每条启用的规则判断一次；方向不明确就 requires_design_decision 并 ignore", worker: false),
-        Entry(command: "read", usage: "tfa read", about: "读本工单（同 tfa read ticket）：开工前先读", worker: true),
+        Entry(command: "task add",
+              usage: "tfa task add --title T [--request 原文] [--scope 目录] [--item 一项]... [--items -] [--suggest 1=助理,2=开发] [--assign-all 角色] [--priority 高|中|低] [--due YYYY-MM-DD] [--dep A-11] [--note 备注]",
+              about: "把新工作加进人的清单，不建工单。原文可从 stdin 传入；--item 写可验证的结果（2–5 条），--items - 从 stdin 一行一项；--suggest 给每项建议的角色（只是默认值）；人明确说直接让 Agent 做才 --assign-all。执行终端不能用（要新任务用 tfa handback）",
+              worker: false),
+        Entry(command: "task list", usage: "tfa task list [--needs-you] [--scope 目录] [--stage 阶段名]",
+              about: "清单：需要你 → 进行中 → 待分配，每行 A-12 [状态] 标题 · 完成/总数 · 执行者", worker: false),
+        Entry(command: "task show", usage: "tfa task show A-12",
+              about: "任务详情：原文、清单（序号即清单项号）、挂的工单、最近活动。问进度按它答；要 attach 时从这里找工单号", worker: false),
+        Entry(command: "task assign", usage: "tfa task assign A-12 --item 3,4 --to 开发|助理|你 [--one-ticket|--per-item]",
+              about: "谁来做：交给角色就为这些项建工单（同一角色默认合成一张，--per-item 每项一张）；--to 你 只是标记，不建终端",
+              worker: false, person: true),
+        Entry(command: "task done", usage: "tfa task done A-12 --item 4 [--undo]",
+              about: "勾掉你自己的清单项（Agent 的项由回报推进）；当前阶段的项全勾完，任务自动进下一阶段", worker: false, person: true),
+        Entry(command: "task approve", usage: "tfa task approve A-12",
+              about: "通过待评审的任务 → 完成（界面上点「通过」会先合并工单分支，命令行不合并）", worker: false, person: true),
+        Entry(command: "task reject", usage: "tfa task reject A-12 [--reason 意见]",
+              about: "打回 → 回到进行中：意见送给原工单，没有工单时成为新清单项；意见可从 stdin 传入", worker: false, person: true),
+        Entry(command: "task cancel", usage: "tfa task cancel A-12", about: "取消任务，名下打开的工单一并停止", worker: false, person: true),
+        Entry(command: "read", usage: "tfa read", about: "读本工单（同 tfa read ticket）：开工前先读；所属任务和你负责的清单项也在这里", worker: true),
         Entry(command: "ack", usage: "tfa ack \"<在改什么，预期结果>\"", about: "开始实质工作前确认一次", worker: true),
         Entry(command: "report",
-              usage: "tfa report --state progress|ready|blocked|failed|dropped --summary 摘要 [--ask 一个问题] [--report 文件]",
-              about: "结构化回报；要人决定就加 --ask（ready / dropped 不能带）", worker: true),
-        Entry(command: "handback", usage: "tfa handback --reason 原因 [--request 原文]", about: "退回超出本工单范围的请求，成为主管的新候选", worker: true),
+              usage: "tfa report --state progress|ready|blocked|failed|dropped --summary 摘要 [--ask 一个问题] [--report 文件] [--item n]",
+              about: "结构化回报；要人决定就加 --ask（ready / dropped 不能带）。属于任务的工单做完一项可加 --item n 勾掉第 n 项（可选），ready 勾掉全部",
+              worker: true),
+        Entry(command: "handback", usage: "tfa handback --reason 原因 [--request 原文]",
+              about: "退回超出本工单范围的请求：属于任务的工单退成新任务等人分配，否则成为主管的新候选", worker: true),
     ]
 
     private static func matches(_ e: Entry, _ command: String) -> Bool {
@@ -483,12 +526,15 @@ public enum TFACommand {
             list.map { "  \($0.usage)\n      \($0.about)\n" }.joined()
         }
         let picked = entries.filter { matches($0, command) }
-        let router = picked.filter { !$0.worker }, worker = picked.filter(\.worker)
-        var s = command.isEmpty ? "tfa — 主管和执行终端与 TFA 交互的命令行\n\n" : ""
-        if !router.isEmpty { s += "主管：\n" + section(router) }
-        if !worker.isEmpty { s += (router.isEmpty ? "" : "\n") + "执行者（工单号取 --ticket N，否则 $TFA_TICKET；常驻角色的终端里写 --ticket N）：\n" + section(worker) }
+        let router = picked.filter { !$0.worker && !$0.person }, person = picked.filter(\.person), worker = picked.filter(\.worker)
+        var s = command.isEmpty ? "tfa — 主管、执行终端和人与 TFA 交互的命令行\n\n" : ""
+        if !router.isEmpty { s += "主管（人也能用；执行终端里 task add 会被拒绝）：\n" + section(router) }
+        if !person.isEmpty { s += (s.isEmpty ? "" : "\n") + "只给人（在清单里定谁来做；主管终端和执行终端里会被拒绝）：\n" + section(person) }
+        if !worker.isEmpty {
+            s += (s.isEmpty ? "" : "\n") + "执行者（工单号取 --ticket N，否则 $TFA_TICKET；常驻角色的终端里写 --ticket N。任务只看 tfa read ticket 里自己负责的清单项，tfa task … 一律不给执行终端用）：\n" + section(worker)
+        }
         if command.isEmpty {
-            s += "\n长文本用 --flag 值 或 --flag=值；省略 --request 时从 stdin 读（可用 heredoc）。工单号写 12 或 \"#12\"。\n"
+            s += "\n长文本用 --flag 值 或 --flag=值；省略 --request 时从 stdin 读（可用 heredoc）。工单号写 12 或 \"#12\"，任务号写 A-12 或 12。\n"
             s += "出错退出码 1，用法错误退出码 2。\n"
         }
         return s

@@ -65,13 +65,65 @@ public final class SuperagentStore {
             CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
         // 角色（docs/superagent-roles.md）之前的库没有 role 列：旧工单都是「开发」。
-        func hasRole() throws -> Bool { try db.query("PRAGMA table_info(ticket)").contains { $0.text(1) == "role" } }
-        if try !hasRole() {
-            // App 和 tfa 可能同时打开旧库：另一个连接先加上了就不算错。
-            do { try db.exec("ALTER TABLE ticket ADD COLUMN role TEXT NOT NULL DEFAULT '\(Role.developer)'") } catch {
-                if try !hasRole() { throw error }
-            }
+        try addColumn("ticket", "role", "TEXT NOT NULL DEFAULT '\(Role.developer)'")
+        // 工作清单（TFA-工作清单-需求文档 §7）：任务 / 清单项 / 工作流；工单回指任务；时间线按任务聚合。
+        try db.exec("""
+            CREATE TABLE IF NOT EXISTS task (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, origin TEXT, origin_id TEXT,
+              title TEXT NOT NULL, request TEXT NOT NULL, source TEXT NOT NULL, source_ref TEXT,
+              scope TEXT NOT NULL DEFAULT '', owner TEXT NOT NULL DEFAULT '你', due REAL,
+              priority TEXT NOT NULL DEFAULT 'medium', workflow TEXT NOT NULL DEFAULT 'default',
+              workflow_snapshot TEXT NOT NULL DEFAULT '[]', stage TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'open', result_summary TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
+              notified_stage TEXT, sync_state TEXT NOT NULL DEFAULT 'local', synced_at REAL,
+              created_at REAL NOT NULL, updated_at REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS task_status ON task(status, stage);
+            CREATE TABLE IF NOT EXISTS task_dep (task_id INTEGER NOT NULL, depends_on INTEGER NOT NULL, PRIMARY KEY (task_id, depends_on));
+            CREATE TABLE IF NOT EXISTS item (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, ord INTEGER NOT NULL, text TEXT NOT NULL,
+              assignee TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'todo', ticket_id INTEGER, done_at REAL, done_by TEXT);
+            CREATE INDEX IF NOT EXISTS item_task ON item(task_id, ord);
+            CREATE TABLE IF NOT EXISTS workflow (id TEXT PRIMARY KEY, name TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '', stages TEXT NOT NULL);
+            """)
+        try addColumn("ticket", "task_id", "INTEGER")
+        try addColumn("ticket", "item_ids", "TEXT NOT NULL DEFAULT '[]'")
+        try addColumn("ticket", "review_of", "INTEGER")
+        try addColumn("event", "task_id", "INTEGER")
+        try db.exec("""
+            CREATE INDEX IF NOT EXISTS ticket_task ON ticket(task_id);
+            CREATE INDEX IF NOT EXISTS event_task ON event(task_id, id);
+            """)
+        if try (db.query("PRAGMA user_version").first?.int(0) ?? 0) < Self.schemaVersion {
+            try db.exec("PRAGMA user_version=\(Self.schemaVersion)")
         }
+    }
+
+    /// 表结构版本（注意事项 B-01）：1 = 工单 + 角色；2 = 工作清单。
+    static let schemaVersion: Int64 = 2
+
+    /// 加一列；已有就跳过。App 和 tfa 可能同时打开旧库：另一个连接先加上了也不算错。
+    private func addColumn(_ table: String, _ name: String, _ decl: String) throws {
+        func has() throws -> Bool { try db.query("PRAGMA table_info(\(table))").contains { $0.text(1) == name } }
+        guard try !has() else { return }
+        do { try db.exec("ALTER TABLE \(table) ADD COLUMN \(name) \(decl)") } catch {
+            if try !has() { throw error }
+        }
+    }
+
+    /// 迁移前的整库备份（注意事项 B-01）：先 checkpoint 把 -wal 合进主文件，再复制到 `superagent.db.bak-<时间>`。
+    @discardableResult
+    public func backup(suffix: String? = nil) throws -> URL {
+        // busy ≠ 0：别的连接还在读，-wal 没能全部合进主文件——把它一起拷到 <备份名>-wal，备份才打得开、数据才齐。
+        let busy = try db.query("PRAGMA wal_checkpoint(TRUNCATE)").first?.int(0) ?? 0
+        let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmm"
+        let dest = url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + ".bak-" + (suffix ?? f.string(from: Date())))
+        let fm = FileManager.default
+        if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+        try fm.copyItem(at: url, to: dest)
+        let wal = URL(fileURLWithPath: url.path + "-wal"), destWal = URL(fileURLWithPath: dest.path + "-wal")
+        if fm.fileExists(atPath: destWal.path) { try fm.removeItem(at: destWal) }
+        if busy != 0, fm.fileExists(atPath: wal.path) { try fm.copyItem(at: wal, to: destWal) }
+        return dest
     }
 
     // MARK: - Tickets
@@ -79,7 +131,7 @@ public final class SuperagentStore {
     private static let ticketColumns = """
         id,title,request,note,repo,dir,branch,worktree,status,ended_by,ended_at,ack,attention,
         report_state,report_summary,report_path,report_at,delivery_error,nudged,notified_stage,
-        mandate,trigger_id,session,turn_at,created_at,updated_at,role
+        mandate,trigger_id,session,turn_at,created_at,updated_at,role,task_id,item_ids,review_of
         """
 
     private static func ticket(_ r: SQLRow) -> Ticket {
@@ -90,7 +142,42 @@ public final class SuperagentStore {
                reportSummary: r.text(14), reportPath: r.optText(15), reportAt: r.optDouble(16),
                deliveryError: r.optText(17), nudged: r.int(18) != 0, notifiedStage: r.optText(19),
                mandate: r.text(20), triggerID: r.optText(21), session: r.text(22), turnAt: r.optDouble(23),
-               createdAt: r.double(24), updatedAt: r.double(25))
+               createdAt: r.double(24), updatedAt: r.double(25),
+               taskID: r.optInt(27), itemIDs: Self.ids(r.text(28)), reviewOf: r.optInt(29))
+    }
+
+    static func ids(_ json: String) -> [Int64] {
+        (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [Int64]) ?? []
+    }
+    static func json(_ ids: [Int64]) -> String {
+        String(decoding: (try? JSONSerialization.data(withJSONObject: ids)) ?? Data("[]".utf8), as: UTF8.self)
+    }
+
+    /// 一个任务名下的工单（打开的 + 已结束的），按 id。
+    public func tickets(task id: Int64) throws -> [Ticket] {
+        try db.query("SELECT \(Self.ticketColumns) FROM ticket WHERE task_id=? ORDER BY id", [.int(id)]).map(Self.ticket)
+    }
+
+    /// 一批任务名下的工单，按任务分组（清单页一次聚合，注意事项 B-11）。
+    public func tickets(taskIDs: [Int64]) throws -> [Int64: [Ticket]] {
+        var out: [Int64: [Ticket]] = [:]
+        for chunk in Self.chunks(taskIDs) {
+            let rows = try db.query("SELECT \(Self.ticketColumns) FROM ticket WHERE task_id IN (\(Self.marks(chunk.count))) ORDER BY id",
+                                    chunk.map(SQLValue.int))
+            for t in rows.map(Self.ticket) { out[t.taskID ?? 0, default: []].append(t) }
+        }
+        return out
+    }
+
+    /// 迁移用：只写回指列 `task_id / item_ids`，工单其余列原样不动（注意事项 B-02）。
+    func linkTicket(_ id: Int64, task: Int64, itemIDs: [Int64]) throws {
+        try db.run("UPDATE ticket SET task_id=?, item_ids=? WHERE id=?", [.int(task), .text(Self.json(itemIDs)), .int(id)])
+    }
+
+    /// `IN (?,?,…)` 的占位符；一次最多 500 个（SQLite 变量上限之内）。
+    static func marks(_ n: Int) -> String { Array(repeating: "?", count: n).joined(separator: ",") }
+    static func chunks(_ ids: [Int64]) -> [[Int64]] {
+        stride(from: 0, to: ids.count, by: 500).map { Array(ids[$0..<min($0 + 500, ids.count)]) }
     }
 
     public func ticket(_ id: Int64) throws -> Ticket? {
@@ -107,12 +194,14 @@ public final class SuperagentStore {
 
     func insertTicket(_ t: Ticket) throws -> Int64 {
         try db.run("""
-            INSERT INTO ticket (title,request,note,repo,dir,branch,worktree,status,mandate,trigger_id,created_at,updated_at,role)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO ticket (title,request,note,repo,dir,branch,worktree,status,mandate,trigger_id,created_at,updated_at,role,
+              task_id,item_ids,review_of)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             [.text(t.title), .text(t.request), .text(t.note), .text(t.repo), .text(t.dir), .text(t.branch),
              .bool(t.worktree), .text(t.status.rawValue), .text(t.mandate), .opt(t.triggerID),
-             .real(t.createdAt), .real(t.updatedAt), .text(t.role)])
+             .real(t.createdAt), .real(t.updatedAt), .text(t.role),
+             t.taskID.map(SQLValue.int) ?? .null, .text(Self.json(t.itemIDs)), t.reviewOf.map(SQLValue.int) ?? .null])
         return db.lastInsertID
     }
 
@@ -120,13 +209,14 @@ public final class SuperagentStore {
         try db.run("""
             UPDATE ticket SET title=?,request=?,note=?,repo=?,dir=?,branch=?,worktree=?,status=?,ended_by=?,ended_at=?,
               ack=?,attention=?,report_state=?,report_summary=?,report_path=?,report_at=?,delivery_error=?,nudged=?,
-              notified_stage=?,session=?,turn_at=?,updated_at=? WHERE id=?
+              notified_stage=?,session=?,turn_at=?,updated_at=?,task_id=?,item_ids=? WHERE id=?
             """,
             [.text(t.title), .text(t.request), .text(t.note), .text(t.repo), .text(t.dir), .text(t.branch),
              .bool(t.worktree), .text(t.status.rawValue), .opt(t.endedBy), .opt(t.endedAt),
              .text(t.ack), .opt(t.attention), .opt(t.reportState?.rawValue), .text(t.reportSummary),
              .opt(t.reportPath), .opt(t.reportAt), .opt(t.deliveryError), .bool(t.nudged),
-             .opt(t.notifiedStage), .text(t.session), .opt(t.turnAt), .real(t.updatedAt), .int(t.id)])
+             .opt(t.notifiedStage), .text(t.session), .opt(t.turnAt), .real(t.updatedAt),
+             t.taskID.map(SQLValue.int) ?? .null, .text(Self.json(t.itemIDs)), .int(t.id)])
     }
 
     // MARK: - Assignments
@@ -336,21 +426,201 @@ public final class SuperagentStore {
 
     // MARK: - Timeline
 
-    func log(_ ticketID: Int64?, _ kind: String, _ text: String, at: Double) throws {
-        try db.run("INSERT INTO event (at,ticket_id,kind,text) VALUES (?,?,?,?)",
-                   [.real(at), ticketID.map(SQLValue.int) ?? .null, .text(kind), .text(text)])
+    /// 工单的一条记录；`task` 给了就同时按任务聚合（工单属于某个任务时调用方应传它的 taskID）。
+    func log(_ ticketID: Int64?, _ kind: String, _ text: String, at: Double, task: Int64? = nil) throws {
+        try db.run("INSERT INTO event (at,ticket_id,kind,text,task_id) VALUES (?,?,?,?,?)",
+                   [.real(at), ticketID.map(SQLValue.int) ?? .null, .text(kind), .text(text), task.map(SQLValue.int) ?? .null])
     }
 
-    public func events(ticketID: Int64? = nil, limit: Int = 200) throws -> [TimelineEvent] {
+    /// 迁移用：工单原有的记录按任务聚合（任务卡的活动里能看到工单的历史）。
+    func retagEvents(ticket: Int64, task: Int64) throws {
+        try db.run("UPDATE event SET task_id=? WHERE ticket_id=? AND task_id IS NULL", [.int(task), .int(ticket)])
+    }
+
+    public func events(ticketID: Int64? = nil, taskID: Int64? = nil, limit: Int = 200) throws -> [TimelineEvent] {
         let rows: [SQLRow]
-        if let ticketID {
-            rows = try db.query("SELECT id,at,ticket_id,kind,text FROM event WHERE ticket_id=? ORDER BY id DESC LIMIT ?",
+        if let taskID {
+            rows = try db.query("SELECT id,at,ticket_id,kind,text,task_id FROM event WHERE task_id=? ORDER BY id DESC LIMIT ?",
+                                [.int(taskID), .int(Int64(limit))])
+        } else if let ticketID {
+            rows = try db.query("SELECT id,at,ticket_id,kind,text,task_id FROM event WHERE ticket_id=? ORDER BY id DESC LIMIT ?",
                                 [.int(ticketID), .int(Int64(limit))])
         } else {
-            rows = try db.query("SELECT id,at,ticket_id,kind,text FROM event ORDER BY id DESC LIMIT ?", [.int(Int64(limit))])
+            rows = try db.query("SELECT id,at,ticket_id,kind,text,task_id FROM event ORDER BY id DESC LIMIT ?", [.int(Int64(limit))])
         }
         return rows.reversed().map { TimelineEvent(id: $0.int(0), at: $0.double(1), ticketID: $0.optInt(2),
-                                                   kind: $0.text(3), text: $0.text(4)) }
+                                                   kind: $0.text(3), text: $0.text(4), taskID: $0.optInt(5)) }
+    }
+
+    // MARK: - 任务 / 清单项 / 工作流（工作清单）
+
+    private static let taskColumns = """
+        id,origin,origin_id,title,request,source,source_ref,scope,owner,due,priority,workflow,workflow_snapshot,stage,
+        status,result_summary,note,notified_stage,sync_state,synced_at,created_at,updated_at
+        """
+
+    private static func task(_ r: SQLRow, deps: [Int64]) -> WorkTask {
+        let stages = (try? JSONDecoder().decode([WorkflowStage].self, from: Data(r.text(12).utf8))) ?? Workflow.builtins[0].stages
+        return WorkTask(id: r.int(0), origin: r.optText(1), originID: r.optText(2), title: r.text(3), request: r.text(4),
+                    source: TaskSource(rawValue: r.text(5)) ?? .manual, sourceRef: r.optText(6), scope: r.text(7), owner: r.text(8),
+                    due: r.optDouble(9), priority: TaskPriority(rawValue: r.text(10)) ?? .medium, deps: deps, workflow: r.text(11),
+                    stages: stages, stage: r.text(13), status: TaskStatus(rawValue: r.text(14)) ?? .open, resultSummary: r.text(15),
+                    note: r.text(16), notifiedStage: r.optText(17), syncState: r.text(18), syncedAt: r.optDouble(19),
+                    createdAt: r.double(20), updatedAt: r.double(21))
+    }
+
+    /// 一批任务行 + 它们的前置（一次查询，不逐个任务查）。
+    private func tasks(rows: [SQLRow]) throws -> [WorkTask] {
+        var deps: [Int64: [Int64]] = [:]
+        for chunk in Self.chunks(rows.map { $0.int(0) }) {
+            for d in try db.query("SELECT task_id,depends_on FROM task_dep WHERE task_id IN (\(Self.marks(chunk.count))) ORDER BY depends_on",
+                                  chunk.map(SQLValue.int)) {
+                deps[d.int(0), default: []].append(d.int(1))
+            }
+        }
+        return rows.map { Self.task($0, deps: deps[$0.int(0)] ?? []) }
+    }
+
+    public func task(_ id: Int64) throws -> WorkTask? {
+        try tasks(rows: try db.query("SELECT \(Self.taskColumns) FROM task WHERE id=?", [.int(id)])).first
+    }
+
+    /// 打开的任务（新的在前），然后是最近结束的 `endedLimit` 个。
+    public func tasks(endedLimit: Int = 30) throws -> [WorkTask] {
+        let open = try db.query("SELECT \(Self.taskColumns) FROM task WHERE status='open' ORDER BY id DESC")
+        let ended = try db.query("SELECT \(Self.taskColumns) FROM task WHERE status!='open' ORDER BY updated_at DESC LIMIT ?",
+                                 [.int(Int64(endedLimit))])
+        return try tasks(rows: open + ended)
+    }
+
+    func insertTask(_ t: WorkTask) throws -> Int64 {
+        let snapshot = String(decoding: try JSONEncoder().encode(t.stages), as: UTF8.self)
+        try db.run("""
+            INSERT INTO task (origin,origin_id,title,request,source,source_ref,scope,owner,due,priority,workflow,workflow_snapshot,stage,
+              status,result_summary,note,notified_stage,sync_state,synced_at,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            [.opt(t.origin), .opt(t.originID), .text(t.title), .text(t.request), .text(t.source.rawValue), .opt(t.sourceRef),
+             .text(t.scope), .text(t.owner), .opt(t.due), .text(t.priority.rawValue), .text(t.workflow), .text(snapshot), .text(t.stage),
+             .text(t.status.rawValue), .text(t.resultSummary), .text(t.note), .opt(t.notifiedStage), .text(t.syncState), .opt(t.syncedAt),
+             .real(t.createdAt), .real(t.updatedAt)])
+        let id = db.lastInsertID
+        try saveDeps(id, t.deps)
+        return id
+    }
+
+    /// 快照（stages）建好后不再改；deps 整体替换。
+    func saveTask(_ t: WorkTask) throws {
+        try db.run("""
+            UPDATE task SET origin=?,origin_id=?,title=?,request=?,source=?,source_ref=?,scope=?,owner=?,due=?,priority=?,workflow=?,
+              stage=?,status=?,result_summary=?,note=?,notified_stage=?,sync_state=?,synced_at=?,updated_at=? WHERE id=?
+            """,
+            [.opt(t.origin), .opt(t.originID), .text(t.title), .text(t.request), .text(t.source.rawValue), .opt(t.sourceRef),
+             .text(t.scope), .text(t.owner), .opt(t.due), .text(t.priority.rawValue), .text(t.workflow),
+             .text(t.stage), .text(t.status.rawValue), .text(t.resultSummary), .text(t.note), .opt(t.notifiedStage),
+             .text(t.syncState), .opt(t.syncedAt), .real(t.updatedAt), .int(t.id)])
+        try saveDeps(t.id, t.deps)
+    }
+
+    private func saveDeps(_ id: Int64, _ deps: [Int64]) throws {
+        try db.run("DELETE FROM task_dep WHERE task_id=?", [.int(id)])
+        for d in Set(deps) where d != id { try db.run("INSERT INTO task_dep (task_id,depends_on) VALUES (?,?)", [.int(id), .int(d)]) }
+    }
+
+    /// 依赖它的任务（前置被取消时要标受阻）。
+    public func dependents(of id: Int64) throws -> [Int64] {
+        try db.query("SELECT task_id FROM task_dep WHERE depends_on=?", [.int(id)]).map { $0.int(0) }
+    }
+
+    private static func item(_ r: SQLRow) -> Item {
+        Item(id: r.int(0), taskID: r.int(1), ord: Int(r.int(2)), text: r.text(3), assignee: Assignee(raw: r.text(4)),
+             status: ItemStatus(rawValue: r.text(5)) ?? .todo, ticketID: r.optInt(6), doneAt: r.optDouble(7), doneBy: r.optText(8))
+    }
+
+    private static let itemColumns = "id,task_id,ord,text,assignee,status,ticket_id,done_at,done_by"
+
+    public func items(_ taskID: Int64) throws -> [Item] {
+        try db.query("SELECT \(Self.itemColumns) FROM item WHERE task_id=? ORDER BY ord", [.int(taskID)]).map(Self.item)
+    }
+
+    /// 一批任务的清单项，按任务分组、各自按 `ord`（清单页一次聚合，注意事项 B-11）。
+    public func items(taskIDs: [Int64]) throws -> [Int64: [Item]] {
+        var out: [Int64: [Item]] = [:]
+        for chunk in Self.chunks(taskIDs) {
+            let rows = try db.query("SELECT \(Self.itemColumns) FROM item WHERE task_id IN (\(Self.marks(chunk.count))) ORDER BY task_id, ord",
+                                    chunk.map(SQLValue.int))
+            for i in rows.map(Self.item) { out[i.taskID, default: []].append(i) }
+        }
+        return out
+    }
+
+    /// 主管建任务时对每项「谁来做」的建议（`ord` → 角色名或「你」）；只是分配界面的默认值，不是分配（注意事项 E-02）。
+    public func suggestions(task id: Int64) throws -> [Int: String] {
+        guard let json = try kv("task.suggest.\(id)"), let data = json.data(using: .utf8),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return [:] }
+        return Dictionary(uniqueKeysWithValues: dict.compactMap { k, v in Int(k).map { ($0, v) } })
+    }
+
+    func saveSuggestions(task id: Int64, _ s: [Int: String]) throws {
+        let dict = Dictionary(uniqueKeysWithValues: s.map { (String($0.key), $0.value) })
+        let data = try JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
+        try setKV("task.suggest.\(id)", String(decoding: data, as: UTF8.self))
+    }
+
+    public func item(_ id: Int64) throws -> Item? {
+        try db.query("SELECT \(Self.itemColumns) FROM item WHERE id=?", [.int(id)]).first.map(Self.item)
+    }
+
+    func insertItem(_ i: Item) throws -> Int64 {
+        try db.run("INSERT INTO item (task_id,ord,text,assignee,status,ticket_id,done_at,done_by) VALUES (?,?,?,?,?,?,?,?)",
+                   [.int(i.taskID), .int(Int64(i.ord)), .text(i.text), .text(i.assignee.raw), .text(i.status.rawValue),
+                    i.ticketID.map(SQLValue.int) ?? .null, .opt(i.doneAt), .opt(i.doneBy)])
+        return db.lastInsertID
+    }
+
+    func saveItem(_ i: Item) throws {
+        try db.run("UPDATE item SET ord=?,text=?,assignee=?,status=?,ticket_id=?,done_at=?,done_by=? WHERE id=?",
+                   [.int(Int64(i.ord)), .text(i.text), .text(i.assignee.raw), .text(i.status.rawValue),
+                    i.ticketID.map(SQLValue.int) ?? .null, .opt(i.doneAt), .opt(i.doneBy), .int(i.id)])
+    }
+
+    func deleteItem(_ id: Int64) throws {
+        try db.run("DELETE FROM item WHERE id=?", [.int(id)])
+    }
+
+    /// 自定义工作流模板（内置的不存库）。
+    public func workflows() throws -> [Workflow] {
+        let custom = try db.query("SELECT id,name,scope,stages FROM workflow ORDER BY name").compactMap { r -> Workflow? in
+            guard let stages = try? JSONDecoder().decode([WorkflowStage].self, from: Data(r.text(3).utf8)) else { return nil }
+            return Workflow(id: r.text(0), name: r.text(1), scope: r.text(2), stages: stages)
+        }
+        return Workflow.builtins + custom.filter { !$0.isBuiltin }
+    }
+
+    public func workflow(_ id: String) throws -> Workflow? { try workflows().first { $0.id == id } }
+
+    func saveWorkflow(_ w: Workflow) throws {
+        let stages = String(decoding: try JSONEncoder().encode(w.stages), as: UTF8.self)
+        try db.run("""
+            INSERT INTO workflow (id,name,scope,stages) VALUES (?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, scope=excluded.scope, stages=excluded.stages
+            """, [.text(w.id), .text(w.name), .text(w.scope), .text(stages)])
+    }
+
+    func deleteWorkflow(_ id: String) throws {
+        try db.run("DELETE FROM workflow WHERE id=?", [.text(id)])
+    }
+
+    /// 某天的打扰次数（本地日历日 yyyy-MM-dd；注意事项 B-10 / G-02）。
+    public func interruptions(day: String) throws -> Int { try kvInt("interruption.\(day)") ?? 0 }
+
+    func bumpInterruptions(day: String) throws {
+        try setKV("interruption.\(day)", String(try interruptions(day: day) + 1))
+    }
+
+    public static func day(_ at: Double, calendar: Calendar = .current) -> String {
+        let c = calendar.dateComponents([.year, .month, .day], from: Date(timeIntervalSince1970: at))
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
     // MARK: - KV（设置、规则、定时任务、规则历史）
@@ -375,6 +645,7 @@ public final class SuperagentStore {
         if let v = try kv("settings.worktree") { s.worktree = v == "1" }
         if let v = try kv("settings.acceptance") { s.acceptance = v == "1" }
         if let v = try kv("settings.idleSeconds").flatMap(Double.init) { s.idleSeconds = max(20, v) }
+        if let v = try kvInt("settings.interruptionBudget") { s.interruptionBudget = max(1, min(99, v)) }
         return s
     }
 
@@ -384,6 +655,7 @@ public final class SuperagentStore {
             try setKV("settings.worktree", s.worktree ? "1" : "0")
             try setKV("settings.acceptance", s.acceptance ? "1" : "0")
             try setKV("settings.idleSeconds", String(Int(s.idleSeconds)))
+            try setKV("settings.interruptionBudget", String(s.interruptionBudget))
         }
     }
 

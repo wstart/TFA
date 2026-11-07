@@ -126,6 +126,7 @@ public final class SuperagentEngine {
             t.attention = nil
             let line = answered.map { "回答你的问题「\(Self.clip($0, 80))」：\(text)" } ?? text
             try queueInput(&t, .human, line, by: by)
+            try applyFollowUpToTask(t, by: by, at: now()) // 工作清单：受阻的清单项回到工作中
         }
     }
 
@@ -142,7 +143,8 @@ public final class SuperagentEngine {
             try store.dropEffect(.deliver, String(id))
             try store.dropEffect(.launch, String(id))
             if !t.session.isEmpty, interrupt { try store.enqueue(.stop, String(id), at: at) }
-            try store.log(id, "stopped", reason.isEmpty ? "\(by) 停止了工单" : "\(by) 停止了工单：\(reason)", at: at)
+            try store.log(id, "stopped", reason.isEmpty ? "\(by) 停止了工单" : "\(by) 停止了工单：\(reason)", at: at, task: t.taskID)
+            if let task = t.taskID { try advanceIfComplete(task, at: at) } // 工作清单：它的项都勾完了的话，任务可以往前走了
         }
     }
 
@@ -190,6 +192,7 @@ public final class SuperagentEngine {
             _ = try store.insertInput(ticketID: id, kind: .system, text: "\(by)要求重试工单 #\(id)。\(last)", at: at)
             try store.enqueue(.launch, String(id), at: at)
             try store.log(id, "retry", "\(by) 重试", at: at)
+            try applyFollowUpToTask(t, by: by, at: at) // 工作清单：受阻的清单项回到工作中
         }
     }
 
@@ -208,7 +211,8 @@ public final class SuperagentEngine {
             t.ack = String(text.prefix(200))
             t.updatedAt = now()
             try store.saveTicket(t)
-            try store.log(id, "ack", t.ack, at: t.updatedAt)
+            try store.log(id, "ack", t.ack, at: t.updatedAt, task: t.taskID)
+            try applyAckToTask(t, at: t.updatedAt) // 工作清单：这张单的清单项 → 工作中
             return true
         }
     }
@@ -220,9 +224,11 @@ public final class SuperagentEngine {
         public var ask: String?
         /// 附带的报告文件（例如验收 report.html）。
         public var reportPath: String?
+        /// 工作清单：这次回报勾掉任务里的第几项（`Item.ord`，`tfa report --item n`）；只对属于任务的工单有意义。
+        public var item: Int?
 
-        public init(state: ReportState, summary: String, ask: String? = nil, reportPath: String? = nil) {
-            self.state = state; self.summary = summary; self.ask = ask; self.reportPath = reportPath
+        public init(state: ReportState, summary: String, ask: String? = nil, reportPath: String? = nil, item: Int? = nil) {
+            self.state = state; self.summary = summary; self.ask = ask; self.reportPath = reportPath; self.item = item
         }
     }
 
@@ -251,8 +257,9 @@ public final class SuperagentEngine {
             if let ask { t.attention = String(ask.prefix(500)) }
             t.updatedAt = at
             // 不需要评审的角色（如助理）：ready 就是交付，工单自动结束——除非人的跟进还排着没送到。
+            // 属于任务的工单也一样：评审在任务层做一次（自动评审 + 人通过任务时合并），工单 ready 即交付。
             let role = try store.role(t.role)
-            let delivered = try r.state == .ready && role?.review == false && store.undelivered(id).isEmpty
+            let delivered = try r.state == .ready && (role?.review == false || t.taskID != nil) && store.undelivered(id).isEmpty
             if r.state == .dropped {
                 try end(&t, .dropped, by: "执行者", at: at)
             } else if delivered {
@@ -272,13 +279,17 @@ public final class SuperagentEngine {
             case .progress, .waiting, .dropped: break
             }
             if let ask { relay = (relay ?? head + "进行中") + "。需要人回答：\(Self.clip(ask, 300))" }
-            if let relay { try queueRelay(id, relay, at: at) }
+            // 属于任务的工单：送主管的那一行带任务号，由 applyReportToTask 生成（只发一条）。
+            if let relay, t.taskID == nil { try queueRelay(id, relay, at: at) }
             let nowPerson = try view(t).stage.needsPerson
-            if nowPerson != nil, nowPerson != wasPerson { try store.enqueue(.notify, String(id), at: at) }
+            if nowPerson != nil, nowPerson != wasPerson, t.taskID == nil { try store.enqueue(.notify, String(id), at: at) }
+            // 工作清单：回报推进清单项、阶段，通知按任务 × 阶段去重（EngineTasks.swift）。
+            try applyReportToTask(t, r, ask: ask, delivered: delivered, at: at)
         }
     }
 
-    /// 退回一个超出本工单范围（或属于别的工单）的请求：成为主管的新候选。
+    /// 退回一个超出本工单范围（或属于别的工单）的请求：成为主管的新候选；属于任务的工单则成为**新任务**
+    /// （返回 `A-<id>`，注意事项 C-08），否则返回候选 `t<id>`。
     @discardableResult
     public func handback(_ id: Int64, request: String, reason: String) throws -> String {
         let request = request.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -286,7 +297,9 @@ public final class SuperagentEngine {
         guard !reason.isEmpty else { throw SuperagentError("缺少一句退回原因") }
         return try store.transaction {
             let t = try requireTicket(id)
+            guard t.status == .open else { throw SuperagentError("工单 #\(id) 已经结束，不能退回") }
             let at = now()
+            if let task = try handbackToTask(t, request: request, reason: reason, at: at) { return task.label }
             let trigger = Trigger(id: try store.nextTriggerID(), source: "handback:#\(id)", strength: .explicit, text: request,
                                   repo: t.repo, status: .pending, ticketID: nil, createdAt: at)
             try store.insertTrigger(trigger)
@@ -322,6 +335,7 @@ public final class SuperagentEngine {
             t.attention = nil
             let line = answered.map { "回答你的问题「\(Self.clip($0, 80))」：\(text)" } ?? text
             try queueInput(&t, .human, line, by: by)
+            try applyFollowUpToTask(t, by: by, at: now()) // 工作清单：跟进 → 清单项回到工作中；已完成的任务重新打开
         }
     }
 
@@ -417,7 +431,7 @@ public final class SuperagentEngine {
                 try store.saveTicket(t)
                 try store.log(id, "report.waiting", "催报后仍未回报", at: at)
                 try queueRelay(id, "[TFA] 工单 #\(id)「\(t.title)」的执行终端停下了，催报后仍未回报。最后输出：\(Self.clip(lastOutput, 200))", at: at)
-                try store.enqueue(.notify, String(id), at: at)
+                try store.enqueue(.notify, t.taskID.map { "A-\($0)" } ?? String(id), at: at) // 属于任务的按任务 × 阶段通知
             }
         }
     }
@@ -447,7 +461,7 @@ public final class SuperagentEngine {
             try store.saveTicket(t)
             try store.log(id, "agentExited", "agent 退出且未回报", at: at)
             try queueRelay(id, "[TFA] 工单 #\(id)「\(t.title)」的 agent 退出了，没有回报。最后输出：\(Self.clip(lastOutput, 200))", at: at)
-            try store.enqueue(.notify, String(id), at: at)
+            try store.enqueue(.notify, t.taskID.map { "A-\($0)" } ?? String(id), at: at) // 属于任务的按任务 × 阶段通知
         }
     }
 
@@ -483,7 +497,7 @@ public final class SuperagentEngine {
             t.updatedAt = at
             try store.saveTicket(t)
             try store.log(id, "effect.failed", t.deliveryError!, at: at)
-            try store.enqueue(.notify, String(id), at: at)
+            try store.enqueue(.notify, t.taskID.map { "A-\($0)" } ?? String(id), at: at) // 属于任务的按任务 × 阶段通知
         }
     }
 
@@ -497,7 +511,7 @@ public final class SuperagentEngine {
             t.updatedAt = at
             try store.saveTicket(t)
             try store.log(id, "delivery.blocked", reason, at: at)
-            try store.enqueue(.notify, String(id), at: at)
+            try store.enqueue(.notify, t.taskID.map { "A-\($0)" } ?? String(id), at: at) // 属于任务的按任务 × 阶段通知
         }
     }
 
@@ -524,8 +538,11 @@ public final class SuperagentEngine {
     // MARK: - 内部
 
     /// 建 Ticket + Mandate + 待启动的 Assignment，并入队 launch（调用方在事务里）。
+    /// `taskID / itemIDs / reviewOf`：工作清单——这张单属于哪个任务、负责哪些清单项、核对哪张开发工单（注意事项 C-01：
+    /// 分配给 Agent 必须走这里，不要写第二套建工单代码）。
     func createTicket(trigger: inout Trigger, title: String, request: String, repo: String, note: String,
-                      worktree: Bool?, by: String, rules: [String: String], role: Role? = nil) throws -> Int64 {
+                      worktree: Bool?, by: String, rules: [String: String], role: Role? = nil,
+                      taskID: Int64? = nil, itemIDs: [Int64] = [], reviewOf: Int64? = nil) throws -> Int64 {
         let role = try role ?? requireRole(Role.developer)
         let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
         let notProject = repo.isEmpty || repo == "/" || URL(fileURLWithPath: repo).standardizedFileURL.path == home
@@ -551,7 +568,8 @@ public final class SuperagentEngine {
                             status: .open, endedBy: nil, endedAt: nil,
                             ack: "", attention: nil, reportState: nil, reportSummary: "", reportPath: nil, reportAt: nil,
                             deliveryError: nil, nudged: false, notifiedStage: nil, mandate: mandate, triggerID: trigger.id,
-                            session: "", turnAt: nil, createdAt: at, updatedAt: at)
+                            session: "", turnAt: nil, createdAt: at, updatedAt: at,
+                            taskID: taskID, itemIDs: itemIDs, reviewOf: reviewOf)
         let id = try store.insertTicket(ticket)
         trigger.ticketID = id
         try store.decideTrigger(trigger.id, ticketID: id)
@@ -559,7 +577,7 @@ public final class SuperagentEngine {
                                  rules: try Self.json(rules), at: at)
         _ = try store.insertAssignment(ticketID: id, reason: "accepted", at: at)
         try store.enqueue(.launch, String(id), at: at)
-        try store.log(id, "accepted", "\(by) 接单：\(title)（\(role.name)）", at: at)
+        try store.log(id, "accepted", "\(by) 接单：\(title)（\(role.name)）", at: at, task: taskID)
         return id
     }
 
@@ -568,7 +586,7 @@ public final class SuperagentEngine {
         return t
     }
 
-    private func queueInput(_ t: inout Ticket, _ kind: InputKind, _ text: String, by: String) throws {
+    func queueInput(_ t: inout Ticket, _ kind: InputKind, _ text: String, by: String) throws {
         let at = now()
         _ = try store.insertInput(ticketID: t.id, kind: kind, text: text, at: at)
         t.updatedAt = at
@@ -587,7 +605,7 @@ public final class SuperagentEngine {
         }
     }
 
-    private func queueRelay(_ id: Int64?, _ text: String, at: Double) throws {
+    func queueRelay(_ id: Int64?, _ text: String, at: Double) throws {
         try store.insertRelay(ticketID: id, text: text, at: at)
         try store.enqueue(.relay, "router", at: at)
     }

@@ -29,6 +29,22 @@ struct TicketBar: View {
                     .background(Theme.chrome, in: RoundedRectangle(cornerRadius: 4))
                     .help(t.dir)
             }
+            // The task this ticket belongs to and which of its items it covers; tapping opens the task card
+            // (the card's ticket number jumps back here — 注意事项 F-11).
+            if let taskID = t.taskID {
+                Button { appModel.openWorklist(task: taskID) } label: {
+                    HStack(spacing: Theme.Space.xs) {
+                        Image(systemName: "list.bullet.clipboard").font(.system(size: 10))
+                        Text(Self.taskChipText(taskID, ords: itemOrds)).font(.system(size: 11, design: .monospaced))
+                    }
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Theme.chrome, in: RoundedRectangle(cornerRadius: 4))
+                }
+                .buttonStyle(.plain)
+                .help("打开任务 A-\(taskID)")
+                .accessibilityLabel("任务 A-\(taskID)，打开任务卡")
+            }
             if let line = summaryLine, !line.isEmpty {
                 Text(line)
                     .font(.system(size: 11))
@@ -51,6 +67,33 @@ struct TicketBar: View {
         } message: {
             Text("中断执行终端里的 agent，工单结束。终端、目录和已有改动都保留。")
         }
+    }
+
+    /// The `ord`s of the task items this ticket covers (shown as 第 n 项, never item ids — 注意事项 B-06).
+    private var itemOrds: [Int] {
+        let t = view.ticket
+        guard let taskID = t.taskID, let task = appModel.superagent.task(taskID) else { return [] }
+        return task.items.filter { t.itemIDs.contains($0.id) }.map(\.ord)
+    }
+
+    /// 「任务 A-12 · 第 1–3 项」; a ticket without items (a review ticket) is just「任务 A-12」.
+    static func taskChipText(_ taskID: Int64, ords: [Int]) -> String {
+        let range = itemRange(ords)
+        return "任务 A-\(taskID)" + (range.isEmpty ? "" : " · \(range)")
+    }
+
+    /// Consecutive runs of item numbers:「第 1–3 项」,「第 2、5 项」,「第 1–3、5 项」; empty for no items.
+    static func itemRange(_ ords: [Int]) -> String {
+        let sorted = Array(Set(ords)).sorted()
+        guard var start = sorted.first else { return "" }
+        var prev = start
+        var parts: [String] = []
+        func flush() { parts.append(start == prev ? "\(start)" : "\(start)–\(prev)") }
+        for n in sorted.dropFirst() {
+            if n == prev + 1 { prev = n } else { flush(); start = n; prev = n }
+        }
+        flush()
+        return "第 " + parts.joined(separator: "、") + " 项"
     }
 
     /// The question while it waits for an answer, else the latest report / error / confirmation.

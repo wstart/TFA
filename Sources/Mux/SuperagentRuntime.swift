@@ -12,6 +12,12 @@ final class SuperagentRuntime {
     // MARK: 读视图（界面）
 
     private(set) var views: [TicketView] = []
+    /// 工作清单：打开的任务 + 最近结束的（每轮 Pass 后只在变化时发布，注意事项 F-16）。界面快照测试可直接注入。
+    var tasks: [TaskView] = []
+    /// 今天打扰你的次数（注意事项 G-02）。
+    private(set) var interruptionsToday = 0
+    /// 工作流模板（内置 + 自定义）。
+    private(set) var workflows: [Workflow] = Workflow.builtins
     /// 连续失败 ≥3 次的副作用（面板的「问题」列表）。
     private(set) var problems: [Effect] = []
     private(set) var decisions: [Decision] = []
@@ -27,11 +33,27 @@ final class SuperagentRuntime {
     private(set) var routerSession: String?
     /// 打开数据库失败等：面板顶部显示。
     private(set) var setupError: String?
+    /// 「我的清单」可用：启动时的工单 → 任务迁移成功。失败时首屏回退到旧的主管面板（注意事项 K-05）。
+    private(set) var worklistAvailable = true
 
     var needsYou: [TicketView] {
         views.filter { $0.stage.needsPerson != nil }.sorted { ($0.stage.needsPerson!, -$0.id) < ($1.stage.needsPerson!, -$1.id) }
     }
+    /// 不属于任务的需要你工单（旧工单、直接 accept 的；注意事项 B-03）：待处理和角标里单独计，不和任务重复。
+    var needsYouOutsideTasks: [TicketView] { needsYou.filter { $0.ticket.taskID == nil } }
     var openTickets: [TicketView] { views.filter { $0.ticket.isOpen } }
+
+    /// 需要你的任务：按第一件事的 `PersonAction` 顺序，再按新的在前（§4.3）。
+    var tasksNeedingYou: [TaskView] {
+        tasks.filter { $0.task.isOpen && !$0.needsYou.isEmpty }
+            .sorted { ($0.needsYou[0], -$0.id) < ($1.needsYou[0], -$1.id) }
+    }
+    var openTasks: [TaskView] { tasks.filter { $0.task.isOpen } }
+    func task(_ id: Int64) -> TaskView? { tasks.first { $0.id == id } }
+    /// 某张工单所属的任务。
+    func task(ofTicket id: Int64) -> TaskView? {
+        tasks.first { $0.tickets.contains { $0.id == id } }
+    }
 
     /// 某个终端（会话名）对应的工单。常驻角色的终端先后处理多张单：等人的优先，然后是打开的，最后是最近结束的。
     func ticket(forSession name: String) -> TicketView? {
@@ -52,7 +74,8 @@ final class SuperagentRuntime {
     @ObservationIgnored var onSessionCreated: ((_ name: String, _ isRouter: Bool) -> Void)?
     /// 人刚在这个终端里打过字 → 先别往里打（会和人的输入混在一起）。
     @ObservationIgnored var userTypedRecently: ((_ session: String) -> Bool)?
-    @ObservationIgnored var postNotification: ((_ title: String, _ body: String) -> Void)?
+    /// 系统通知。`task` = 任务 × 阶段的通知带的任务号（点通知打开那张任务卡）；工单 / 主管的通知为 nil。
+    @ObservationIgnored var postNotification: ((_ title: String, _ body: String, _ task: Int64?) -> Void)?
     /// 执行终端里启动 agent 的命令行（kickoff = 第一条消息）。nil = Claude Code，按工单的角色。
     @ObservationIgnored var workerCommand: ((_ ticket: Ticket, _ kickoff: String) -> String)?
     @ObservationIgnored var routerCommand: () -> String = SuperagentRuntime.claudeRouterCommand
@@ -79,6 +102,10 @@ final class SuperagentRuntime {
     @ObservationIgnored private var routerOpening: Task<String?, Never>?
     @ObservationIgnored private var lastVersion: Int64 = -1
     @ObservationIgnored private var passCount = 0
+    /// 后台读视图用的第二个连接（WAL：只看到已提交的状态）；打不开就退回主连接（FULLMUTEX，跨线程也安全）。
+    @ObservationIgnored private var reader: SuperagentEngine?
+    /// 每次同步刷新 +1：后台快照回来时发现序号变了（界面操作已经同步刷新过）就丢弃，不用旧数据盖掉新的。
+    @ObservationIgnored private var reloadSeq = 0
 
     init() {}
 
@@ -93,6 +120,8 @@ final class SuperagentRuntime {
             setupError = "工单数据库打不开：\(error)"
             return
         }
+        migrateTasks()
+        reader = (try? SuperagentStore(url: engine!.store.url)).map { SuperagentEngine(store: $0) }
         if installTools { installSupport() }
         reload()
         let name = SuperagentPaths.changedNotification
@@ -113,6 +142,20 @@ final class SuperagentRuntime {
         if notifyToken != 0 { notify_cancel(notifyToken); notifyToken = 0 }
     }
 
+    /// 首次启动把现有工单迁成任务（注意事项 B-01 / K-05）：先整库备份，再由引擎在一个事务里迁（它迁完写
+    /// `kv.migrated.tasks = 1`，之后不再跑）。任何一步失败都不让 App 起不来：面板顶部显示真实错误，首屏回退到旧的主管面板。
+    private func migrateTasks() {
+        guard let engine else { return }
+        do {
+            guard try engine.store.kv("migrated.tasks") != "1" else { return }
+            try engine.store.backup()
+            try engine.migrateTicketsToTasks()
+        } catch {
+            setupError = "工作清单迁移失败：\(error)（已回退到旧首屏）"
+            worklistAvailable = false
+        }
+    }
+
     /// prompt 文件 + `~/.tfa/bin/tfa` → App 包里的 `tfa`（开发构建：和 Mux 同目录）。
     private func installSupport() {
         let acceptance = settings.acceptance, roles = roles
@@ -125,11 +168,23 @@ final class SuperagentRuntime {
     nonisolated static func installCLI() {
         guard let exe = bundledCLI() else { return }
         let fm = FileManager.default
+        removeLegacyTaskSkill()
         let link = SuperagentPaths.binDir.appendingPathComponent("tfa")
         try? fm.createDirectory(at: SuperagentPaths.binDir, withIntermediateDirectories: true)
         if let dest = try? fm.destinationOfSymbolicLink(atPath: link.path), dest == exe.path { return }
         try? fm.removeItem(at: link)
         try? fm.createSymbolicLink(at: link, withDestinationURL: exe)
+    }
+
+    /// 旧看板留下的 `~/.claude/skills/tfa-task/` 和 `~/.tfa/bin/tfa-task`（注意事项 K-01）：名字和新的 `tfa task` 太像，
+    /// Agent 会读到旧 skill。安装 CLI 时顺手清掉：skill 目录进废纸篓（进不了就直接删），旧命令直接删。
+    nonisolated static func removeLegacyTaskSkill() {
+        let fm = FileManager.default
+        let skill = fm.homeDirectoryForCurrentUser.appendingPathComponent(".claude/skills/tfa-task", isDirectory: true)
+        if fm.fileExists(atPath: skill.path) {
+            do { try fm.trashItem(at: skill, resultingItemURL: nil) } catch { try? fm.removeItem(at: skill) }
+        }
+        try? fm.removeItem(at: SuperagentPaths.binDir.appendingPathComponent("tfa-task"))
     }
 
     /// App 包里是 `Contents/Helpers/tfa`；开发构建（swift run）在 Mux 旁边。磁盘默认不区分大小写，
@@ -185,10 +240,68 @@ final class SuperagentRuntime {
     func setRole(_ r: Role) { act { _ = try $0.setRole(r) } }
     func deleteRole(_ name: String) { act { try $0.deleteRole(name) } }
 
+    // MARK: 工作清单（界面 → 引擎）
+
+    /// 建任务；返回新任务的 id（界面随即打开任务卡 / 谁来做）。
+    @discardableResult
+    func createTask(_ d: SuperagentEngine.TaskDraft) -> Int64? {
+        var id: Int64?
+        act { id = try $0.createTask(d).id }
+        return id
+    }
+    func updateTask(_ id: Int64, title: String? = nil, scope: String? = nil, priority: TaskPriority? = nil, due: Double?? = nil, deps: [Int64]? = nil) {
+        act { try $0.updateTask(id, title: title, scope: scope, priority: priority, due: due, deps: deps) }
+    }
+    func addItems(_ taskID: Int64, _ texts: [String]) { act { _ = try $0.addItems(taskID, texts) } }
+    func editItem(_ taskID: Int64, ord: Int, text: String) { act { try $0.editItem(taskID, ord: ord, text: text) } }
+    func removeItem(_ taskID: Int64, ord: Int) { act { try $0.removeItem(taskID, ord: ord) } }
+    func assign(_ taskID: Int64, _ allocations: [SuperagentEngine.Allocation], oneTicket: Bool = true) {
+        act { _ = try $0.assign(taskID, allocations, oneTicket: oneTicket) }
+    }
+    func setItemDone(_ taskID: Int64, ord: Int, done: Bool) { act { try $0.setItemDone(taskID, ord: ord, done: done) } }
+
+    /// 通过任务：先把名下交付了的开发工单（角色能改文件、有分支）按工单号顺序逐个合并进主仓库当前分支，全部成功才结束任务；
+    /// 有一张合不了就不结束，原因放进 `mergeError`，任务留在待评审（同 `approve`）。重开后再通过时，已合并的分支
+    /// `mergeBranch` 会报「没有新提交」，不碍事。返回的 Task 给测试等结果。
+    @discardableResult
+    func approveTask(_ id: Int64) -> Task<Void, Never> {
+        Task { @MainActor in
+            guard let engine = self.engine, !self.mergingTasks.contains(id), let task = try? engine.store.task(id), task.isOpen else { return }
+            // 合并不可逆：只在待评审阶段做（点通过和合并之间任务可能被打回 / 加项回到进行中）。
+            guard task.stageKind == .review else { return self.act { try $0.approveTask(id) } }
+            // 交付了的开发工单（含迁移进来、还开着等通过的旧工单）：有分支、角色能改文件；评审工单（`reviewOf`）只审不改，不合并。
+            let tickets = ((try? engine.store.tickets(task: id)) ?? [])
+                .filter { ($0.status == .done || ($0.isOpen && $0.reportState == .ready)) && !$0.branch.isEmpty && $0.reviewOf == nil && self.role(for: $0).edits }
+            guard !tickets.isEmpty else { return self.act { try $0.approveTask(id) } }
+            self.mergingTasks.insert(id)
+            let result = await Task.detached(priority: .userInitiated) {
+                Result {
+                    try tickets.map { t in
+                        "#\(t.id) " + (try SuperagentTmux.mergeBranch(repo: t.repo, branch: t.branch, dir: t.dir,
+                                                                         message: "Merge \(t.branch) (#\(t.id) \(t.title))"))
+                    }
+                }
+            }.value
+            self.mergingTasks.remove(id)
+            switch result {
+            case .success(let notes): self.act { try $0.approveTask(id, merged: notes.joined(separator: "；")) }
+            case .failure(let e): self.mergeError = "任务 A-\(id) 仍在待评审：\(e)"
+            }
+        }
+    }
+    func rejectTask(_ id: Int64, _ text: String) { act { try $0.rejectTask(id, text: text) } }
+    func cancelTask(_ id: Int64) { act { try $0.cancelTask(id) } }
+    func setWorkflow(_ w: Workflow) { act { try $0.setWorkflow(w) } }
+    func deleteWorkflow(_ id: String) { act { try $0.deleteWorkflow(id) } }
+    /// 任务的活动时间线（打开任务卡时读，上限 80 条；注意事项 F-17）。
+    func taskEvents(_ id: Int64) -> [TimelineEvent] { (try? engine?.store.events(taskID: id, limit: 80)) ?? [] }
+
     /// 最近一次操作的错误（界面弹出后清掉）。
     var actionError: String?
     /// 正在合并工单分支的工单（「通过」按钮显示「合并中…」）。
     private(set) var merging: Set<Int64> = []
+    /// 正在合并名下工单分支的任务（任务卡的「通过」显示「合并中…」）。和 `merging` 分开：任务号和工单号会撞号。
+    private(set) var mergingTasks: Set<Int64> = []
     /// 点「通过」却没能合并的原因（根视图弹窗显示，关掉后清空）。
     var mergeError: String?
 
@@ -266,7 +379,7 @@ final class SuperagentRuntime {
         let due = (try? store.dueEffects(now: clock())) ?? []
         passCount &+= 1
         // 没有打开的工单、没有到期的副作用：一次 SQLite 查询就结束，不 fork tmux（偶尔查一下主管终端还在不在）。
-        guard !open.isEmpty || !due.isEmpty || passCount % 15 == 1 else { reloadIfChanged(); return }
+        guard !open.isEmpty || !due.isEmpty || passCount % 15 == 1 else { await reloadIfChanged(); return }
         let tmux = self.tmux
         let snap = await Task.detached(priority: .utility) { tmux.snapshot() }.value
         if let snap {
@@ -290,7 +403,7 @@ final class SuperagentRuntime {
                 if let n = try? store.failEffect(e, error: msg, now: clock()) { try? engine.effectFailed(e, error: msg, attempts: n) }
             }
         }
-        reload()
+        await reloadInBackground()
     }
 
     /// 与 tmux 对账：会话没了 → sessionLost；agent 退出 → agentExited；停下没回报 → workerIdle。
@@ -348,7 +461,12 @@ final class SuperagentRuntime {
         guard let engine else { return .later(5) }
         switch e.kind {
         case .notify:
-            if let id = Int64(e.key), let n = try? engine.takeNotification(id) { postNotification?(n.title, n.body) }
+            // 任务 × 阶段的通知 key 是 `A-<id>`（工单的仍是纯数字）：点通知打开任务卡，所以带上任务号。
+            if e.key.hasPrefix("A-") {
+                if let id = Int64(e.key.dropFirst(2)), let n = try? engine.takeTaskNotification(id) { postNotification?(n.title, n.body, id) }
+            } else if let id = Int64(e.key), let n = try? engine.takeNotification(id) {
+                postNotification?(n.title, n.body, nil)
+            }
             return .done
         case .stop:
             // 快照偶尔失败：停止命令不能丢，稍后再来。
@@ -399,7 +517,14 @@ final class SuperagentRuntime {
         let tmux = self.tmux
         let root = worktreeRoot
         let existing = snap.first { $0.ticket == id }
-        let kickoff = "[TFA #\(id)] 你负责工单 #\(id)「\(t.title)」。先运行 tfa read ticket 读取请求原文和全部消息，然后开始。"
+        let kickoff: String
+        if let task = t.taskID, t.request.count > 1500 {
+            // 属于任务的工单请求文本很长（清单项多）：开场只打一行，让它自己读全部（注意事项 D-07）。
+            kickoff = "[TFA #\(id)] 任务 A-\(task)「\(t.title)」，tfa read ticket \(id) 读全部。"
+        } else {
+            let task = t.taskID.map { "（任务 A-\($0)）" } ?? ""
+            kickoff = "[TFA #\(id)] 你负责工单 #\(id)「\(t.title)」\(task)。先运行 tfa read ticket 读取请求原文和全部消息，然后开始。"
+        }
         let commandLine = command(t, role, kickoff)
         let wait = launchWait
         let taken = Set(snap.map(\.session))
@@ -434,7 +559,14 @@ final class SuperagentRuntime {
         let tmux = self.tmux
         let live = await Task.detached(priority: .userInitiated) { tmux.snapshot() }.value ?? snap
         let existing = live.first { $0.agent == role.name }
-        let kickoff = "[TFA #\(id)·a\(a.id)] 新工单 #\(id)「\(t.title)」交给你（\(role.name)）。先运行 tfa read ticket \(id) 读取请求原文和全部消息，然后开始；本单的 tfa 命令都带 --ticket \(id)。"
+        let kickoff: String
+        if let task = t.taskID, t.request.count > 1500 {
+            // 同每单一个终端的角色：请求文本太长只打一行（注意事项 D-07）。
+            kickoff = "[TFA #\(id)·a\(a.id)] 任务 A-\(task)「\(t.title)」交给你（\(role.name)），tfa read ticket \(id) 读全部；本单的 tfa 命令都带 --ticket \(id)。"
+        } else {
+            let task = t.taskID.map { "（任务 A-\($0)）" } ?? ""
+            kickoff = "[TFA #\(id)·a\(a.id)] 新工单 #\(id)「\(t.title)」\(task)交给你（\(role.name)）。先运行 tfa read ticket \(id) 读取请求原文和全部消息，然后开始；本单的 tfa 命令都带 --ticket \(id)。"
+        }
         let dir = agentsRoot.appendingPathComponent(role.name, isDirectory: true).path
         let sentAt = clock()
         if let pane = existing, !pane.isPlainShell {
@@ -530,7 +662,7 @@ final class SuperagentRuntime {
         if text.count > 3000 { text = String(text.prefix(3000)) + "…（用 tfa read 查看全部）" }
         switch await typeAndVerify(pane.pane, text, marker: marker) {
         case .dialog:
-            if dialogStuck(e) { postNotification?("主管在等你确认", "主管终端里有一个对话框，工单的回报暂时送不进去。") }
+            if dialogStuck(e) { postNotification?("主管在等你确认", "主管终端里有一个对话框，工单的回报暂时送不进去。", nil) }
             return .later(5)
         case .notReady: return .later(3)
         case .notEchoed: return .failed("没有在主管终端里看到转达的消息")
@@ -655,33 +787,82 @@ final class SuperagentRuntime {
 
     // MARK: - 读视图
 
-    private func reloadIfChanged() {
-        guard let engine, engine.store.dataVersion != lastVersion else { return }
-        reload()
+    /// 一轮读到的全部视图。后台线程读，主线程只拿快照赋值；每一项都先比较、没变不发布（注意事项 F-16 / F-17）。
+    private struct Snapshot: Sendable {
+        var views: [TicketView] = []
+        var problems: [Effect] = []
+        var decisions: [Decision] = []
+        var settings = Settings()
+        var rules: [Rule] = []
+        var mode: AcceptMode = .observe
+        var policyVersion = ""
+        var schedules: [Schedule] = []
+        var roles: [Role] = Role.builtins
+        var tasks: [TaskView] = []
+        var interruptionsToday = 0
+        var workflows: [Workflow] = Workflow.builtins
     }
 
+    /// 引擎本身不是 Sendable；读视图只查库，连接以 FULLMUTEX 打开，跨线程查询是安全的。
+    private struct EngineBox: @unchecked Sendable { let engine: SuperagentEngine }
+
+    nonisolated private static func snapshot(_ engine: SuperagentEngine) -> Snapshot {
+        let store = engine.store
+        var s = Snapshot()
+        s.views = (try? engine.views()) ?? []
+        s.problems = ((try? store.effects()) ?? []).filter(\.isProblem)
+        s.decisions = (try? store.decisions(limit: 40)) ?? []
+        s.settings = (try? store.settings()) ?? Settings()
+        s.rules = (try? store.rules()) ?? []
+        s.mode = (try? store.acceptMode()) ?? .observe
+        s.policyVersion = (try? store.policyVersion()) ?? ""
+        s.schedules = (try? store.schedules()) ?? []
+        s.roles = (try? store.roles()) ?? Role.builtins
+        s.tasks = (try? engine.taskViews()) ?? []
+        s.interruptionsToday = (try? engine.interruptionsToday()) ?? 0
+        s.workflows = (try? store.workflows()) ?? Workflow.builtins
+        return s
+    }
+
+    private func apply(_ s: Snapshot) {
+        if s.views != views { views = s.views }
+        if s.problems != problems { problems = s.problems }
+        if s.decisions != decisions { decisions = s.decisions }
+        if s.settings != settings { settings = s.settings }
+        if s.rules != rules { rules = s.rules }
+        if s.mode != mode { mode = s.mode }
+        if s.policyVersion != policyVersion { policyVersion = s.policyVersion }
+        if s.schedules != schedules { schedules = s.schedules }
+        if s.roles != roles { roles = s.roles }
+        if s.tasks != tasks { tasks = s.tasks }
+        if s.interruptionsToday != interruptionsToday { interruptionsToday = s.interruptionsToday }
+        if s.workflows != workflows { workflows = s.workflows }
+    }
+
+    /// 同步刷新：界面操作（`act`）之后立刻可见；测试也直接调。
     func reload() {
         guard let engine else { return }
-        let store = engine.store
-        lastVersion = store.dataVersion
-        let v = (try? engine.views()) ?? []
-        if v != views { views = v }
-        let p = ((try? store.effects()) ?? []).filter(\.isProblem)
-        if p != problems { problems = p }
-        let d = (try? store.decisions(limit: 40)) ?? []
-        if d != decisions { decisions = d }
-        let s = (try? store.settings()) ?? Settings()
-        if s != settings { settings = s }
-        let r = (try? store.rules()) ?? []
-        if r != rules { rules = r }
-        let m = (try? store.acceptMode()) ?? .observe
-        if m != mode { mode = m }
-        let pv = (try? store.policyVersion()) ?? ""
-        if pv != policyVersion { policyVersion = pv }
-        let sc = (try? store.schedules()) ?? []
-        if sc != schedules { schedules = sc }
-        let ro = (try? store.roles()) ?? Role.builtins
-        if ro != roles { roles = ro }
+        reloadSeq &+= 1
+        lastVersion = engine.store.dataVersion
+        apply(Self.snapshot(engine))
+    }
+
+    /// Pass 之后的刷新：库在后台线程读（第二个连接），主线程只赋值。读的期间若有同步刷新插队，这份快照已经过时，丢弃。
+    private func reloadInBackground() async {
+        guard let engine else { return }
+        // 第二个连接打不开：在主线程同步读（主连接不是线程安全的，不能拿到后台线程）。
+        guard let reader else { reload(); return }
+        let seq = reloadSeq
+        lastVersion = engine.store.dataVersion
+        let box = EngineBox(engine: reader)
+        let snap = await Task.detached(priority: .utility) { Self.snapshot(box.engine) }.value
+        guard seq == reloadSeq else { return }
+        apply(snap)
+    }
+
+    private func reloadIfChanged() async {
+        guard let engine, engine.store.dataVersion != lastVersion else { return }
+        await reloadInBackground()
     }
 
     /// 工单的 agent 窗格：每单角色认 `@tfa_ticket`，常驻角色认 `@tfa_agent`。

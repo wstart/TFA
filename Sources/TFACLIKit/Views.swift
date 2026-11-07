@@ -13,6 +13,8 @@ enum Views {
         let others = views.filter { $0.stage.needsPerson == nil }.sorted { $0.id < $1.id }
         let pending = try engine.store.pendingTriggers()
         var s = ""
+        // 工作清单：任务段放最前（注意事项 E-05）；工单列表保留给主管问进度时用。
+        if let tasks = taskSummary(try engine.taskViews(endedLimit: 0)) { s += tasks }
         if needs.isEmpty, others.isEmpty { s += "没有打开的工单。\n" }
         if !needs.isEmpty { s += "需要你（\(needs.count)）：\n" + needs.map { line($0) + "\n" }.joined() }
         if !others.isEmpty { s += "其他打开的工单（\(others.count)）：\n" + others.map { line($0) + "\n" }.joined() }
@@ -43,6 +45,7 @@ enum Views {
         var s = "#\(t.id)「\(t.title)」 \(v.stage.label)\(t.endedBy.map { "（由\($0)结束）" } ?? "")\n"
         let role = try engine.store.role(t.role)
         s += "角色：\(t.role)\(role.map { "（\($0.traits)）" } ?? "")\n"
+        if let taskID = t.taskID { s += try taskLines(engine, t, taskID) }
         s += "目录：\(t.repo.isEmpty ? "没有（不针对某个项目）" : t.repo)\n"
         if !t.dir.isEmpty { s += "工作目录：\(t.dir)\(t.branch.isEmpty ? "" : "（分支 \(t.branch)）")\n" }
         if !t.session.isEmpty { s += "终端：\(t.session)\n" }

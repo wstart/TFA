@@ -63,7 +63,7 @@ struct SuperagentPanel: View {
 
 // MARK: - 主管终端
 
-private struct RouterCard: View {
+struct RouterCard: View {
     @Environment(AppModel.self) private var appModel
     /// `routerDirectory` 存在 UserDefaults 里（不可观察），这里留一份给界面。
     @State private var dir = ""
@@ -109,7 +109,7 @@ private struct RouterCard: View {
 
 // MARK: - 需要你
 
-private struct NeedsYouCard: View {
+struct NeedsYouCard: View {
     @Environment(AppModel.self) private var appModel
     let item: TicketView
     @State private var confirmStop = false
@@ -208,7 +208,7 @@ private struct NeedsYouCard: View {
 
 // MARK: - 进行中 / 问题 / 最近结束
 
-private struct WorkingRow: View {
+struct WorkingRow: View {
     @Environment(AppModel.self) private var appModel
     let item: TicketView
 
@@ -243,7 +243,7 @@ private struct WorkingRow: View {
     }
 }
 
-private struct ProblemRow: View {
+struct ProblemRow: View {
     let effect: Effect
 
     var body: some View {
@@ -266,7 +266,7 @@ private struct ProblemRow: View {
     }
 }
 
-private struct EndedRow: View {
+struct EndedRow: View {
     let item: TicketView
 
     var body: some View {
@@ -279,7 +279,7 @@ private struct EndedRow: View {
     }
 }
 
-private struct DecisionRow: View {
+struct DecisionRow: View {
     let decision: Decision
 
     var body: some View {
@@ -311,7 +311,7 @@ private struct RoleDraft: Identifiable {
 }
 
 /// 主管接单时先选角色（docs/superagent-roles.md）。内置角色的运行方式固定，接什么和主要行为可以改。
-private struct RolesCard: View {
+struct RolesCard: View {
     @Environment(AppModel.self) private var appModel
     @State private var editing: RoleDraft?
     @State private var deleting: Role?
@@ -419,7 +419,7 @@ private struct RoleSheet: View {
 
 // MARK: - 主动接单（规则）
 
-private struct RulesCard: View {
+struct RulesCard: View {
     @Environment(AppModel.self) private var appModel
     @State private var editing: Rule?
     @State private var deleting: Rule?
@@ -538,7 +538,7 @@ private struct RuleSheet: View {
 
 // MARK: - 定时任务
 
-private struct SchedulesCard: View {
+struct SchedulesCard: View {
     @Environment(AppModel.self) private var appModel
     @State private var editing: Schedule?
     @State private var deleting: Schedule?
@@ -664,7 +664,7 @@ private struct ScheduleSheet: View {
 
 // MARK: - 设置
 
-private struct SettingsCard: View {
+struct SettingsCard: View {
     @Environment(AppModel.self) private var appModel
 
     var body: some View {
@@ -679,6 +679,9 @@ private struct SettingsCard: View {
             }
             SettingRow(title: "停下多久催报") {
                 Stepper(value: bind(\.idleSeconds), in: 30...600, step: 30) { Text("\(Int(s.idleSeconds)) 秒").monospacedDigit() }
+            }
+            SettingRow(title: "每天打扰预算", note: "超了只显示，「需要你」照样到你") {
+                Stepper(value: bind(\.interruptionBudget), in: 1...30) { Text("\(s.interruptionBudget) 次").monospacedDigit() }
             }
             SettingRow(title: "交付前验收（LobeHub Acceptance）", note: "需要 Node ≥ 22.15；只对 Web 界面改动生效") {
                 Button("安装验收工具") {
@@ -710,6 +713,178 @@ private struct SettingRow<Control: View>: View {
             }
             Spacer(minLength: Theme.Space.md)
             control()
+        }
+    }
+}
+
+// MARK: - 工作流模板（需求文档 §3.2：设置里可选、可新建；内置的不能改）
+
+struct WorkflowsCard: View {
+    @Environment(AppModel.self) private var appModel
+    @State private var editing: Workflow?
+    @State private var deleting: Workflow?
+
+    var body: some View {
+        let sa = appModel.superagent
+        VStack(alignment: .leading, spacing: Theme.Space.md) {
+            Text("工作流模板").font(Theme.Font.rowTitle)
+            Text("任务建立时把模板快照进去，之后改模板不影响已有任务。指定了目录的模板是那个项目的默认。")
+                .font(.caption).foregroundStyle(Theme.textTertiary)
+            ForEach(sa.workflows) { w in
+                Hairline()
+                HStack(alignment: .top, spacing: Theme.Space.md) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: Theme.Space.sm) {
+                            Text(w.name).font(Theme.Font.rowTitle).lineLimit(1)
+                            Text(w.isBuiltin ? "内置" : (w.scope.isEmpty ? "通用" : tilde(w.scope)))
+                                .font(.caption).foregroundStyle(Theme.textTertiary).lineLimit(1).truncationMode(.head).help(w.scope)
+                        }
+                        Text(w.stages.map(\.name).joined(separator: " → ")).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                    }
+                    Spacer(minLength: Theme.Space.sm)
+                    if !w.isBuiltin {
+                        Button { editing = w } label: { Image(systemName: "pencil") }
+                            .buttonStyle(.borderless).help("编辑")
+                        Button { deleting = w } label: { Image(systemName: "trash") }
+                            .buttonStyle(.borderless).foregroundStyle(Theme.textTertiary).help("删除")
+                    }
+                }
+            }
+            Button {
+                editing = Workflow(id: nextID("w", sa.workflows.map(\.id)), name: "", stages: Workflow.builtins[0].stages)
+            } label: {
+                Label("添加模板", systemImage: "plus")
+            }
+        }
+        .saCard()
+        .sheet(item: $editing) { w in
+            WorkflowSheet(workflow: w, isNew: !sa.workflows.contains { $0.id == w.id }) { saved in attempt(sa) { sa.setWorkflow(saved) } }
+        }
+        .alert("删除模板「\(deleting?.name ?? "")」？", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
+            Button("删除", role: .destructive) { if let w = deleting { sa.deleteWorkflow(w.id) } }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("已有任务带着自己的快照，不受影响。")
+        }
+    }
+}
+
+private struct WorkflowSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let workflow: Workflow
+    let isNew: Bool
+    let save: (Workflow) -> String?
+    @State private var name = ""
+    @State private var scope = ""
+    @State private var stages: [WorkflowStage] = []
+    @State private var error: String?
+
+    private var draft: Workflow {
+        Workflow(id: workflow.id, name: name.trimmingCharacters(in: .whitespaces), scope: scope,
+                 stages: stages.map { WorkflowStage(name: $0.name.trimmingCharacters(in: .whitespaces), kind: $0.kind) })
+    }
+    private var problem: String? {
+        if draft.name.isEmpty { return "写一个模板名" }
+        if draft.stages.contains(where: { $0.name.isEmpty }) { return "每个阶段都要有名字" }
+        return draft.problem
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.lg) {
+            Text(isNew ? "添加工作流模板" : "编辑模板「\(workflow.name)」").font(Theme.Font.headerTitle)
+            Field(title: "名称") {
+                TextField("例如：开发 → 测试", text: $name).textFieldStyle(.roundedBorder)
+            }
+            Field(title: "阶段（顺序即流程；代码只看种类）") {
+                VStack(spacing: Theme.Space.xs) {
+                    ForEach(stages.indices, id: \.self) { i in
+                        HStack(spacing: Theme.Space.sm) {
+                            TextField("阶段名", text: $stages[i].name).textFieldStyle(.roundedBorder)
+                            Picker("", selection: $stages[i].kind) {
+                                ForEach([StageKind.todo, .doing, .review, .done], id: \.self) { Text($0.label).tag($0) }
+                            }
+                            .labelsHidden().frame(width: 96)
+                            Button { stages.remove(at: i) } label: { Image(systemName: "minus.circle") }
+                                .buttonStyle(.borderless).foregroundStyle(Theme.textTertiary).disabled(stages.count <= 1)
+                                .accessibilityLabel("删除第 \(i + 1) 个阶段")
+                        }
+                    }
+                    HStack {
+                        Button { stages.insert(WorkflowStage(name: "", kind: .doing), at: max(stages.count - 1, 0)) } label: {
+                            Label("加一个阶段", systemImage: "plus")
+                        }
+                        .controlSize(.small)
+                        Spacer()
+                    }
+                }
+            }
+            Field(title: "目录（可选：作为这个项目的默认模板）") {
+                HStack(spacing: Theme.Space.sm) {
+                    Text(scope.isEmpty ? "通用" : tilde(scope)).font(.caption.monospaced()).foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1).truncationMode(.head).help(scope)
+                    Spacer()
+                    if !scope.isEmpty { Button("清除") { scope = "" }.controlSize(.small) }
+                    Button("选择…") { if let p = pickFolder(from: scope, message: "用这个模板做默认的项目目录") { scope = p } }
+                        .controlSize(.small)
+                }
+            }
+            Text(problem ?? "最后一个阶段是「完成」；「待领取」只在最前；至少一个「进行中」。")
+                .font(.caption).foregroundStyle(problem == nil ? Theme.textTertiary : Theme.Status.error)
+            SheetButtons(error: error, confirm: "保存", enabled: problem == nil) {
+                error = save(draft)
+                if error == nil { dismiss() }
+            }
+        }
+        .padding(Theme.Space.xl)
+        .frame(width: 480)
+        .onAppear { name = workflow.name; scope = workflow.scope; stages = workflow.stages }
+    }
+}
+
+// MARK: - 我的清单页底部的「设置」折叠区（需求文档 §9.1）
+
+/// 主管面板的内容重组：主管终端、不属于任务的工单（旧工单、直接派的；注意事项 B-03）、问题、模板、角色、
+/// 规则、定时任务、设置、决定记录。属于任务的工单只在任务卡里出现。
+struct WorklistSettings: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        let sa = appModel.superagent
+        let direct = sa.views.filter { $0.ticket.taskID == nil }
+        let needs = sa.needsYouOutsideTasks
+        let working = direct.filter { $0.ticket.isOpen && $0.stage.needsPerson == nil }
+        let ended = direct.filter(\.stage.isEnded)
+            .sorted { ($0.ticket.endedAt ?? $0.ticket.updatedAt) > ($1.ticket.endedAt ?? $1.ticket.updatedAt) }
+        let shown = Set(needs.filter { $0.stage == .person(.delivery) }.map { String($0.id) })
+        let problems = sa.problems.filter { !(($0.kind == .launch || $0.kind == .deliver) && shown.contains($0.key)) }
+        VStack(alignment: .leading, spacing: Theme.Space.xl) {
+            RouterCard()
+            if !direct.isEmpty {
+                PanelSection(title: "直接派给 Agent 的工单 · \(direct.count)") {
+                    ForEach(needs) { NeedsYouCard(item: $0) }
+                    if !working.isEmpty { RowList(items: working) { WorkingRow(item: $0) } }
+                    if !ended.isEmpty {
+                        Collapsible(title: "最近结束 · \(ended.count)") {
+                            RowList(items: ended) { EndedRow(item: $0) }
+                        }
+                    }
+                }
+            }
+            if !problems.isEmpty {
+                PanelSection(title: "问题") {
+                    RowList(items: problems.map(IdentifiedEffect.init)) { ProblemRow(effect: $0.effect) }
+                }
+            }
+            WorkflowsCard()
+            RolesCard()
+            RulesCard()
+            SchedulesCard()
+            SettingsCard()
+            if !sa.decisions.isEmpty {
+                Collapsible(title: "决定记录 · \(sa.decisions.count)") {
+                    RowList(items: sa.decisions.map(IdentifiedDecision.init)) { DecisionRow(decision: $0.decision) }
+                }
+            }
         }
     }
 }
@@ -765,7 +940,7 @@ struct TicketFeedbackSheet: View {
 
 // MARK: - 小部件
 
-private struct Banner: View {
+struct Banner: View {
     let text: String
     var dismiss: (() -> Void)?
 
@@ -786,7 +961,7 @@ private struct Banner: View {
     }
 }
 
-private struct PanelSection<Content: View>: View {
+struct PanelSection<Content: View>: View {
     let title: String
     @ViewBuilder let content: () -> Content
 
@@ -799,7 +974,7 @@ private struct PanelSection<Content: View>: View {
 }
 
 /// 默认收起的分区（最近结束、决定记录）。
-private struct Collapsible<Content: View>: View {
+struct Collapsible<Content: View>: View {
     let title: String
     @ViewBuilder let content: () -> Content
     @State private var expanded = false
@@ -823,7 +998,7 @@ private struct Collapsible<Content: View>: View {
 }
 
 /// 一张白卡里的紧凑行，行间是 Linen 细线。
-private struct RowList<Item: Identifiable, Row: View>: View {
+struct RowList<Item: Identifiable, Row: View>: View {
     let items: [Item]
     @ViewBuilder let row: (Item) -> Row
 
@@ -838,21 +1013,21 @@ private struct RowList<Item: Identifiable, Row: View>: View {
     }
 }
 
-private struct IdentifiedEffect: Identifiable {
+struct IdentifiedEffect: Identifiable {
     let effect: Effect
     var id: String { "\(effect.kind.rawValue):\(effect.key)" }
 }
 
-private struct IdentifiedDecision: Identifiable {
+struct IdentifiedDecision: Identifiable {
     let decision: Decision
     var id: Int64 { decision.id }
 }
 
-private struct Hairline: View {
+struct Hairline: View {
     var body: some View { Theme.border.frame(height: 1) }
 }
 
-private struct Field<Content: View>: View {
+struct Field<Content: View>: View {
     let title: String
     @ViewBuilder let content: () -> Content
 
@@ -865,7 +1040,7 @@ private struct Field<Content: View>: View {
 }
 
 /// 表单底部：错误（草稿保留）+ 取消 / 主按钮。
-private struct SheetButtons: View {
+struct SheetButtons: View {
     @Environment(\.dismiss) private var dismiss
     let error: String?
     let confirm: String
@@ -911,7 +1086,7 @@ private struct Ago: View {
     }
 }
 
-private extension View {
+extension View {
     func saCard(padding: CGFloat = Theme.Space.xl) -> some View {
         self.padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -964,7 +1139,7 @@ private extension DecisionKind {
 }
 
 /// 跑一个写库操作，把它的错误（`actionError`）拿回来给表单显示，不再弹到面板顶部。
-@MainActor private func attempt(_ sa: SuperagentRuntime, _ body: () -> Void) -> String? {
+@MainActor func attempt(_ sa: SuperagentRuntime, _ body: () -> Void) -> String? {
     sa.actionError = nil
     body()
     defer { sa.actionError = nil }
@@ -977,9 +1152,9 @@ private func nextID(_ prefix: String, _ taken: [String]) -> String {
     return "\(prefix)\(n + 1)"
 }
 
-private func tilde(_ path: String) -> String { (path as NSString).abbreviatingWithTildeInPath }
+func tilde(_ path: String) -> String { (path as NSString).abbreviatingWithTildeInPath }
 
-@MainActor private func pickFolder(from start: String, message: String) -> String? {
+@MainActor func pickFolder(from start: String, message: String) -> String? {
     let panel = NSOpenPanel()
     panel.canChooseDirectories = true
     panel.canChooseFiles = false

@@ -104,6 +104,12 @@ public struct Ticket: Equatable, Sendable, Identifiable {
     public var turnAt: Double?
     public var createdAt: Double
     public var updatedAt: Double
+    /// 所属任务（工作清单）；旧工单 / 直接 accept 的工单为空（注意事项 B-03：读任务的代码要容忍）。
+    public var taskID: Int64? = nil
+    /// 这张工单负责的清单项（`Item.id`，只能是自己任务的项）。
+    public var itemIDs: [Int64] = []
+    /// 自动评审：这张评审工单核对的是哪张开发工单。
+    public var reviewOf: Int64? = nil
 
     public var isOpen: Bool { status == .open }
 }
@@ -184,6 +190,8 @@ public struct TimelineEvent: Equatable, Sendable {
     public var ticketID: Int64?
     public var kind: String
     public var text: String
+    /// 按任务聚合（工作清单）。
+    public var taskID: Int64? = nil
 }
 
 /// 副作用的种类。和状态变更在同一事务里入队，提交后由 App 执行。
@@ -256,9 +264,20 @@ public struct Rule: Equatable, Sendable, Codable, Identifiable {
     public var enabled: Bool
     /// 自然语言规则（≤2000 字）。
     public var instruction: String
+    /// 候选自动接单时，清单项交给哪个角色（默认开发；§5.4）。
+    public var role: String
 
-    public init(id: String, name: String, enabled: Bool = true, instruction: String) {
-        self.id = id; self.name = name; self.enabled = enabled; self.instruction = instruction
+    public init(id: String, name: String, enabled: Bool = true, instruction: String, role: String = Role.developer) {
+        self.id = id; self.name = name; self.enabled = enabled; self.instruction = instruction; self.role = role
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        instruction = try c.decode(String.self, forKey: .instruction)
+        role = try c.decodeIfPresent(String.self, forKey: .role) ?? Role.developer
     }
 
     public static let maxInstruction = 2000
@@ -283,10 +302,25 @@ public struct Schedule: Equatable, Sendable, Codable, Identifiable {
     public var repo: String
     /// 上次触发的日期（yyyy-MM-dd），同一天只触发一次。
     public var lastFired: String?
+    /// 到点建任务时谁来做：空 = 留在「待分配」；`你` / 角色名 = 全部清单项自动分配（§5.4）。
+    public var assignee: String
 
-    public init(id: String, name: String, enabled: Bool = true, time: String, request: String, repo: String, lastFired: String? = nil) {
+    public init(id: String, name: String, enabled: Bool = true, time: String, request: String, repo: String, lastFired: String? = nil,
+                assignee: String = "") {
         self.id = id; self.name = name; self.enabled = enabled; self.time = time
-        self.request = request; self.repo = repo; self.lastFired = lastFired
+        self.request = request; self.repo = repo; self.lastFired = lastFired; self.assignee = assignee
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        time = try c.decode(String.self, forKey: .time)
+        request = try c.decode(String.self, forKey: .request)
+        repo = try c.decodeIfPresent(String.self, forKey: .repo) ?? ""
+        lastFired = try c.decodeIfPresent(String.self, forKey: .lastFired)
+        assignee = try c.decodeIfPresent(String.self, forKey: .assignee) ?? ""
     }
 }
 
@@ -327,6 +361,8 @@ public struct Role: Equatable, Sendable, Codable, Identifiable {
 
     public static let assistant = "助理"
     public static let developer = "开发"
+    /// 自动评审（工作清单）：属于任务的开发工单 ready 后，TFA 自动派一张评审工单给它。
+    public static let reviewer = "评审"
 
     /// 内置角色：运行方式固定，接什么和主要行为可以在面板里改。
     public static let builtins: [Role] = [
@@ -346,6 +382,14 @@ public struct Role: Equatable, Sendable, Codable, Identifiable {
              - 修 bug 先复现再修；改动前后跑相关的构建和测试，没跑的检查在回报里写明原因。
              """,
              standing: false, edits: true, review: true),
+        Role(name: reviewer,
+             scope: "开发工单交付后的核对：对照原始请求和人的追问，检查改动是否完整、相关改动有没有合并、能否构建运行。只读，不改代码。",
+             behavior: """
+             - 只审不改：到工单写明的工作目录里读 diff、跑构建和测试，不改任何文件。
+             - 只报真实问题，附复现步骤或证据；不提风格偏好。
+             - 结论第一句写「通过」或「有问题」，再列要点；没问题就一句「通过：…」。
+             """,
+             standing: true, edits: false, review: false),
     ]
 }
 
@@ -359,6 +403,8 @@ public struct Settings: Equatable, Sendable {
     public var acceptance: Bool = false
     /// 执行终端停下多少秒没回报，就催一次。
     public var idleSeconds: Double = 90
+    /// 每天打扰（「需要你」通知）的预算；超了只显示，不压制（注意事项 G-03）。
+    public var interruptionBudget: Int = 8
 
     public init() {}
 }

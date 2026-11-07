@@ -185,6 +185,7 @@ TFA 天然具备 Super-agent 的「执行层」，缺的是「授权层」和「
 | relay 用 IM 回复人 | 主管自己在终端里对人说话，所以没有 `reply` 网关；relay 把回报打进主管终端 | TFA 的人就坐在终端前 |
 | ready 即结单 | ready 进「待评审」，人点「通过」才结单（有工单分支就先合并进主仓库当前分支，合并不了不结单），「打回」把意见送回执行终端 | 本地评审是 TFA 的交付环节 |
 | 只靠结构化回报 | 屏幕信号只做兜底：停下 `idleSeconds`（默认 90 秒）没回报先催一次，仍不回报记「停下未回报」；agent 退出、会话丢失各自处理 | 终端无法强制结构化，兜底避免工单悄悄卡死 |
+| 「主管」是人的入口 | 工作清单（`docs/worklist/需求文档.md`）把主管从入口退到执行层：首屏是「我的清单」，任务和清单项先由人决定谁来做，交给 Agent 的清单项才变成工单；主管只把请求加进清单（`tfa task add`），不再直接 accept；属于任务的工单 ready 即交付，评审和合并在任务层做一次 | 人的工作单位是任务不是工单；一件事里人做一部分、Agent 做一部分要能表达 |
 
 代码位置：`Sources/SuperagentCore`（模型、存储、引擎、规则、prompt）、`Sources/TFACLI`（`tfa`）、`Sources/Mux/Superagent*.swift`（tmux 驱动、Pass 循环、界面）、`Sources/Mux/AppModel+Superagent.swift`（侧栏/通知接入）。
 

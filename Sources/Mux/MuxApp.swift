@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UserNotifications
 
 @main
 struct MuxApp: App {
@@ -55,10 +56,11 @@ struct MuxApp: App {
                     .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
                 Button("上一个终端") { appModel.selectPrev() }
                     .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
-                Button("下一个有动静的终端") { appModel.selectNextUnseen() }
+                // 先跳需要你的任务卡，再跳终端（注意事项 F-15）。
+                Button("下一个需要你的") { appModel.selectNextUnseen() }
                     .keyboardShortcut("]", modifiers: .command)
-                    .disabled(appModel.connections.isEmpty)
-                Button("下一个等待回复的终端") { appModel.selectNextAttention() }
+                    .disabled(appModel.connections.isEmpty && appModel.superagent.tasksNeedingYou.isEmpty)
+                Button("下一个等待回复的") { appModel.selectNextAttention() }
                     .keyboardShortcut("]", modifiers: [.command, .shift])
                     .disabled(appModel.attentionCount == 0)
 
@@ -103,7 +105,7 @@ struct MuxApp: App {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     var appModel: AppModel?
     private var signalSources: [DispatchSourceSignal] = []
     private var statusItem: NSStatusItem?
@@ -165,7 +167,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
 
+    /// 点系统通知：带任务号的（任务 × 阶段的「需要你」）打开那张任务卡，而不是终端（注意事项 G-04）；
+    /// 其余只把窗口带回来，和没有 delegate 时一样。
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let task = NotificationManager.task(in: response)
+        DispatchQueue.main.async {
+            self.showMainWindow()
+            if let task { MainActor.assumeIsolated { self.appModel?.openWorklist(task: task) } }
+            completionHandler()
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated { NotificationManager.install(delegate: self) }
         // A raw SIGTERM (`pkill TFA`, a crash-reporter kill) or SIGINT does NOT run
         // applicationWillTerminate — so our spawned `tmux -CC` children (each a setsid session
         // leader holding a pty) would orphan to launchd and accumulate across restarts until the

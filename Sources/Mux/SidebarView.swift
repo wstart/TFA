@@ -60,7 +60,7 @@ struct SidebarView: View {
     private var toolPaneOpen: Bool {
         appModel.axisSelected || appModel.labSelected || appModel.skillsSelected
             || appModel.claudeMdSelected || appModel.tunnelsSelected || appModel.groupNoteSelected
-            || appModel.superagentSelected
+            || appModel.superagentSelected || appModel.worklistSelected
     }
 
     var body: some View {
@@ -95,6 +95,11 @@ struct SidebarView: View {
                     EndedActionsRow(count: endedCount,
                                     onRestoreAll: { appModel.restoreAllEnded() },
                                     onRemoveAll: { confirmRemoveAllEnded = true })
+                }
+                // 「我的清单」is the first screen: pinned above 主管 (注意事项 F-01). It stays while a project is
+                // selected (the list filters by project itself); the terminal filter text hides it like 主管.
+                if !showEnded && filter.isEmpty {
+                    WorklistRow()
                 }
                 // The「主管」(router) row is pinned above everything: it's where requests are made.
                 if !showEnded && filter.isEmpty && WorkspaceStore.shared.selected == nil {
@@ -646,8 +651,12 @@ private struct ToolDock: View {
 
     private var tools: [Tool] {
         [
+            // 主管 opens the work list with its bottom「设置」fold expanded (roles / rules / schedules live there now);
+            // the badge counts tasks that need you plus tickets outside any task (注意事项 B-03), never both for one thing.
             Tool(id: "superagent", title: "主管", icon: "person.crop.rectangle.stack", selected: appModel.superagentSelected,
-                 badge: appModel.superagent.needsYou.count) { appModel.openSuperagent() },
+                 badge: appModel.superagent.tasksNeedingYou.count + appModel.superagent.needsYouOutsideTasks.count) {
+                appModel.openWorklist(settings: true)
+            },
             Tool(id: "axis",    title: "模型",   icon: "cpu",                                selected: appModel.axisSelected)    { appModel.openAxis() },
             Tool(id: "tunnels", title: "隧道",   icon: "network.badge.shield.half.filled",   selected: appModel.tunnelsSelected) { appModel.openTunnels() },
             Tool(id: "rules",   title: "规则",    icon: "text.book.closed",                   selected: appModel.claudeMdSelected){ appModel.openClaudeMd() },
@@ -961,8 +970,10 @@ private struct RouterRow: View {
 
     var body: some View {
         let sa = appModel.superagent
-        let needs = sa.needsYou.count
-        let open = sa.openTickets.count
+        // Tasks that need you are counted on the「我的清单」row; here only tickets outside any task (old / direct
+        // accepts, 注意事项 B-03) — one amber signal per thing to do (注意事项 A-04).
+        let needs = sa.needsYouOutsideTasks.count
+        let open = sa.openTasks.count
         let prominent = prominence == .increased
         HStack(spacing: Theme.Space.md) {
             Image(systemName: "person.crop.rectangle.stack")
@@ -976,11 +987,11 @@ private struct RouterRow: View {
                     if needs > 0 {
                         Text("\(needs) 个工单需要你").foregroundStyle(prominent ? Theme.canvas : Theme.Status.attention)
                     } else if open > 0 {
-                        Text("\(open) 个工单进行中").foregroundStyle(.secondary)
+                        Text("\(open) 个任务进行中 · 对我说一句就能加任务").foregroundStyle(.secondary)
                     } else if conn == nil {
                         Text("未启动 · 点击启动").foregroundStyle(.tertiary)
                     } else {
-                        Text("在这里说需求").foregroundStyle(.secondary)
+                        Text("对我说一句就能加任务").foregroundStyle(.secondary)
                     }
                 }
                 .font(Theme.Font.rowSubtitle)
@@ -1007,9 +1018,71 @@ private struct RouterRow: View {
                 Capsule().fill(Theme.brand).frame(width: 3, height: 16).offset(x: -11)
             }
         }
-        .help(conn == nil ? "启动主管终端：用自然语言提需求，它拆成工单派给执行终端" : "主管终端")
+        .help(conn == nil ? "启动主管终端：对它说一句，它把任务加进你的清单并建议谁来做" : "主管终端")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(needs > 0 ? "主管，\(needs) 个工单需要你" : "主管")
+    }
+}
+
+/// The pinned「我的清单」row above 主管 (注意事项 F-01 / F-02): a 22px charcoal badge with the
+/// `list.bullet.clipboard` glyph, 「我的清单」 in `rowTitle`, one subtitle line — 「N 件需要你」(amber) /
+/// 「N 件进行中」/「清单是空的」— and an amber count capsule in the signal column while tasks need you
+/// (nothing else there: the equalizer belongs to terminals). While the list is on screen the row shows the
+/// 3px charcoal bar a tool pane's row gets. Tapping opens the list.
+private struct WorklistRow: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        let sa = appModel.superagent
+        let needs = sa.tasksNeedingYou.count
+        let open = sa.openTasks.count
+        HStack(spacing: Theme.Space.md) {
+            Image(systemName: "list.bullet.clipboard")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.canvas)
+                .frame(width: 22, height: 22)
+                .background(Theme.brand, in: RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: Theme.Space.xxs) {
+                Text("我的清单").font(Theme.Font.rowTitle).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                Group {
+                    if needs > 0 {
+                        Text("\(needs) 件需要你").foregroundStyle(Theme.Status.attention)
+                    } else if open > 0 {
+                        Text("\(open) 件进行中").foregroundStyle(.secondary)
+                    } else if !appModel.worklistAvailable {
+                        Text("迁移失败 · 先用主管面板").foregroundStyle(.tertiary) // 注意事项 K-05：原因在面板顶部
+                    } else {
+                        Text("清单是空的").foregroundStyle(.tertiary)
+                    }
+                }
+                .font(Theme.Font.rowSubtitle)
+                .lineLimit(1)
+            }
+            Spacer(minLength: Theme.Space.xs)
+            ZStack {
+                if needs > 0 {
+                    Text("\(needs)")
+                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Theme.canvas)
+                        .frame(minWidth: 14, minHeight: 14)
+                        .background(Theme.Status.attention, in: Capsule())
+                }
+            }
+            .frame(minWidth: 14)
+        }
+        .padding(.vertical, Theme.Space.xxs)
+        .overlay(alignment: .leading) {
+            if appModel.worklistSelected {
+                Capsule().fill(Theme.brand).frame(width: 3, height: 16).offset(x: -11)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { appModel.openWorklist() }
+        .help("我的清单：先定谁来做，需要你的事在最上面")
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(needs > 0 ? "我的清单，\(needs) 件需要你" : open > 0 ? "我的清单，\(open) 件进行中" : "我的清单，清单是空的")
+        .accessibilityAction { appModel.openWorklist() }
     }
 }
 

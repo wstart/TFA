@@ -22,6 +22,7 @@ work for a Chinese-heavy, dense, long-running terminal UI.
 
 - Sidebar hierarchy: one header row — the scope field (host · project menu | terminal filter) + 待处理 button + “+” (启动终端 / 启动 axis-claude / 新建分组) → 在线/已断开 → the pinned「主管」row → the built-in「未分组」folder, then group folders (ticket terminals collect in「工单」) → tools. The project is chosen from the scope field's menu; ⌘F search lives in the 终端 menu and the terminal footer.
 - Super-agent (2026-11): requests go to the「主管」terminal in natural language; it routes them into tickets, each executed in its own terminal + git worktree. People are interrupted only when a ticket needs them (待评审 / 等你回答 / 受阻 / 失败 / 送达失败 / 停下未回报) — those appear in 待处理, the dock's 主管 badge and the 主管 panel; progress stays silent.
+- Work list (2026-11): the first screen is「我的清单」, pinned above 主管 in the sidebar. The unit of work is a task (`A-12`) with a checklist; the person decides 谁来做 per item (你, or a role's agent) and only items handed to an agent become tickets, which run as before. 需要你 is shown in one place per thing — the list / task card (amber), 待处理 and the dock badge count tasks (a task-less ticket counts on its own), ⌘] / ⌘⇧] visit the task cards that need you before the terminals, and clicking a task's notification opens its card. The 主管 terminal is a side entrance that adds tasks to the list; the old 主管 panel is only the fallback when the ticket → task migration failed. People can see five concepts: 任务、清单项、谁来做、工作流、需要你 — tickets, roles, rules live one layer down (the task card, the list's 设置 fold).
 - Projects keep a local folder and stable terminal associations. New terminals inherit the selected folder; board tasks created in a project retain that project even before assignment. “全部项目” clears the filter.
 - Attention inbox is global: terminal errors/attention and unanswered, blocked or queued tasks remain visible across project filters. Viewing a terminal does not resolve an outstanding board question; replying records a task comment.
 - New-session sheet: ordinary shell / Codex / Claude Code; show CLI discovery status before creation. Never infer an exact conversation from “most recent”; use an explicitly bound UUID or the CLI picker.
@@ -179,6 +180,12 @@ are brick. 工作中 is ink (hammer), 排队中 / 空闲 / 已停止 / 已放弃
 | **Tunnel** | stopped | connecting | running | — | retrying | — |
 | **Model service** | stopped · not installed | starting · stopping | running | — | standby (no model loaded) | — |
 | **Activity** | idle | — | — | working (equalizer) | needs-you (bell) | — |
+| **Task stage / item** | 待做 · 待分配 · 已取消 · 已放弃 | — | 完成 | 工作中 (static `◐`) | 需要你 (等你回答 · 待评审 · 受阻 · 停下未回报) | 失败 · 送达失败 |
+
+**Task stages** (the work list): only 需要你 is colored — the stage tag, priority, assignee chips and the `3/5`
+progress stay ink/stone whatever the stage, so the number of amber spots on a screen is the number of things
+the person has to do (注意事项 A-04). Stage *position* is drawn by the stage bar's fill (charcoal = current,
+cream = passed, white = ahead), never by hue.
 
 Glyphs stay distinct so meaning survives without color: `checkmark.circle.fill` (positive),
 `exclamationmark.triangle.fill` (error), `moon.zzz` (dormant), `arrow.counterclockwise.circle` (ended —
@@ -220,8 +227,45 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   the project alone, then the project cut short, then the glyph alone. Right half = the live filter
   (「筛选终端」, at least 64px so the placeholder stays whole; distinct from ⌘F search). Followed by
   the 待处理 button and a 32px filled-charcoal `+` (menu: 启动终端 / 启动 axis-claude / 新建分组…).
-- **待处理 button** — a tray glyph in the header; amber with a small count badge while terminals ask
-  for you or fail to connect, muted otherwise; opens the attention center.
+- **待处理 button** — a tray glyph in the header; amber with a small count badge while tasks need you,
+  terminals ask for you or fail to connect, muted otherwise; opens the attention center, which lists
+  tasks (one row each: stage tag, `A-12 标题`, the first thing it needs, 打开任务), then task-less
+  tickets, then terminals.
+- **我的清单 row** — pinned above 主管: a 40pt row with a 22px charcoal badge (`list.bullet.clipboard`),
+  「我的清单」 in `rowTitle`, and one subtitle — 「N 件需要你」 (amber) > 「N 件进行中」 (stone) > 「清单是
+  空的」. The signal column carries an amber count capsule while tasks need you, else nothing (no
+  equalizer — that is a terminal's). Tapping opens the list; while the list is on screen the row shows the
+  3px charcoal bar a tool pane's row gets (the system List highlight belongs to terminal rows).
+- **清单行 (task row)** — a White card, Linen 1px, `md` radius, at least 52pt tall, 8/14 padding, 6pt
+  between its lines; the whole card takes a 6% amber wash while the task needs you. Line 1: `A-12` in
+  mono 11 stone + the title in `rowTitle` (truncated, full text in the tooltip) + a `StateTag` on the
+  right (tinted only when it needs you). Line 2: progress `3/5` (monospaced digits) · executor chips (你 /
+  开发 / 助理, deduplicated, at most 3) · the due date only within 3 days. The right end holds that stage's
+  one or two actions (the ticket bar's set: 回答… / 打回… + 通过 / 补充… + 重试; 待分配: 谁来做…); a row in
+  progress has no button.
+- **阶段条 (stage bar)** — one segment per stage, 32pt tall, `md` radius, 24pt Linen connectors between
+  segments. Current = Charcoal fill + ivory semibold text; passed = Cream + stone; ahead = White + Linen
+  stroke. Stages are never told apart by hue.
+- **清单项行 (item row)** — 40pt, a Linen rule above; the ordinal in mono 11 (always `ord`, never an item
+  id); a 22pt checkbox with 6pt corners: done = Charcoal fill + ivory check, working = a static half disc
+  `◐`, todo = Cool Stone stroke, blocked = amber stroke + `hand.raised`. Your items are clickable
+  (optimistic update, roll back with the real error); agent items are read-only and move by reports. The
+  text may wrap to two lines; on the right an executor chip, the ticket chip (mono, jumps to its
+  terminal) and a 60pt right-aligned status word (待你 in amber, the rest stone).
+- **执行者 chip / task chip** — 22pt, Cream, Linen hairline, 6pt corners, 11pt text; 「你」 gets a 1pt
+  Charcoal stroke, roles are plain, 「未定」 stone. The ticket number chip is mono. The ticket bar's task
+  chip (`list.bullet.clipboard` + 「任务 A-12 · 第 1–3 项」, mono, the item range written as consecutive
+  runs) opens the task card; the card's ticket chip jumps back to the terminal.
+- **需要你条 (needs-you strip)** — 44pt, amber 6% fill + amber 1pt stroke, `md` radius, an 8pt amber
+  square at the left; the stage name in bold, then the question / report in one line; 1–2 actions on the
+  right (回答… / 打回… + 通过 / 补充… + 重试). One per card: the first `PersonAction` in declaration order,
+  the rest as a small 「还有 N 件：…」 line.
+- **谁来做 sheet** — 560pt wide; one row per item: ordinal, editable text, and a segmented control (你 +
+  the roles in `tfa read roles` order; a Linen well with `md` corners, the chosen segment raised in White
+  with a 1pt Linen ring — the 在线 / 已断开 switch). Defaults come from the 主管's `--suggest`, else the
+  heuristic (改 / 修 / 实现 / 提交 → 开发; 查 / 问 / 分析 / 总结 → 助理; otherwise 你). At the bottom a
+  「同一角色的项合成一张工单」 switch (on) and one line of explanation; ⌘↩ confirms, Esc cancels, and an
+  unconfirmed change on close asks save / discard / cancel.
 - **在线 / 已断开 switch** — full-width segmented bar: a Linen well with the chosen half raised in white.
 - **Sidebar terminal row** — a 22px rounded-square **kind badge** (agents — axis-claude / Claude /
   Codex — solid Charcoal with an ivory glyph; shells and ssh a White chip with a Linen hairline;
@@ -243,13 +287,14 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   detail. Laid out in a 760pt column (two wide cards, then three small).
 - **Status capsule** (new-session sheet) — a 7px dot + caption on a 10% tint of the same status color.
 - **Tool dock** (主管 / 模型 / 隧道 / 规则 / Skills / 实验室) — sidebar bottom; equal-width icon+label cells,
-  selected = filled charcoal cell with ivory glyph (mirrors a selected row). 主管 carries a 7px amber
-  dot (chrome ring) while any ticket needs you.
-- **主管 row** — pinned at the top of the terminal list: a 22px charcoal badge with the
-  `person.crop.rectangle.stack` glyph, 「主管」 in `rowTitle`, and one subtitle line — 「N 个工单需要你」
-  (amber) / 「N 个工单进行中」 / 「未启动 · 点击启动」. The signal column shows an amber count capsule
-  while tickets need you, else the equalizer while the router works. Tapping it when not running
-  starts the router terminal.
+  selected = filled charcoal cell with ivory glyph (mirrors a selected row). 主管 opens the work list with
+  its 设置 fold expanded and carries a 7px amber dot (chrome ring) while a task, or a ticket outside any
+  task, needs you.
+- **主管 row** — pinned under 我的清单: a 22px charcoal badge with the `person.crop.rectangle.stack`
+  glyph, 「主管」 in `rowTitle`, and one subtitle line — 「N 个工单需要你」 (amber, only tickets outside any
+  task: tasks are counted on the 我的清单 row) / 「N 个任务进行中 · 对我说一句就能加任务」 / 「未启动 ·
+  点击启动」 / 「对我说一句就能加任务」. The signal column shows an amber count capsule for those tickets,
+  else the equalizer while the router works. Tapping it when not running starts the router terminal.
 - **Ticket terminal row** — an ordinary terminal row whose subtitle reads `#id 阶段 · ack`; the stage
   word takes its tint only when the ticket needs you, and a needing ticket gets the same amber wash
   as a ringing terminal. The live output line still wins while the agent works.
@@ -265,7 +310,8 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
 - **Terminal header** — 40px: sidebar toggle, name (`headerTitle`), a state tag (运行中 sage / 需要你
   amber / 连接失败 brick / 空闲·已断开 stone, tinted 12% fill), a muted monospaced `~` path, then small
   bordered 历史 / 文件 / ⌘K buttons (+ prominent 重新连接 when failed).
-- **Terminal footer** — 24px under the pane: kind + host on the left, ⌘] / ⌘K / ⌘F hints on the right.
+- **Terminal footer** — 24px under the pane: kind + host on the left, ⌘] (下一个需要你: task cards first,
+  then terminals) / ⌘K / ⌘F hints on the right.
 - **Panel header bar** — Ivory canvas, sidebar-toggle + accent icon + `headerTitle`, and one muted line
   underneath saying what the pane is for.
 - **Model panel card** — White, Linen border, 16px radius; a status dot + title header above, then

@@ -67,6 +67,9 @@ struct RootView: View {
                     Divider()
                     TunnelsView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if appModel.worklistSelected {
+                    WorklistView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.superagentSelected {
                     ToolHeaderBar(icon: "person.crop.rectangle.stack", title: "主管",
                                   subtitle: "在主管终端里用自然语言提需求；这里只列需要你的工单、问题和规则。")
@@ -123,6 +126,10 @@ struct RootView: View {
         }
         .sheet(item: $model.ticketFeedback) { req in
             TicketFeedbackSheet(request: req)
+                .environment(appModel)
+        }
+        .sheet(item: $model.taskFeedback) { req in
+            TaskRejectSheet(request: req)
                 .environment(appModel)
         }
         .sheet(isPresented: $model.isShowingNewSession) {
@@ -334,7 +341,7 @@ private struct TerminalFooter: View {
             Label(kind.label, systemImage: kind.symbol)
             Text(connection.host.map { "ssh · \($0)" } ?? "本机 · tmux")
             Spacer(minLength: Theme.Space.md)
-            hint("⌘]", "下一个有动静")
+            hint("⌘]", "下一个需要你")
             hint("⌘K", "快速切换")
             hint("⌘F", "搜索全部")
         }
@@ -409,11 +416,22 @@ private struct ErrorBanner: View {
 
 /// Header for a tool pane (模型 / 规则 / Skills / 实验室 / 隧道): sidebar toggle, accent icon and
 /// title, and one line underneath saying what the pane is for.
-private struct ToolHeaderBar: View {
+struct ToolHeaderBar<Leading: View, Trailing: View>: View {
     @Environment(AppModel.self) private var appModel
     let icon: String
     let title: String
     let subtitle: String
+    /// Between the sidebar toggle and the title (e.g. a「‹ 我的清单」back button on a task card).
+    @ViewBuilder let leading: () -> Leading
+    /// Right-aligned controls (search, a prominent「+ 任务」).
+    @ViewBuilder let trailing: () -> Trailing
+
+    init(icon: String, title: String, subtitle: String,
+         @ViewBuilder leading: @escaping () -> Leading = { EmptyView() },
+         @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }) {
+        self.icon = icon; self.title = title; self.subtitle = subtitle
+        self.leading = leading; self.trailing = trailing
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: Theme.Space.md) {
@@ -424,6 +442,10 @@ private struct ToolHeaderBar: View {
             .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
             .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
             .padding(.top, 2)
+
+            leading()
+                .buttonStyle(.borderless)
+                .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: Theme.Space.xxs) {
                 HStack(spacing: Theme.Space.sm) {
@@ -436,6 +458,8 @@ private struct ToolHeaderBar: View {
                     .lineLimit(1)
             }
             Spacer()
+            HStack(spacing: Theme.Space.sm) { trailing() }
+                .controlSize(.small)
         }
         .padding(.horizontal, Theme.Space.lg)
         .padding(.vertical, Theme.Space.md)

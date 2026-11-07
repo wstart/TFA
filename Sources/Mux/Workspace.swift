@@ -62,8 +62,9 @@ struct AttentionButton: View {
     @State private var showAttention = false
     var body: some View {
         // No timer: needsAttention / connectError are @Observable, so this re-renders when they change.
+        // Tasks that need you + tickets outside any task + terminals; a task counts once (注意事项 F-14).
         let count = model.connections.filter { $0.needsAttention || $0.connectError != nil }.count
-            + model.superagent.needsYou.count
+            + model.superagent.tasksNeedingYou.count + model.superagent.needsYouOutsideTasks.count
         Button { showAttention = true } label: {
             Image(systemName: count > 0 ? "tray.full" : "tray")
                 .font(.system(size: 12, weight: .medium))
@@ -169,7 +170,26 @@ struct AttentionCenter: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack { Text("待处理中心 · 全部项目").font(.headline); Spacer(); Button("完成") { dismiss() }.keyboardShortcut(.cancelAction) }
             List {
-                let tickets = model.superagent.needsYou
+                // Tasks, not their tickets: one row per task with the first thing it needs (注意事项 F-14 / §9.4).
+                let tasks = model.superagent.tasksNeedingYou
+                if !tasks.isEmpty {
+                    Section("需要你的任务") {
+                        ForEach(tasks) { v in
+                            let need = v.firstNeed ?? .review
+                            HStack {
+                                StateTag(text: need.label, tint: Stage.person(need).tint)
+                                VStack(alignment: .leading) {
+                                    Text("\(v.task.label) \(v.task.title)")
+                                    Text(Self.firstNeedLine(v)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                }
+                                Spacer()
+                                Button("打开任务") { model.openWorklist(task: v.id); dismiss() }
+                            }
+                        }
+                    }
+                }
+                // Tickets that belong to no task (old / direct accepts, 注意事项 B-03) keep their own section.
+                let tickets = model.superagent.needsYouOutsideTasks
                 if !tickets.isEmpty {
                     Section("需要你的工单") {
                         ForEach(tickets) { t in
@@ -203,5 +223,19 @@ struct AttentionCenter: View {
             }
         }.padding(20)
         .frame(width: 720, height: 500)
+    }
+
+    /// The first thing a task needs from you, in one line: the open ticket's question / delivery error / report,
+    /// else the review verdict (待评审) or the blocked note.
+    static func firstNeedLine(_ v: TaskView) -> String {
+        guard let need = v.firstNeed else { return "" }
+        if let t = v.tickets.first(where: { $0.ticket.isOpen && $0.stage.needsPerson == need })?.ticket {
+            return t.attention ?? t.deliveryError ?? (t.reportSummary.isEmpty ? need.label : t.reportSummary)
+        }
+        switch need {
+        case .review: return v.reviewSummary ?? "清单全部完成，等你通过"
+        case .blocked: return "有清单项受阻"
+        default: return need.label
+        }
     }
 }
