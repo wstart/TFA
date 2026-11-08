@@ -861,6 +861,8 @@ struct TaskNeedActions: View {
     /// 「完成任务…」：调用方自己开确认单（清单行：动作可能收在「…」菜单里，sheet 得挂在行上）；没给就在这里开。
     var finish: (() -> Void)? = nil
     @State private var finishing = false
+    /// 放在任务卡深色的「下一步」横幅上：换成横幅的按钮样式。
+    @Environment(\.needActionsOnDark) private var onDark
 
     var body: some View {
         let sa = appModel.superagent
@@ -933,12 +935,20 @@ struct TaskNeedActions: View {
         .help(report.isEmpty ? "前往工单 #\(t.id) 的终端看改动" + (t.ticket.branch.isEmpty ? "" : "（分支 \(t.ticket.branch)）") : "打开报告 \(report)")
     }
 
-    private func plain(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(title, action: action).buttonStyle(.bordered).frame(minHeight: 28)
+    @ViewBuilder private func plain(_ title: String, action: @escaping () -> Void) -> some View {
+        if onDark {
+            Button(title, action: action).buttonStyle(BannerButtonStyle(kind: .outline))
+        } else {
+            Button(title, action: action).buttonStyle(.bordered).frame(minHeight: 28)
+        }
     }
 
-    private func prominent(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(title, action: action).buttonStyle(.borderedProminent).frame(minHeight: 28)
+    @ViewBuilder private func prominent(_ title: String, action: @escaping () -> Void) -> some View {
+        if onDark {
+            Button(title, action: action).buttonStyle(BannerButtonStyle(kind: .prominent))
+        } else {
+            Button(title, action: action).buttonStyle(.borderedProminent).frame(minHeight: 28)
+        }
     }
 }
 

@@ -302,33 +302,6 @@ extension Assignee {
     }
 }
 
-/// 工单号 chip：等宽、Cream；给了 `action` 就可点（跳到执行终端）。
-struct TicketChip: View {
-    let id: Int64
-    var action: (() -> Void)?
-
-    var body: some View {
-        Group {
-            if let action {
-                Button(action: action) { label }.buttonStyle(.plain).help("前往工单 #\(id) 的终端")
-                    .accessibilityLabel("工单 #\(id)，前往终端")
-            } else {
-                label.accessibilityLabel("工单 #\(id)")
-            }
-        }
-    }
-
-    private var label: some View {
-        Text("#\(id)")
-            .font(.system(size: 11, design: .monospaced))
-            .foregroundStyle(Theme.textPrimary)
-            .padding(.horizontal, 7)
-            .frame(height: 22)
-            .background(Theme.chrome, in: RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.border, lineWidth: 1))
-    }
-}
-
 /// 「任务 A-12 · 第 1–3 项」chip（执行终端的工单条用，注意事项 F-11）：clipboard 图标 + 等宽编号；点了打开任务卡。
 struct TaskChip: View {
     let label: String

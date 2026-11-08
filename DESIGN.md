@@ -249,23 +249,35 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   action the row echoes in place: 「已送达」 until the executor acks, 「已完成 · tfa/12 已合并到 main」 for
   6 s before the row moves to 已完成; an action error is one brick caption under that row. Sections run
   需要你 → 待分配 → 进行中 → 待领取 → 已完成.
-- **任务卡版式 (task card layout)** — when the detail area is ≥ 900pt wide the card is three independently
-  scrolling columns: 活动 on the left (24%, clamped 220–300pt; each event at most 4 lines, full text on hover),
-  工作清单 in the middle (28%, clamped 260–360pt; an item's executor chip, ticket chip and status word sit on
-  a second line under its text) and the task detail on the right taking the rest — header card (title, stage
-  stepper, one stone meta line, clickable chips incl. 「范围…」), the needs-you strip, then 原文 / 结果
-  (collapsed past 6 lines with 「展开全部」), the sync row and 取消任务…. Narrower than 900pt it falls back to
-  one 760pt column in the same order with the checklist and activity after 原文 / 结果.
-- **阶段步进 (stage stepper)** — one 24pt line under the task title inside the header card: 「待领取 › 进行中 ›
-  待评审 › 完成」. Current = Charcoal semibold with a 2px Charcoal underline; passed = stone; ahead = light
-  stone. It is status, so it is the lightest ink on the card — the heaviest belongs to the needs-you strip,
-  which sits directly under the header card, before the checklist. Stages are never told apart by hue.
-- **清单项行 (item row)** — 40pt, a Linen rule above; the ordinal in mono 11 (always `ord`, never an item
-  id); a 22pt checkbox with 6pt corners: done = Charcoal fill + ivory check, working = a static half disc
-  `◐`, todo = Cool Stone stroke, blocked = amber stroke + `hand.raised`. Your items are clickable
-  (optimistic update, roll back with the real error); agent items are read-only and move by reports. The
-  text may wrap to two lines; on the right an executor chip, the ticket chip (mono, jumps to its
-  terminal) and a 60pt right-aligned status word (待你 in amber, the rest stone).
+- **任务卡版式 (task card layout)** — a header over the body. The header is the title row (mono `A-12`, the title in
+  24pt semibold, the state tag; the stage stepper on the right) and the 下一步 banner. When the area is ≥ 900pt the
+  body is three independently scrolling columns divided by 1pt Linen rules, no cards inside: 活动 (24%, 220–300pt;
+  a timeline newest first — a 1pt Linen rail through 9pt dots, amber for events that need a person, sage for
+  deliveries / completions / passed reviews, hollow Pewter otherwise; each event at most 4 lines, full text on
+  hover), 清单 (28%, 260–360pt; small-caps label with `n / m`, a 3pt Charcoal progress line, rows, an always-present
+  「加一项，回车确认」 field) and the detail taking the rest (one stone meta line, clickable chips incl. 「范围…」,
+  then 原文 / 上一轮结果 as small-caps sections collapsed past 6 lines with 「展开全部」, the sync row, 取消任务…).
+  Narrower than 900pt the body stacks in one 760pt column under the same header.
+- **下一步横幅 (next-step banner)** — full width under the title row, 14pt corners, always in the same place so the
+  page never jumps. When something needs the person, or items have no executor yet, it is Charcoal with ivory
+  text: an eyebrow (a 7pt dot — amber for 需要你, Mist for 定谁来做 — and 「下一步 · 等你决定 / 定谁来做」), one 19pt
+  semibold sentence saying what to do (「回答工单 #14 的问题」「看一下交付，决定完成还是打回」「工单 #13 退回的事要换人
+  做」「把第 1 项交给开发」), a 13pt line of context, and its actions on the right: one ivory prominent button,
+  outline / ghost secondaries (the shared needs-you action set, restyled for the dark ground). When the open items
+  all point to one role it offers 「交给开发」 directly, with a folder button prefilled from a path found in the
+  task's text (only an existing folder, never home or root; the button stays disabled until a folder is known).
+  When nothing needs the person it is White with a Linen hairline: 「现在 · 不用你管」, what is happening
+  (「开发在做第 2 项」) and 打开工单终端 / 补充说明… as underlined text.
+- **阶段步进 (stage stepper)** — one 24pt line on the right of the title row: 「待领取 › 进行中 › 待评审 › 完成」.
+  Current = Charcoal semibold with a 2px Charcoal underline; passed = stone; ahead = light stone. It is status,
+  so it is quiet — the heaviest ink on the card belongs to the 下一步 banner. Stages are never told apart by hue.
+- **清单项行 (item row)** — the ordinal in mono 11 (always `ord`, never an item id); a 20pt checkbox with 6pt
+  corners: done = Charcoal fill + ivory check, working = a static half disc `◐`, todo = Cool Stone stroke,
+  blocked = amber stroke + `hand.raised`. The text in 14pt up to three lines (done = stone, struck through in
+  Mist), then one quiet 12pt line 「开发 · 工单 #12 · 完成」 — the ticket number jumps to its terminal, a handed-back
+  item's status reads 「→ A-13」 and opens it; 待你 / 受阻 in amber. Your items are clickable (optimistic update,
+  roll back with the real error); agent items are read-only and move by reports. Rows are divided by a Linen
+  hairline.
 - **执行者 chip / task chip** — 22pt, Cream, Linen hairline, 6pt corners, 11pt text; 「你」 gets a 1pt
   Charcoal stroke, roles are plain, 「未定」 stone. The ticket number chip is mono. The ticket bar's task
   chip (`list.bullet.clipboard` + 「任务 A-12 · 第 1–3 项」, mono, the item range written as consecutive
@@ -278,13 +290,11 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   actions, 「本地为准（…）」 and 「服务端为准（…）」. The 组织 card in the worklist settings (server, email,
   invite code; registered: node id, status, 「立即同步」 + quiet 「断开…」 with a confirmation) uses the same
   `SettingRow` grammar as the other settings; the token is never shown.
-- **需要你条 (needs-you strip)** — 44pt, amber 6% fill + amber 1pt stroke, `md` radius, an 8pt amber
-  square at the left; the stage name in bold, then 「工单 #12 回报：…」 in one line; 1–2 actions on the right.
-  The prominent action is the one the person most likely needs: 回答…; 打回… + 完成任务…; 补充… (+ quiet
-  重试) for 受阻 / 停下未回报; 重试 only for 失败 / 送达失败. A handed-back item reads 「工单 #13 退回了一件事
-  → 已成为任务 A-13，等你定谁来做」 with 去分配 A-13… + 改派第 2 项…; 待评审 adds 看改动. One per card: the
-  first `PersonAction` in declaration order, the rest as a small 「还有 N 件：…」 line. 「完成任务…」 opens a
-  confirmation sheet listing the branches to merge → the target branch, tickets without a branch and
+- **需要你的动作 (needs-you actions)** — one shared set (`TaskNeedActions`) used by list rows and, restyled, by the
+  task card's 下一步 banner: 回答…; 看改动 + 打回… + 完成任务…; 补充… (prominent) + 重试 for 受阻 / 停下未回报;
+  重试 only leads for 失败 / 送达失败; a handed-back item gets 改派第 N 项… + 去分配 A-13…. One thing per card: the
+  first `PersonAction` in declaration order, the rest as a small 「还有 N 件：…」 line under the banner. 「完成任务…」
+  opens a confirmation sheet listing the branches to merge → the target branch, tickets without a branch and
   unfinished items; the ticket bar's ticket-level button is 「通过工单 #12」.
 - **谁来做 sheet** — 560pt wide; one row per item: ordinal, editable text, and a segmented control (你 +
   the roles in `tfa read roles` order; a Linen well with `md` corners, the chosen segment raised in White

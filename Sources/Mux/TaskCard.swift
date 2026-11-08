@@ -23,7 +23,6 @@ struct TaskCard: View {
     let assign: () -> Void
     /// 活动时间线：打开时读，≤80 条（注意事项 F-17）。
     @State private var events: [TimelineEvent] = []
-    @State private var addingItem = false
     @State private var newItem = ""
     @State private var editing: Item?
     @State private var removing: Item?
@@ -48,9 +47,40 @@ struct TaskCard: View {
         let sa = appModel.superagent
         GeometryReader { geo in
             if let cols = TaskCardLayout.columns(width: geo.size.width) {
-                threeColumns(cols)
+                VStack(alignment: .leading, spacing: 0) {
+                    header
+                    Hairline()
+                    HStack(alignment: .top, spacing: 0) {
+                        ScrollView { activityColumn.padding(.leading, 32).padding(.trailing, 24).padding(.vertical, 24) }
+                            .frame(width: cols.activity)
+                        Rectangle().fill(Theme.border).frame(width: 1).accessibilityHidden(true)
+                        ScrollView { checklistColumn.padding(.horizontal, 24).padding(.vertical, 24) }
+                            .frame(width: cols.checklist)
+                        Rectangle().fill(Theme.border).frame(width: 1).accessibilityHidden(true)
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 26) {
+                                detailColumn
+                                bottomActions
+                            }
+                            .padding(.horizontal, 40).padding(.vertical, 24)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
             } else {
-                singleColumn
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        header
+                        VStack(alignment: .leading, spacing: 28) {
+                            detailColumn
+                            checklistColumn
+                            if !events.isEmpty { activityColumn }
+                            bottomActions
+                        }
+                        .padding(.horizontal, 32).padding(.bottom, 32)
+                        .frame(maxWidth: 760, alignment: .leading)
+                    }
+                }
             }
         }
         .onAppear { events = sa.taskEvents(view.id) }
@@ -61,14 +91,14 @@ struct TaskCard: View {
             }
         }
         .background(Theme.canvas)
-        // Esc 回到清单（Pass 6，同设置页）：正在加项就先收起输入行。`openWorklist` 会在下一轮把第一响应者清空（`leaveTerminals`），
+        // Esc 回到清单（Pass 6，同设置页）：加项框里有字就先清掉。`openWorklist` 会在下一轮把第一响应者清空（`leaveTerminals`），
         // 所以晚一拍再要焦点。
         .focusable()
         .focusEffectDisabled()
         .focused($cardFocused)
         .onAppear { DispatchQueue.main.async { cardFocused = true } }
         .onExitCommand {
-            if addingItem { addingItem = false; newItem = "" } else { appModel.openWorklist() }
+            if !newItem.isEmpty { newItem = "" } else { appModel.openWorklist() }
         }
         .sheet(item: $editing) { ItemTextSheet(taskID: view.id, item: $0).environment(appModel) }
         .alert("删除第 \(removing?.ord ?? 0) 项？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
@@ -100,9 +130,9 @@ struct TaskCard: View {
         }
     }
 
-    // MARK: 版式：三列 / 单列
+    // MARK: 顶部：标题行 + 「下一步」横幅（定稿：C 的横幅 + A 的纸面风格）
 
-    /// 这张卡上动作的错误（`actionErrors[任务]`）和表单动作的错误（`actionError`）都在详情最上面（3A）。
+    /// 这张卡上动作的错误（`actionErrors[任务]`）和表单动作的错误（`actionError`）都在最上面（3A）。
     @ViewBuilder private var errorBanner: some View {
         let sa = appModel.superagent
         if let e = sa.actionErrors[view.id] ?? sa.actionError {
@@ -110,92 +140,85 @@ struct TaskCard: View {
         }
     }
 
-    /// 左活动、中清单、右详情；三列各自滚动，左中两列定宽（`TaskCardLayout`）。
-    private func threeColumns(_ cols: (activity: CGFloat, checklist: CGFloat)) -> some View {
-        HStack(alignment: .top, spacing: Theme.Space.lg) {
-            ScrollView { activityCard(compact: true).padding(.vertical, Theme.Space.xxl) }
-                .frame(width: cols.activity)
-            ScrollView { checklistCard(compact: true).padding(.vertical, Theme.Space.xxl) }
-                .frame(width: cols.checklist)
-            ScrollView {
-                VStack(alignment: .leading, spacing: Theme.Space.xl) {
-                    errorBanner
-                    titleCard
-                    needBar
-                    textCard
-                    OrgSyncRow(view: view) // 同步行（第 3 期）：只有组织任务显示
-                    bottomActions
+    private var header: some View {
+        let sa = appModel.superagent
+        let rest = view.task.isOpen ? Array(view.needsYou.dropFirst()) : []
+        return VStack(alignment: .leading, spacing: 16) {
+            errorBanner
+            titleRow
+            NextStepBanner(view: view, assign: assign)
+            if !rest.isEmpty || sa.actionEchoes[view.id] != nil {
+                VStack(alignment: .leading, spacing: 4) {
+                    if !rest.isEmpty {
+                        Text("还有 \(rest.count) 件：" + rest.map { need in
+                            view.ticket(needing: need).map { "\(need.label)（工单 #\($0.id)）" } ?? need.label
+                        }.joined(separator: "、"))
+                    }
+                    if let echo = sa.actionEchoes[view.id] { Text(echo) } // 动作之后的回声（3A）
                 }
-                .padding(.vertical, Theme.Space.xxl)
+                .font(.caption).foregroundStyle(Theme.textTertiary).lineLimit(1)
             }
-            .frame(maxWidth: .infinity)
         }
-        .padding(.horizontal, Theme.Space.xxl)
-    }
-
-    /// 窄窗口：原来的单列，最宽 760。
-    private var singleColumn: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: Theme.Space.xl) {
-                    errorBanner
-                    titleCard
-                    needBar.id("needs")
-                    textCard
-                    checklistCard(compact: false)
-                    if !events.isEmpty { activityCard(compact: false) } // 没有活动不占一张卡
-                    OrgSyncRow(view: view)
-                    bottomActions
-                }
-                .padding(Theme.Space.xxl)
-                .frame(maxWidth: 760, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .onAppear { if !view.needsYou.isEmpty { proxy.scrollTo("needs", anchor: .center) } }
-        }
+        .padding(.horizontal, 32).padding(.top, 24).padding(.bottom, 22)
     }
 
     // MARK: 标题 + 阶段步进 + 元信息 + 原文
 
-    private var titleCard: some View {
-        let t = view.task
-        let tag = view.stateTag
-        let meta = view.metaLine(includeScope: !editable)
-        return VStack(alignment: .leading, spacing: Theme.Space.lg) {
-            HStack(alignment: .firstTextBaseline, spacing: Theme.Space.md) {
-                Text(t.label).font(.system(size: 13, design: .monospaced)).foregroundStyle(Theme.textTertiary)
-                Text(t.title).font(.system(size: 17, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-                    .lineLimit(2).textSelection(.enabled)
-                StateTag(text: tag.text, tint: tag.tint)
+    private var titleRow: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 20) {
+                titleText
                 Spacer(minLength: 0)
+                StageStepper(stages: view.task.stages, current: view.task.stageIndex)
             }
-            StageStepper(stages: t.stages, current: t.stageIndex)
-            Text(meta).font(.system(size: 12)).foregroundStyle(Theme.textTertiary)
-                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                .help(t.scope)
-                .accessibilityLabel("元信息：\(meta)")
-            if hasChips { FlowLayout(spacing: Theme.Space.md) { metaChips } }
+            VStack(alignment: .leading, spacing: 12) {
+                titleText
+                StageStepper(stages: view.task.stages, current: view.task.stageIndex)
+            }
         }
-        .saCard()
     }
 
-    // MARK: 原文 + 结果：放在需要你条之后，长文先收起（不把需要你条挤下去）
+    private var titleText: some View {
+        let t = view.task
+        let tag = view.stateTag
+        return HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(t.label).font(.system(size: 13, design: .monospaced)).foregroundStyle(Theme.textTertiary)
+            Text(t.title).font(.system(size: 24, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                .lineLimit(2).textSelection(.enabled).help(t.title)
+            StateTag(text: tag.text, tint: tag.tint)
+        }
+    }
 
-    @ViewBuilder private var textCard: some View {
+    // MARK: 右列：元信息 + 原文 / 结果（长文先收起）
+
+    private var detailColumn: some View {
+        let meta = view.metaLine(includeScope: !editable)
+        return VStack(alignment: .leading, spacing: 26) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(meta).font(.system(size: 13)).foregroundStyle(Theme.textTertiary)
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                    .help(view.task.scope)
+                    .accessibilityLabel("元信息：\(meta)")
+                if hasChips { FlowLayout(spacing: Theme.Space.md) { metaChips } }
+            }
+            textSections
+            OrgSyncRow(view: view) // 同步行（第 3 期）：只有组织任务显示
+        }
+        .frame(maxWidth: 760, alignment: .leading)
+    }
+
+    /// 完成了先看结果，没完成先看原文；打开着又带结果的是上一轮的结果。空的不占位。
+    @ViewBuilder private var textSections: some View {
         let t = view.task
         let request = t.request != t.title ? t.request : ""
-        if !request.isEmpty || !t.resultSummary.isEmpty {
-            VStack(alignment: .leading, spacing: Theme.Space.lg) {
-                // 完成了先看结果，没完成先看原文。
-                if t.status == .done {
-                    LongText(label: "结果", text: t.resultSummary)
-                    LongText(label: "原文", text: request)
-                } else {
-                    LongText(label: "原文", text: request)
-                    LongText(label: "结果", text: t.resultSummary)
-                }
+        let sections: [(label: String, text: String)] = t.status == .done
+            ? [("结果", t.resultSummary), ("原文", request)]
+            : [("原文", request), ("上一轮结果", t.resultSummary)]
+        ForEach(sections.filter { !$0.text.isEmpty }, id: \.label) { section in
+            VStack(alignment: .leading, spacing: 10) {
+                SectionLabel(title: section.label)
+                LongText(label: "", text: section.text)
             }
-            .saCard()
         }
     }
 
@@ -245,118 +268,45 @@ struct TaskCard: View {
         return (open + closed).sorted { $0.id > $1.id }
     }
 
-    // MARK: 需要你条（F-10）：紧贴头卡之下
+    // MARK: 中列：工作清单（F-09）
 
-    @ViewBuilder private var needBar: some View {
-        let sa = appModel.superagent
-        if view.task.isOpen, let line = view.needLine(handbackTarget: view.handbackNeed.flatMap { sa.task($0.toTaskID) }) {
-            let rest = view.needsYou.dropFirst()
-            HStack(alignment: .center, spacing: Theme.Space.md) {
-                RoundedRectangle(cornerRadius: 2).fill(Theme.Status.attention).frame(width: 8, height: 8)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    (Text(line.title).fontWeight(.semibold) + Text(line.body.isEmpty ? "" : "  " + line.body))
-                        .font(.callout).foregroundStyle(Theme.textPrimary)
-                        .lineLimit(3).fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                    if !rest.isEmpty {
-                        Text("还有 \(rest.count) 件：" + rest.map { need in
-                            view.ticket(needing: need).map { "\(need.label)（工单 #\($0.id)）" } ?? need.label
-                        }.joined(separator: "、"))
-                        .font(.caption).foregroundStyle(Theme.textTertiary).lineLimit(1)
-                    }
-                    if let echo = sa.actionEchoes[view.id] { // 回答 / 打回 / 补充后的「已送达」（3A）
-                        Text(echo).font(.caption).foregroundStyle(Theme.textTertiary).lineLimit(1)
-                    }
-                }
-                Spacer(minLength: Theme.Space.md)
-                // 动作集合一处实现（清单行同款）：看改动 / 打回… / 完成任务… 等都在它里面，确认单也由它挂。
-                TaskNeedActions(view: view, assign: assign)
-                    .controlSize(.large) // 28pt 的点击目标（Pass 6）
-            }
-            .padding(.horizontal, Theme.Space.lg)
-            .padding(.vertical, Theme.Space.md)
-            .frame(minHeight: 44)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.Status.attention.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.md))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.Status.attention, lineWidth: 1))
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("需要你：\(line.title)。\(line.body)")
-        } else if view.task.isOpen, let echo = sa.actionEchoes[view.id] {
-            quietBar(echo, "") // 动作之后没有别的需要你了：回声留 6 秒（3A）
-        } else if view.task.isOpen, view.reviewing {
-            quietBar("评审中", "TFA 正在核对交付；核对完才进待评审。")
-        } else if view.task.isOpen, view.unassignedCount > 0 {
-            quietBar("等你定谁来做", "\(WorklistText.ords(view.items.filter { $0.assignee == .unassigned }.map(\.ord)))还没定。") {
-                Button("谁来做…", action: assign).controlSize(.large)
-            }
-        }
-    }
-
-    private func quietBar(_ title: String, _ body: String) -> some View {
-        quietBar(title, body) { EmptyView() }
-    }
-
-    private func quietBar<Trailing: View>(_ title: String, _ body: String, @ViewBuilder trailing: () -> Trailing) -> some View {
-        HStack(spacing: Theme.Space.md) {
-            RoundedRectangle(cornerRadius: 2).fill(Theme.textTertiary).frame(width: 8, height: 8).accessibilityHidden(true)
-            (Text(title).fontWeight(.semibold) + Text(body.isEmpty ? "" : "  " + body))
-                .font(.callout).foregroundStyle(Theme.textPrimary).lineLimit(2)
-            Spacer(minLength: Theme.Space.md)
-            trailing()
-        }
-        .padding(.horizontal, Theme.Space.lg)
-        .padding(.vertical, Theme.Space.md)
-        .frame(minHeight: 44)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
-    }
-
-    // MARK: 工作清单（F-09）
-
-    /// `compact`：三列里的窄清单列，每项的执行者 / 工单 / 状态挪到文字下一行。
-    private func checklistCard(compact: Bool) -> some View {
-        VStack(spacing: 0) {
-            HStack(spacing: Theme.Space.md) {
-                Text("工作清单").font(Theme.Font.rowTitle)
-                Text("\(view.doneCount)/\(view.totalCount)").font(.callout).monospacedDigit().foregroundStyle(Theme.textTertiary)
+    private var checklistColumn: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                SectionLabel(title: "清单")
+                Text("\(view.doneCount) / \(view.totalCount)").font(.system(size: 12)).monospacedDigit().foregroundStyle(Theme.textTertiary)
                     .accessibilityLabel("完成 \(view.doneCount) 项，共 \(view.totalCount) 项")
-                Spacer()
-                if editable { // 「谁来做… / 加一项」只在这里（Pass 4）
+                Spacer(minLength: 0)
+                if editable {
                     Button("谁来做…", action: assign)
-                        .accessibilityLabel("谁来做")
-                    Button { startAdding() } label: { Label("加一项", systemImage: "plus") }
-                        .accessibilityLabel("加一项")
+                        .buttonStyle(.plain).font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
+                        .frame(minHeight: 28).accessibilityLabel("谁来做")
                 }
             }
-            .controlSize(.large) // 28pt 的点击目标（Pass 6）
-            .padding(.horizontal, compact ? Theme.Space.lg : Theme.Space.xl)
-            .padding(.vertical, Theme.Space.md)
-            ForEach(view.items) { item in
-                Hairline()
-                ItemRow(view: view, item: item, status: shownStatus(item), editable: editable, compact: compact,
-                        toggle: { toggle(item) }, edit: { editing = item }, remove: { removing = item })
-                    .padding(.horizontal, compact ? Theme.Space.lg : Theme.Space.xl)
-            }
-            if addingItem {
-                Hairline()
-                HStack(spacing: Theme.Space.md) {
-                    TextField("一句话、可验证的结果", text: $newItem)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($newItemFocused)
-                        .onSubmit(addItem)
-                        .accessibilityLabel("新清单项")
-                    Button("加入", action: addItem)
-                        .disabled(newItem.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Button("完成") { addingItem = false; newItem = "" }
+            ProgressLine(done: view.doneCount, total: view.totalCount)
+            VStack(spacing: 0) {
+                ForEach(view.items) { item in
+                    ItemRow(view: view, item: item, status: shownStatus(item), editable: editable,
+                            toggle: { toggle(item) }, edit: { editing = item }, remove: { removing = item })
+                    Rectangle().fill(Theme.border.opacity(0.6)).frame(height: 1).accessibilityHidden(true)
                 }
-                .controlSize(.small)
-                .padding(.horizontal, Theme.Space.xl)
-                .padding(.vertical, Theme.Space.md)
+                if editable { addField }
             }
         }
-        .saCard(padding: 0)
+    }
+
+    /// 一直在的「加一项」：回车加进去，焦点留在这里接着加。
+    private var addField: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.Colors.pewter).frame(width: 20)
+                .accessibilityHidden(true)
+            TextField("加一项，回车确认", text: $newItem)
+                .textFieldStyle(.plain).font(.system(size: 14))
+                .focused($newItemFocused)
+                .onSubmit(addItem)
+                .accessibilityLabel("加一项")
+        }
+        .padding(.vertical, 14)
     }
 
     private func shownStatus(_ item: Item) -> ItemStatus {
@@ -373,11 +323,6 @@ struct TaskCard: View {
         if sa.actionError != nil { pending[item.id] = nil }
     }
 
-    private func startAdding() {
-        addingItem = true
-        newItemFocused = true
-    }
-
     private func addItem() {
         let text = newItem.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
@@ -390,25 +335,34 @@ struct TaskCard: View {
         }
     }
 
-    // MARK: 活动
+    // MARK: 左列：活动（时间线，新的在上；要人管的事件琥珀点，交付 / 完成绿点）
 
-    /// `compact`：三列里的窄活动列，每条最多 4 行（悬停看全文），免得一条长回报占满一屏。
-    private func activityCard(compact: Bool) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Space.md) {
-            Text("活动").font(Theme.Font.rowTitle)
-            if events.isEmpty { // 三列时这一列总在，空着要说一句
-                Text("还没有活动。").font(.callout).foregroundStyle(Theme.textTertiary)
-            }
-            ForEach(events, id: \.id) { e in
-                HStack(alignment: .firstTextBaseline, spacing: Theme.Space.md) {
-                    Text(Self.time(e.at)).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.textTertiary)
-                    Text(e.text).font(.callout).foregroundStyle(Theme.textSecondary)
-                        .lineLimit(compact ? 4 : nil).help(compact ? e.text : "")
-                        .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+    private var activityColumn: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SectionLabel(title: "活动")
+            if events.isEmpty {
+                Text("还没有活动。").font(.system(size: 13)).foregroundStyle(Theme.textTertiary)
+            } else {
+                VStack(alignment: .leading, spacing: 18) {
+                    ForEach(events.reversed(), id: \.id) { e in
+                        let tone = ActivityTone.of(e.kind, text: e.text)
+                        HStack(alignment: .top, spacing: 11) {
+                            TimelineDot(tone: tone).padding(.top, 4)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(Self.time(e.at)).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textTertiary)
+                                Text(e.text).font(.system(size: 13, weight: tone == .attention ? .medium : .regular))
+                                    .foregroundStyle(tone == .attention ? Theme.textPrimary : Theme.textSecondary)
+                                    .lineLimit(4).help(e.text)
+                                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+                .background(alignment: .leading) { // 竖线穿过圆点中心
+                    Rectangle().fill(Theme.border).frame(width: 1).padding(.vertical, 6).offset(x: 4).accessibilityHidden(true)
                 }
             }
         }
-        .saCard()
     }
 
     private static let clock: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f }()
@@ -482,7 +436,7 @@ struct StageStepper: View {
 
 // MARK: - 清单项行（F-09）
 
-/// 40pt：序号 · 勾选框（你的项可点，Agent 的只读）· 文字（≤2 行）· 执行者 chip · 工单号 chip（可点跳终端）· 状态词 60pt 右对齐
+/// 序号 · 勾选框（你的项可点，Agent 的只读）· 文字（≤3 行，做完划掉），下一行「执行者 · 工单 #12（可点跳终端）· 状态」
 /// （退回成新任务的项写「→ A-13」，可点）。
 private struct ItemRow: View {
     @Environment(AppModel.self) private var appModel
@@ -491,8 +445,6 @@ private struct ItemRow: View {
     /// 乐观更新后显示的状态。
     let status: ItemStatus
     let editable: Bool
-    /// 窄清单列（三列版式）：文字独占一行（≤3 行），执行者 / 工单 / 状态放在它下面一行。
-    var compact = false
     let toggle: () -> Void
     let edit: () -> Void
     let remove: () -> Void
@@ -502,39 +454,38 @@ private struct ItemRow: View {
         shown.status = status
         let word = view.statusWord(shown)
         let handback = view.handback(of: shown)
-        return Group {
-            if compact {
-                HStack(alignment: .top, spacing: Theme.Space.md) {
-                    ordinal.padding(.top, 4)
-                    checkbox
-                    VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                        itemText(lines: 3)
-                        HStack(spacing: Theme.Space.sm) {
-                            AssigneeChip(assignee: item.assignee)
-                            if let id = item.ticketID { TicketChip(id: id, action: { appModel.goToTicket(id) }) }
-                            Spacer(minLength: 0)
-                            statusWord(word, handback: handback, width: nil)
-                        }
-                    }
-                }
-            } else {
-                HStack(spacing: Theme.Space.md) {
-                    ordinal
-                    checkbox
-                    itemText(lines: 2)
-                    AssigneeChip(assignee: item.assignee)
+        return HStack(alignment: .top, spacing: 10) {
+            Text("\(item.ord)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textTertiary)
+                .frame(width: 14, alignment: .trailing).padding(.top, 3)
+            checkbox
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.text).font(.system(size: 14))
+                    .foregroundStyle(status == .done ? Theme.textTertiary : Theme.textPrimary)
+                    .strikethrough(status == .done, color: Theme.Colors.mist)
+                    .lineLimit(3).help(item.text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 5) {
+                    Text(item.assignee.label)
                     if let id = item.ticketID {
-                        TicketChip(id: id, action: { appModel.goToTicket(id) })
-                    } else {
-                        Text("—").font(.system(size: 11)).foregroundStyle(Theme.Colors.mist).frame(width: 34)
-                            .accessibilityHidden(true)
+                        Text("·").accessibilityHidden(true)
+                        Button("工单 #\(id)") { appModel.goToTicket(id) }
+                            .buttonStyle(.plain).help("前往工单 #\(id) 的终端")
                     }
-                    statusWord(word, handback: handback, width: 60)
+                    Text("·").accessibilityHidden(true)
+                    if let handback {
+                        Button(word.text) { appModel.openWorklist(task: handback.toTaskID) }
+                            .buttonStyle(.plain)
+                            .help("这项被工单 #\(handback.ticketID) 退回，成了任务 A-\(handback.toTaskID)；打开它")
+                            .accessibilityLabel("打开任务 A-\(handback.toTaskID)")
+                    } else {
+                        Text(word.text).foregroundStyle(word.attention ? Theme.Status.attention : Theme.textTertiary)
+                    }
                 }
+                .font(.system(size: 12)).foregroundStyle(Theme.textTertiary).lineLimit(1)
             }
         }
-        .padding(.vertical, compact ? Theme.Space.sm : Theme.Space.xs)
-        .frame(minHeight: 40)
+        .padding(.vertical, 14)
         .contentShape(Rectangle())
         .contextMenu {
             if editable {
@@ -545,11 +496,6 @@ private struct ItemRow: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("第 \(item.ord) 项，\(item.assignee.spoken)，\(word.text)：\(item.text)")
-    }
-
-    private var ordinal: some View {
-        Text("\(item.ord)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textTertiary)
-            .frame(width: 18, alignment: .trailing)
     }
 
     /// 你的项可点（乐观更新），Agent 的只读。
@@ -563,28 +509,59 @@ private struct ItemRow: View {
             ItemCheckbox(status: status)
         }
     }
+}
 
-    private func itemText(lines: Int) -> some View {
-        Text(item.text).font(.callout)
-            .foregroundStyle(status == .done ? Theme.textSecondary : Theme.textPrimary)
-            .lineLimit(lines).help(item.text)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
+// MARK: - 小件：分区标题、进度线、时间线圆点
+
+/// 「活动」「清单」「原文」这类小标题：12pt 半粗、略加字距、石灰。
+private struct SectionLabel: View {
+    let title: String
+    var body: some View {
+        Text(title).font(.system(size: 12, weight: .semibold)).tracking(1).foregroundStyle(Theme.textTertiary)
+            .accessibilityAddTraits(.isHeader)
     }
+}
 
-    /// 状态词；退回成新任务的项写「→ A-13」，可点打开它。`width` 为 nil 时按内容宽（窄列里靠右）。
-    @ViewBuilder private func statusWord(_ word: (text: String, attention: Bool), handback: HandbackLink?, width: CGFloat?) -> some View {
-        if let handback {
-            Button(word.text) { appModel.openWorklist(task: handback.toTaskID) }
-                .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
-                .frame(width: width, alignment: .trailing)
-                .help("这项被工单 #\(handback.ticketID) 退回，成了任务 A-\(handback.toTaskID)；打开它")
-                .accessibilityLabel("打开任务 A-\(handback.toTaskID)")
-        } else {
-            Text(word.text).font(.system(size: 12))
-                .foregroundStyle(word.attention ? Theme.Status.attention : Theme.textSecondary)
-                .frame(width: width, alignment: .trailing)
+/// 清单的进度：3pt 的细线，做完的部分炭黑。
+private struct ProgressLine: View {
+    let done: Int
+    let total: Int
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Theme.border.opacity(0.7))
+                Capsule().fill(Theme.brand).frame(width: total == 0 ? 0 : geo.size.width * CGFloat(done) / CGFloat(total))
+            }
         }
+        .frame(height: 3)
+        .accessibilityHidden(true)
+    }
+}
+
+/// 活动事件的语气：要人管的（受阻、失败、提问、退回、停下、评审有问题）琥珀；交付 / 完成 / 评审通过绿；其余空心。
+/// 任务层的事件 kind 很笼统（item / review / stage），所以也看文字。
+enum ActivityTone: Equatable {
+    case attention, done, plain
+
+    static func of(_ kind: String, text: String = "") -> ActivityTone {
+        let k = kind.lowercased()
+        if ["blocked", "failed", "ask", "handback", "waiting", "stalled", "delivery"].contains(where: k.contains)
+            || ["退回", "受阻", "失败", "有问题", "没回报"].contains(where: text.contains) { return .attention }
+        if ["ready", "done", "approve", "complete", "merged"].contains(where: k.contains)
+            || ["交付", "全部完成", "任务完成"].contains(where: text.contains)
+            || (text.contains("评审结论") && text.contains("通过")) { return .done }
+        return .plain
+    }
+}
+
+private struct TimelineDot: View {
+    let tone: ActivityTone
+    var body: some View {
+        Circle()
+            .fill(tone == .attention ? Theme.Status.attention : tone == .done ? Theme.Status.positive : Theme.canvas)
+            .overlay(Circle().stroke(tone == .plain ? Theme.Colors.pewter : Color.clear, lineWidth: 1.5))
+            .frame(width: 9, height: 9)
+            .accessibilityHidden(true)
     }
 }
 
@@ -601,8 +578,8 @@ private struct LongText: View {
     var body: some View {
         if !text.isEmpty {
             VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                (Text("\(label)：").foregroundStyle(Theme.textTertiary) + Text(text))
-                    .font(.callout).foregroundStyle(Theme.textPrimary)
+                ((label.isEmpty ? Text("") : Text("\(label)：").foregroundStyle(Theme.textTertiary)) + Text(text))
+                    .font(.system(size: 14)).lineSpacing(4).foregroundStyle(Theme.textPrimary)
                     .lineLimit(long && !expanded ? 6 : nil)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 if long {
