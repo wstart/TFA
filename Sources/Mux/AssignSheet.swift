@@ -60,6 +60,12 @@ enum AssignPreview {
         return parts.isEmpty ? nil : "确认后：" + parts.joined(separator: "；")
     }
 
+    /// 这次交给了会改文件的角色、而任务还没有目录：引擎会拒绝（H-02），sheet 要先让人选目录。
+    static func needsDirectory(changes: [(ord: Int, to: Assignee)], roles: [Role], scope: String) -> Bool {
+        guard scope.isEmpty else { return false }
+        return changes.contains { c in c.to.role.flatMap { name in roles.first { $0.name == name } }?.edits ?? false }
+    }
+
     /// 改派会停掉的工单（引擎 `assign`，注意事项 C-03）：只有它名下没做完的项**全部**被改派走才停；还剩项就继续做，
     /// 只是告诉它哪项不用做了。`reassigned` = 这次换了执行者的项的序号，`open` = 还开着的工单。按工单号升序。
     static func stopping(items: [Item], reassigned: Set<Int>, open: Set<Int64>) -> [Int64] {
@@ -83,6 +89,8 @@ struct AssignSheet: View {
     @State private var error: String?
     /// 确认前列出会被中断的终端（改派有工单的项；注意事项 C-03）。
     @State private var interrupting: [String]?
+    /// 任务的目录：`view` 是打开时的快照，在这里选了目录要立刻反映出来。
+    @State private var scope: String
 
     struct Row: Identifiable, Equatable {
         let item: Item
@@ -107,6 +115,7 @@ struct AssignSheet: View {
         }
         _rows = State(initialValue: rows)
         _initial = State(initialValue: rows)
+        _scope = State(initialValue: view.task.scope)
     }
 
     /// 分段控件的选项：你 + 各角色（按 `roles` 顺序）；项当前的角色不在列表里也补上，免得没得选。
@@ -142,7 +151,13 @@ struct AssignSheet: View {
         if let r = rows.first(where: { $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) { return "第 \(r.item.ord) 项没有文字" }
         if let r = rows.first(where: { $0.text.count > Item.maxText }) { return "第 \(r.item.ord) 项超过 \(Item.maxText) 字" }
         if changed.isEmpty { return "没有改动" }
+        if needsDirectory { return "先选项目目录" }
         return nil
+    }
+    /// 交给了会改文件的角色、任务还没有目录：确认前要先选（引擎 H-02）。
+    private var needsDirectory: Bool {
+        let changes = rows.filter { $0.item.status != .done && ($0.to != $0.item.assignee || redispatch($0)) }.map { (ord: $0.item.ord, to: $0.to) }
+        return AssignPreview.needsDirectory(changes: changes, roles: roles, scope: scope)
     }
     /// 会被停掉的工单：名下没做完的项全被改派走的（`AssignPreview.stopping`），按工单号。
     private var stoppingTickets: [Int64] {
@@ -194,6 +209,19 @@ struct AssignSheet: View {
             Hairline()
             if !agentAllocations.isEmpty { // 合单开关只在会开工单时有意义；默认开
                 Toggle("同一角色的项合成一张工单", isOn: $oneTicket).toggleStyle(.switch).controlSize(.small)
+            }
+            if needsDirectory {
+                HStack(spacing: Theme.Space.md) {
+                    Text("开发要改文件，这个任务还没有项目目录。").font(.caption).foregroundStyle(Theme.Status.attention)
+                    Button("选择目录…") {
+                        if let p = pickFolder(from: scope, message: "任务的项目目录：交给会改文件的角色（开发）时在这里工作") {
+                            if let e = attempt(appModel.superagent, { appModel.superagent.updateTask(view.id, scope: p) }) { error = e } else { scope = p }
+                        }
+                    }
+                    .controlSize(.small)
+                }
+            } else if !scope.isEmpty, scope != view.task.scope {
+                Text("项目目录：\(tilde(scope))").font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1).truncationMode(.head)
             }
             if let consequence {
                 Text(consequence).font(.caption).foregroundStyle(Theme.textSecondary)

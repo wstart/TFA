@@ -181,14 +181,15 @@ extension TaskView {
 
     /// 头卡的元信息一行（设计评审 2026-11-08，Pass 4）：「来源 主管 · 范围 payment-service · 负责人 你 · 截止 周四 · 优先级 高」。
     /// 可点的（依赖、组织 T-128、退回来源）另做 chip，不在这行；触发器 id（t88040）不上卡，进决定记录。
-    func metaLine(now: Date = Date()) -> String {
+    /// `includeScope`：能编辑的卡把目录画成可点的「范围」chip（`scopeChip`），这一行就不再写它。
+    func metaLine(now: Date = Date(), includeScope: Bool = true) -> String {
         var parts: [String] = []
         switch task.source {
         case .org: break // 有可点的 chip
         case .handback where handbackOrigin != nil: break // 同上；没绑定原任务的退回没有 chip，这行写来源
         default: parts.append("来源 \(task.source.label)")
         }
-        if !task.scope.isEmpty { parts.append("范围 \(WorklistSections.projectName(task.scope))") }
+        if includeScope, !task.scope.isEmpty { parts.append("范围 \(WorklistSections.projectName(task.scope))") }
         parts.append("负责人 \(task.owner)")
         if let due = task.due { parts.append("截止 \(DueText.long(due, now: now))") }
         if task.priority != .medium { parts.append("优先级 \(task.priority.label)") }
@@ -197,6 +198,11 @@ extension TaskView {
 
     /// 任务卡页头的状态行（设计评审 2026-11-08，Pass 1；替掉那句说明）：「更新于 刚刚 · 工单 #12 · 分支 tfa/12」，
     /// 结束态前缀「已完成 · 」。只列打开的工单和它们的分支。
+    /// 任务卡上可点的目录 chip：没填是淡色的「范围…」，填了是「范围 · myclaw」。
+    static func scopeChip(_ scope: String) -> String {
+        scope.isEmpty ? "范围…" : "范围 · \(WorklistSections.projectName(scope))"
+    }
+
     func headerStatus(now: Date = Date()) -> String {
         var parts: [String] = []
         if !task.isOpen { parts.append(task.status.label) }

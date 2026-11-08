@@ -109,7 +109,7 @@ struct TaskCard: View {
     private var titleCard: some View {
         let t = view.task
         let tag = view.stateTag
-        let meta = view.metaLine()
+        let meta = view.metaLine(includeScope: !editable)
         return VStack(alignment: .leading, spacing: Theme.Space.lg) {
             HStack(alignment: .firstTextBaseline, spacing: Theme.Space.md) {
                 Text(t.label).font(.system(size: 13, design: .monospaced)).foregroundStyle(Theme.textTertiary)
@@ -153,6 +153,12 @@ struct TaskCard: View {
         }
         OrgTaskChip(task: t) // 组织任务（第 3 期）：「组织 · T-128」，点开服务端任务页；本地任务不显示
         if editable {
+            // 目录 chip 可点 → 选文件夹：交给会改文件的角色前必须有（引擎 H-02 拒绝时就指这里）。
+            MetaChip(text: TaskView.scopeChip(t.scope), faint: t.scope.isEmpty, action: {
+                if let p = pickFolder(from: t.scope, message: "任务的项目目录：交给会改文件的角色（开发）时在这里工作") { sa.updateTask(view.id, scope: p) }
+            })
+            .help(t.scope.isEmpty ? "还没有项目目录：交给开发之前先选一个" : t.scope)
+            .accessibilityLabel(t.scope.isEmpty ? "选项目目录" : "项目目录 \(t.scope)，点了更换")
             // 依赖 chip 可点 → 选前置任务（第 2 期）；没有依赖时是淡色的「依赖…」。
             MetaChip(text: WorklistText.deps(t.deps, done: { sa.task($0)?.task.status == .done }), faint: t.deps.isEmpty,
                      action: { showDeps = true })
