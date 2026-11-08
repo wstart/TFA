@@ -39,6 +39,8 @@
 - `assignee` 同 TFA 的 `Assignee.raw`：`""` / `你` / `agent:<角色>`。
 - `version` 每次服务端写入 +1；客户端 PATCH 时带 `base_version`，服务端按 §3 合并，不用乐观锁拒绝（勾选取并集），只有 `stage` / `status` 的后退才 409。
 - `needs` = 这个任务此刻需要人的事（答问题 / 评审 / 受阻 / 失败），由节点上行，服务端只记录并展示。
+- 只读附加字段：`stage_kind`（当前阶段的 kind）、`edits`（派单授权：能否改文件）、`created_at`。
+- **预留**：Web 上「领取」和「派单给人」都只记 `assignee_email`、进第一个 doing、`assignee_node` 留空；该人的 TFA 收到 `task.assigned`（`reserved: true`）后用 `claim` 绑定本节点（CAS `assignee_node IS NULL AND assignee_email = 我`），同一人的第二台得 409。直接派给节点的不带 `reserved`。
 
 ### Node（节点）
 
@@ -62,9 +64,9 @@
 |---|---|---|---|---|
 | POST | `/nodes/register` | `{invite_code, node_id, person_email, roles[], version, machine}` | 201 `{token, node, workspace:{id,name}, person:{email,name}, server_time}` | 邀请码由管理员按成员生成，一次性；`node_id` 由客户端生成并持久化（UUID 前 8 位）。同一 `node_id` 重复注册 = 换 token（旧 token 吊销）。 |
 | POST | `/nodes/heartbeat` | `{online, slots, open_tickets, roles[], version}` | `{ok, server_time, policy_versions:{"<scope_id>": "<version>"}}` | 每 30 s；2 分钟没心跳 = 离线，离线不自动领取（I-04）。 |
-| GET | `/tasks` | query `mine=1`（派给我 / 我领的）、`claimable=1`（本范围待领取）、`since=<cursor>` | `{tasks:[Task], claimable:[Task], cursor}` | `since` 为上次响应的 `cursor`；只返回之后有变化的。首次不带 → 全量。 |
+| GET | `/tasks` | query `mine=1`（派给我 / 我领的 / 预留给我）、`claimable=1`（本范围待领取）、`since=<cursor>` | `{tasks:[Task], claimable:[Task], cursor}` | `cursor` 是服务端的全局改动序号（`task.change_seq`），原样回传；只返回之后有变化的。首次不带 → 全量。 |
 | GET | `/tasks/{id}` | — | `{task}` | |
-| POST | `/tasks/{id}/claim` | `{}` | 200 `{task}` / 409 `{error:"claimed", task}` | 服务端 CAS：`assignee_node IS NULL AND stage kind == todo`（I-05）；人要在范围允许名单内；前置未完成 → 422 `deps_open`。 |
+| POST | `/tasks/{id}/claim` | `{}` | 200 `{task}` / 409 `{error:"claimed", task}` | 服务端 CAS：`assignee_node IS NULL`，且（待领取）或（预留给我）（I-05）；预留给别人也 409；不在范围允许名单 → 403；前置未完成 → 422 `deps_open`。 |
 | PATCH | `/tasks/{id}` | `{base_version, stage?, status?, items:[{id, status, done_by, done_at, started_at}], result_summary?, updated_at}` | `{task, conflicts:[{item_id, server_status, client_status}]}` | 上行阶段 / 勾选 / 结果。合并见 §3。 |
 | POST | `/tasks/{id}/needs` | `{kind: "answer"|"review"|"blocked"|"failed"|"none", question?, ticket_ref?}` | `{task}` | 需要人；`none` 清除。服务端据此给范围负责人发「需要你」（Web 上琥珀 + 回到原处）。 |
 | POST | `/tasks/{id}/audit` | `{entries:[{at, kind, summary, credential_names:[…]}]}` | `{ok}` | 命令摘要和凭据名，不传命令全文。 |
@@ -72,13 +74,15 @@
 | GET | `/scopes/{id}/policy` | — | `Policy` | 带版本；客户端只在心跳里看到版本变化时拉。 |
 | GET | `/events` | query `since=<cursor>`，长轮询最多 25 s | `{events:[Event], cursor}` | 推送的替代：派单、打回 / 通过、取消、规则版本变化。没有事件时 25 s 后返回空数组。 |
 
-Event：`{"id": 55, "type": "task.assigned" | "task.updated" | "task.rejected" | "task.approved" | "task.cancelled" | "task.unassigned" | "policy.changed", "task_id": 128, "scope_id": 3, "payload": {…}, "at": "…"}`。`task.rejected` 的 payload 带 `{"text": "打回意见"}`。
+Event：`{"id": 55, "type": "task.assigned" | "task.updated" | "task.rejected" | "task.approved" | "task.cancelled" | "task.unassigned" | "policy.changed", "task_id": 128, "scope_id": 3, "payload": {…}, "at": "…"}`。
+payload：`task.assigned` `{edits, by, reserved?}`；`task.rejected` `{text, item_id, by}`（服务端已把意见追加成新清单项，客户端不再本地加项，只回到进行中并把意见送给原工单）；`task.updated` `{change: created|claimed|reserved|assigned|transferred|released|stage|fields|items|needs|answer|dropped|blocked, …}`（`answer` 带 `text`，是人在 Web 上回答的留言）；`policy.changed` `{version, mode}`。
 
 ## 3. 同步规则（需求文档 §10.3）
 
 - **下行**：任务字段、工作流、清单、派单、规则版本。节点对每个组织任务在本地也建一行 `task`（`origin = "<server>"`, `origin_id = "<id>"`），工单只在本地。
 - **上行**：阶段、清单勾选、结果摘要、需要人、当天打扰次数、审计摘要。走 outbox（append-only，按序重放，发送成功才删，I-02）。
-- **合并**（服务端 PATCH 时）：任务字段以服务端为准（标题 / 原文 / 范围 / 截止 / 优先级 / 依赖 / 工作流不接受客户端修改）；清单勾选取**并集**（任一边 done 即 done）；同一项两边改成不同的非 done 状态且都在 `base_version` 之后 → 不裁决，返回 `conflicts`，客户端把它放进「需要你」；`stage` 只能前进（后退靠服务端的打回事件）；`status` 的结束态只能由服务端（通过 / 取消）或节点的 `dropped` 设置。
+- **合并**（服务端 PATCH 时）：任务字段以服务端为准（标题 / 原文 / 范围 / 截止 / 优先级 / 依赖 / 工作流不接受客户端修改）；清单勾选取**并集**（任一边 done 即 done）；同一项两边改成不同的非 done 状态且服务端这一项在 `base_version` 之后改过（`item.changed_version > base_version`）→ 不裁决，返回 `conflicts`，客户端把它放进「需要你」；`stage` 只能前进（后退靠服务端的打回事件），客户端只在前进到 doing 时上行 stage，review / done 由服务端按清单完成情况自动推进；`status` 的结束态只能由服务端（通过 / 取消）或节点的 `dropped` 设置。
+- **打回**：服务端把意见追加为新清单项（否则清单仍全 done，下一次上行又立刻进待评审），任务回第一个 doing。
 - **离线**：本地照常；重连后先拉（`GET /tasks?since=`）再重放 outbox；重放时 `base_version` 用本地记录的最后已知版本。
 - **领取**：人领取（Web 或 TFA 的「待领取」分区）、TFA 自动领取（范围接单模式为自动 + 节点在线 + 能力匹配）、负责人派单（Web）。派单带授权：范围、能否改文件（`payload.edits`），节点据此选角色 / 建工单。
 
@@ -98,7 +102,7 @@ Event：`{"id": 55, "type": "task.assigned" | "task.updated" | "task.rejected" |
 
 Source → Trigger → Thread（按来源的会话 / issue / PR 分组）→ Eval（确定性 gate：发送人是否在范围允许名单、强度 explicit / inferred；模型研判：每条启用规则恰好一次、方向不明确不接）→ Decision（accept / attach / ignore / would_accept / unavailable）→ Task（+ Mandate：强度、范围、规则版本、命中的规则）。
 
-- 一个 Thread 同时只跑一个 Eval；候选 15 分钟没研判完 → unavailable。
+- 一个 Thread 同时只跑一个 Eval；任何事件 15 分钟没研判完 → unavailable（服务端对 explicit 也过期：主管不在就不接，人可以再说一次）。
 - accept 的任务：explicit → 进「待领取」（或范围配置了默认负责人 / 节点 → 直接派）；inferred 在 `auto` 模式 → 进待领取并标「规则接单」，`observe` → 只记 would_accept 进观察记录。
 - 模型后端可配置：`ROUTER_MODEL_BACKEND = claude-cli | anthropic | fake`；`claude-cli` 用本机 `claude -p --output-format json --model <m>`（走订阅），`anthropic` 用 `ANTHROPIC_API_KEY` 调 Messages API；默认模型 `claude-sonnet-5-5`。
 - 回复回到原处：由 `outbox_reply` 表异步投递（失败退避，3 次后进「问题」）。
