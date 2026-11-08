@@ -46,7 +46,7 @@
 
 ```json
 {"id": "node-7f3a", "person_email": "b@x.com", "roles": ["助理", "开发", "评审"], "version": "0.23.0",
- "machine": "bbc 的 MacBook Pro", "online": true, "last_seen": "…", "slots": 3, "open_tickets": 1}
+ "machine": "我的 MacBook Pro", "online": true, "last_seen": "…", "slots": 3, "open_tickets": 1}
 ```
 
 ### Policy（范围规则）
