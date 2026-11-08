@@ -426,7 +426,8 @@ struct RulesCard: View {
 
     var body: some View {
         let sa = appModel.superagent
-        let reviewed = sa.decisions.filter { $0.kind == .wouldAccept || $0.kind == .unavailable }.prefix(5)
+        let observed = ObservationLog.rows(sa.decisions)
+        let accuracy = sa.policyAccuracy
         VStack(alignment: .leading, spacing: Theme.Space.md) {
             HStack {
                 Text("主动接单（规则）").font(Theme.Font.rowTitle)
@@ -440,6 +441,11 @@ struct RulesCard: View {
             }
             .pickerStyle(.segmented).labelsHidden().fixedSize()
             Text(sa.mode.panelHint).font(.caption).foregroundStyle(Theme.textTertiary)
+            if sa.mode == .auto, accuracy.pending > 0 {
+                // 提示不拦：自动接单前先把「本会接单」标一遍，准确率才有意义。
+                Text("还有 \(accuracy.pending) 条「本会接单」没标注，先看看判断对不对。")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
+            }
 
             if sa.rules.isEmpty {
                 Text("还没有规则。没有启用的规则时，不会主动接单。").font(.caption).foregroundStyle(Theme.textTertiary)
@@ -448,11 +454,14 @@ struct RulesCard: View {
                 Hairline()
                 HStack(alignment: .top, spacing: Theme.Space.md) {
                     Toggle("", isOn: Binding(get: { rule.enabled }, set: { on in
-                        sa.setRules(sa.rules.map { $0.id == rule.id ? Rule(id: $0.id, name: $0.name, enabled: on, instruction: $0.instruction) : $0 })
+                        sa.setRules(sa.rules.map { var x = $0; if x.id == rule.id { x.enabled = on }; return x })
                     }))
                     .labelsHidden().toggleStyle(.switch).controlSize(.small)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(rule.name).font(Theme.Font.rowTitle).lineLimit(1)
+                        HStack(spacing: Theme.Space.sm) {
+                            Text(rule.name).font(Theme.Font.rowTitle).lineLimit(1)
+                            AssigneeChip(assignee: .agent(role: rule.role)).help("自动接单时交给「\(rule.role)」")
+                        }
                         Text(rule.instruction).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(2).help(rule.instruction)
                     }
                     Spacer(minLength: Theme.Space.sm)
@@ -465,15 +474,17 @@ struct RulesCard: View {
             Button { editing = Rule(id: nextID("r", sa.rules.map(\.id)), name: "", instruction: "") } label: {
                 Label("添加规则", systemImage: "plus")
             }
-            if !reviewed.isEmpty {
+            if !observed.isEmpty || accuracy.annotated > 0 {
                 Hairline()
-                Text("最近研判").font(Theme.Font.sectionHeader).foregroundStyle(Theme.textTertiary)
-                ForEach(reviewed, id: \.id) { DecisionRow(decision: $0) }
+                Text("观察记录").font(Theme.Font.sectionHeader).foregroundStyle(Theme.textTertiary)
+                Text(WorklistText.accuracy(correct: accuracy.correct, annotated: accuracy.annotated, pending: accuracy.pending))
+                    .font(.caption).monospacedDigit().foregroundStyle(Theme.textSecondary)
+                ForEach(observed, id: \.id) { ObservationRow(decision: $0) }
             }
         }
         .saCard()
         .sheet(item: $editing) { rule in
-            RuleSheet(rule: rule, isNew: !sa.rules.contains { $0.id == rule.id }) { saved in
+            RuleSheet(rule: rule, isNew: !sa.rules.contains { $0.id == rule.id }, roles: sa.roles) { saved in
                 attempt(sa) {
                     var list = sa.rules
                     if let i = list.firstIndex(where: { $0.id == saved.id }) { list[i] = saved } else { list.append(saved) }
@@ -496,16 +507,25 @@ private struct RuleSheet: View {
     @Environment(\.dismiss) private var dismiss
     let rule: Rule
     let isNew: Bool
+    /// 自动接单时可交给的角色（没有「你」：规则接的单一定是 Agent 做）。
+    let roles: [Role]
     /// 保存；返回错误（nil = 成功）。
     let save: (Rule) -> String?
     @State private var name = ""
     @State private var instruction = ""
+    @State private var role = Role.developer
     @State private var error: String?
 
     private var valid: Bool {
         !name.trimmingCharacters(in: .whitespaces).isEmpty
             && !instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && instruction.count <= Rule.maxInstruction
+    }
+    /// 规则原来的角色被删了也列出来，免得没得选。
+    private var options: [(value: String, label: String)] {
+        var names = roles.map(\.name)
+        if !names.contains(role) { names.append(role) }
+        return names.map { ($0, $0) }
     }
 
     var body: some View {
@@ -524,15 +544,63 @@ private struct RuleSheet: View {
                     .foregroundStyle(instruction.count > Rule.maxInstruction ? Theme.Status.error : Theme.textTertiary)
             }
             .font(.caption)
+            Field(title: "自动接单时交给") {
+                HStack(spacing: Theme.Space.md) {
+                    SegmentedChoice(selection: $role, options: options)
+                        .accessibilityLabel("自动接单时交给哪个角色")
+                    Text("命中规则建的任务，清单项全部交给这个角色。").font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+            }
             SheetButtons(error: error, confirm: "保存", enabled: valid) {
                 error = save(Rule(id: rule.id, name: name.trimmingCharacters(in: .whitespaces), enabled: rule.enabled,
-                                  instruction: instruction.trimmingCharacters(in: .whitespacesAndNewlines)))
+                                  instruction: instruction.trimmingCharacters(in: .whitespacesAndNewlines), role: role))
                 if error == nil { dismiss() }
             }
         }
         .padding(Theme.Space.xl)
         .frame(width: 460)
-        .onAppear { name = rule.name; instruction = rule.instruction }
+        .onAppear { name = rule.name; instruction = rule.instruction; role = rule.role }
+    }
+}
+
+/// 观察记录的一行：决定号 · 本会接单 / 接单 / 不接 · 原因 · 时间 · 「判断正确」「不该接」（已标的高亮，再点清掉）。
+private struct ObservationRow: View {
+    @Environment(AppModel.self) private var appModel
+    let decision: Decision
+
+    var body: some View {
+        let d = decision
+        HStack(alignment: .firstTextBaseline, spacing: Theme.Space.md) {
+            Text("d\(d.id)").font(.caption.monospaced()).foregroundStyle(Theme.textSecondary).frame(width: 36, alignment: .leading)
+            StateTag(text: d.kind.panelLabel, tint: Theme.Status.neutral).frame(minWidth: 56, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(d.reason.isEmpty ? "（没有写原因）" : d.reason).font(.caption).foregroundStyle(Theme.textSecondary)
+                    .lineLimit(2).help(d.reason)
+                HStack(spacing: Theme.Space.sm) {
+                    if let tid = d.triggerID { Text(tid) }
+                    if let task = d.taskID { Text("A-\(task)") }
+                    if let id = d.ticketID { Text("#\(id)") }
+                    Ago(time: d.createdAt)
+                }
+                .font(.caption.monospaced()).foregroundStyle(Theme.textTertiary)
+            }
+            Spacer(minLength: Theme.Space.sm)
+            verdictButton("判断正确", "correct")
+            verdictButton("不该接", "wrong")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("决定 d\(d.id)，\(d.kind.panelLabel)：\(d.reason)")
+    }
+
+    /// 已标的那个是 Charcoal 填充（选中态），再点一次清掉。
+    @ViewBuilder private func verdictButton(_ title: String, _ verdict: String) -> some View {
+        let sa = appModel.superagent
+        let on = decision.verdict == verdict
+        let button = Button(title) { sa.annotateDecision(decision.id, verdict: on ? nil : verdict) }
+            .controlSize(.small)
+            .help(on ? "再点一次清掉标注" : "标注这条研判")
+            .accessibilityLabel(on ? "\(title)，已标" : title)
+        if on { button.buttonStyle(.borderedProminent) } else { button.buttonStyle(.bordered) }
     }
 }
 
@@ -561,8 +629,12 @@ struct SchedulesCard: View {
                             Text("每天 \(s.time)").font(.caption.monospacedDigit()).foregroundStyle(Theme.textSecondary)
                         }
                         Text(s.request).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1).help(s.request)
-                        Text(tilde(s.repo)).font(.caption.monospaced()).foregroundStyle(Theme.textTertiary)
-                            .lineLimit(1).truncationMode(.head).help(s.repo)
+                        HStack(spacing: Theme.Space.sm) {
+                            Text(tilde(s.repo)).font(.caption.monospaced()).foregroundStyle(Theme.textTertiary)
+                                .lineLimit(1).truncationMode(.head).help(s.repo)
+                            Text("· 到点后 · \(WorklistText.scheduleAssignee(s.assignee))").font(.caption).foregroundStyle(Theme.textTertiary)
+                                .help(s.assignee.isEmpty ? "到点建的任务留在「待分配」" : "到点建的任务全部交给「\(s.assignee)」")
+                        }
                     }
                     Spacer(minLength: Theme.Space.sm)
                     Button { editing = s } label: { Image(systemName: "pencil") }
@@ -580,7 +652,7 @@ struct SchedulesCard: View {
         }
         .saCard()
         .sheet(item: $editing) { s in
-            ScheduleSheet(schedule: s, isNew: !sa.schedules.contains { $0.id == s.id }) { saved in
+            ScheduleSheet(schedule: s, isNew: !sa.schedules.contains { $0.id == s.id }, roles: sa.roles) { saved in
                 attempt(sa) {
                     var list = sa.schedules
                     if let i = list.firstIndex(where: { $0.id == saved.id }) { list[i] = saved } else { list.append(saved) }
@@ -601,16 +673,25 @@ private struct ScheduleSheet: View {
     @Environment(\.dismiss) private var dismiss
     let schedule: Schedule
     let isNew: Bool
+    /// 到点后可交给的角色。
+    let roles: [Role]
     let save: (Schedule) -> String?
     @State private var name = ""
     @State private var time = Date()
     @State private var request = ""
     @State private var repo = ""
+    @State private var assignee = ""
     @State private var error: String?
 
     private var valid: Bool {
         !name.trimmingCharacters(in: .whitespaces).isEmpty
             && !request.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !repo.isEmpty
+    }
+    /// 待分配 / 你 / 各角色；原来的角色被删了也列出来。
+    private var options: [(value: String, label: String)] {
+        var list: [(String, String)] = [("", "待分配"), ("你", "你")] + roles.map { ($0.name, $0.name) }
+        if !list.contains(where: { $0.0 == assignee }) { list.append((assignee, assignee)) }
+        return list.map { (value: $0.0, label: $0.1) }
     }
 
     var body: some View {
@@ -637,12 +718,21 @@ private struct ScheduleSheet: View {
                         .controlSize(.small)
                 }
             }
+            Field(title: "到点后谁来做") {
+                VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                    SegmentedChoice(selection: $assignee, options: options)
+                        .accessibilityLabel("到点后谁来做")
+                    Text(assignee.isEmpty ? "建好的任务留在「待分配」，由你定谁来做。" : "建好的任务全部交给「\(assignee)」。")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+            }
             SheetButtons(error: error, confirm: "保存", enabled: valid) {
                 var s = schedule
                 s.name = name.trimmingCharacters(in: .whitespaces)
                 s.time = Self.hhmm(time)
                 s.request = request.trimmingCharacters(in: .whitespacesAndNewlines)
                 s.repo = repo
+                s.assignee = assignee
                 error = save(s)
                 if error == nil { dismiss() }
             }
@@ -650,7 +740,7 @@ private struct ScheduleSheet: View {
         .padding(Theme.Space.xl)
         .frame(width: 460)
         .onAppear {
-            name = schedule.name; request = schedule.request; repo = schedule.repo
+            name = schedule.name; request = schedule.request; repo = schedule.repo; assignee = schedule.assignee
             let p = schedule.time.split(separator: ":").compactMap { Int($0) }
             time = Calendar.current.date(bySettingHour: p.first ?? 9, minute: p.count > 1 ? p[1] : 0, second: 0, of: Date()) ?? Date()
         }

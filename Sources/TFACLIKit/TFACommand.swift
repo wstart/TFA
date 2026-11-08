@@ -287,11 +287,20 @@ public enum TFACommand {
         let engine = try c.engine()
         let ticket = try engine.decide(.init(triggerID: trigger, version: version, verdicts: verdicts, accept: accept,
                                              title: a.value("title") ?? "", reason: reason))
-        if let t = ticket { return Outcome(out: "已接单 #\(t.id)「\(t.title)」（规则研判通过）：执行终端即将启动。\n", changed: true) }
-        if accept {
-            return Outcome(out: "只观察：候选 \(trigger) 记为 would_accept，没有建工单（接单模式「\(try engine.store.acceptMode().label)」）。\n", changed: true)
+        guard accept else { return Outcome(out: "已忽略候选 \(trigger)。\n", changed: true) }
+        // 研判通过（第 2 期）：自动接单 → 建任务并把清单项交给规则的角色；只观察 → 只记「本会接单」，人在清单设置里标注。
+        // 任务号在决定记录里（工单建不出时也有）。
+        let decision = try engine.store.decisions().first { $0.triggerID == trigger }
+        if let t = ticket {
+            guard let taskID = t.taskID else { return Outcome(out: "已接单 #\(t.id)「\(t.title)」（规则研判通过）：执行终端即将启动。\n", changed: true) }
+            return Outcome(out: "已接单：任务 A-\(taskID) 已加入清单，清单项交给「\(t.role)」（工单 #\(t.id)）。\n", changed: true)
         }
-        return Outcome(out: "已忽略候选 \(trigger)。\n", changed: true)
+        // 工单没建成（角色要目录而候选目录不合法）：任务已建、清单项留在待分配。
+        if let taskID = try decision?.taskID ?? engine.store.tasks(endedLimit: 0).first(where: { $0.sourceRef == trigger })?.id {
+            return Outcome(out: "任务 A-\(taskID) 已加入清单，等人定谁来做（工单没建成，原因见 tfa task show A-\(taskID)）。\n", changed: true)
+        }
+        let ref = decision.map { "决定 d\($0.id)" } ?? "候选 \(trigger)"
+        return Outcome(out: "只观察：记为「本会接单」（\(ref)），不执行；人在清单设置里标注判断是否正确。\n", changed: true)
     }
 
     private static func setRole(_ args: ArraySlice<String>, _ c: Context) throws -> Outcome {
@@ -483,7 +492,7 @@ public enum TFACommand {
               about: "和人对焦后新建或更新角色。默认常驻、只读、直接交付；--per-ticket 每单一个终端，--edits 能改文件，--review 交付后待评审。主要行为可从 stdin 传入", worker: false),
         Entry(command: "eval decide",
               usage: "tfa eval decide --trigger tN --version V --rule id=match|no_match|requires_design_decision [--rule …] --decision accept|ignore [--title T] --reason 原因",
-              about: "研判推断出的候选：每条启用的规则判断一次；方向不明确就 requires_design_decision 并 ignore", worker: false),
+              about: "研判推断出的候选：每条启用的规则判断一次；方向不明确就 requires_design_decision 并 ignore。通过后 TFA 自己建任务（自动接单）或只记「本会接单」（只观察），不用再 accept", worker: false),
         Entry(command: "task add",
               usage: "tfa task add --title T [--request 原文] [--scope 目录] [--item 一项]... [--items -] [--suggest 1=助理,2=开发] [--assign-all 角色] [--priority 高|中|低] [--due YYYY-MM-DD] [--dep A-11] [--note 备注]",
               about: "把新工作加进人的清单，不建工单。原文可从 stdin 传入；--item 写可验证的结果（2–5 条），--items - 从 stdin 一行一项；--suggest 给每项建议的角色（只是默认值）；人明确说直接让 Agent 做才 --assign-all。执行终端不能用（要新任务用 tfa handback）",

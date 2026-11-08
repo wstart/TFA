@@ -89,6 +89,8 @@ public final class SuperagentStore {
         try addColumn("ticket", "item_ids", "TEXT NOT NULL DEFAULT '[]'")
         try addColumn("ticket", "review_of", "INTEGER")
         try addColumn("event", "task_id", "INTEGER")
+        try addColumn("decision", "task_id", "INTEGER")
+        try addColumn("decision", "verdict", "TEXT")
         try db.exec("""
             CREATE INDEX IF NOT EXISTS ticket_task ON ticket(task_id);
             CREATE INDEX IF NOT EXISTS event_task ON event(task_id, id);
@@ -321,22 +323,44 @@ public final class SuperagentStore {
         return "t\(n)"
     }
 
+    private static let decisionColumns = "id,trigger_id,ticket_id,kind,reason,policy_version,rules,created_at,task_id,verdict"
+
     private static func decision(_ r: SQLRow) -> Decision {
         Decision(id: r.int(0), triggerID: r.optText(1), ticketID: r.optInt(2),
                  kind: DecisionKind(rawValue: r.text(3)) ?? .ignore, reason: r.text(4), policyVersion: r.text(5),
-                 rules: r.text(6), createdAt: r.double(7))
+                 rules: r.text(6), createdAt: r.double(7), taskID: r.optInt(8), verdict: r.optText(9))
     }
 
     public func decisions(limit: Int = 50) throws -> [Decision] {
-        try db.query("SELECT id,trigger_id,ticket_id,kind,reason,policy_version,rules,created_at FROM decision ORDER BY id DESC LIMIT ?",
-                     [.int(Int64(limit))]).map(Self.decision)
+        try db.query("SELECT \(Self.decisionColumns) FROM decision ORDER BY id DESC LIMIT ?", [.int(Int64(limit))]).map(Self.decision)
     }
 
+    public func decision(_ id: Int64) throws -> Decision? {
+        try db.query("SELECT \(Self.decisionColumns) FROM decision WHERE id=?", [.int(id)]).first.map(Self.decision)
+    }
+
+    /// 研判过的决定（会接 / 本会接单 / 不接），给观察记录的标注和准确率用；最新在前。
+    /// 只算**推断**候选（规则研判）的决定：人明确提的请求没有「判断对不对」可言。
+    public func assessedDecisions(limit: Int = 200) throws -> [Decision] {
+        try db.query("""
+            SELECT \(Self.decisionColumns) FROM decision
+            WHERE kind IN ('accept','would_accept','ignore')
+              AND trigger_id IN (SELECT id FROM trigger WHERE strength='inferred')
+            ORDER BY id DESC LIMIT ?
+            """, [.int(Int64(limit))]).map(Self.decision)
+    }
+
+    @discardableResult
     func insertDecision(triggerID: String?, ticketID: Int64?, kind: DecisionKind, reason: String,
-                        policyVersion: String, rules: String, at: Double) throws {
-        try db.run("INSERT INTO decision (trigger_id,ticket_id,kind,reason,policy_version,rules,created_at) VALUES (?,?,?,?,?,?,?)",
+                        policyVersion: String, rules: String, at: Double, taskID: Int64? = nil) throws -> Int64 {
+        try db.run("INSERT INTO decision (trigger_id,ticket_id,kind,reason,policy_version,rules,created_at,task_id) VALUES (?,?,?,?,?,?,?,?)",
                    [.opt(triggerID), ticketID.map(SQLValue.int) ?? .null, .text(kind.rawValue), .text(reason),
-                    .text(policyVersion), .text(rules), .real(at)])
+                    .text(policyVersion), .text(rules), .real(at), taskID.map(SQLValue.int) ?? .null])
+        return db.lastInsertID
+    }
+
+    func setDecisionVerdict(_ id: Int64, _ verdict: String?) throws {
+        try db.run("UPDATE decision SET verdict=? WHERE id=?", [.opt(verdict), .int(id)])
     }
 
     // MARK: - Effects

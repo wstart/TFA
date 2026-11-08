@@ -161,6 +161,38 @@ enum WorklistText {
         let parts = runs.map { $0.0 == $0.1 ? "\($0.0)" : "\($0.0)–\($0.1)" }
         return "第 " + parts.joined(separator: "、") + " 项"
     }
+
+    /// 顶部一行：「今天打扰你 2 / 8 次」；超预算只多说一句「超了」，不压制、不着琥珀（注意事项 G-03 / A-04）。
+    static func interruptions(used: Int, budget: Int) -> String {
+        "今天打扰你 \(used) / \(budget) 次" + (used > budget ? " · 超了" : "")
+    }
+
+    /// 观察记录顶上的一行：「研判准确率：判断正确 2 / 标过 3 · 还有 1 条没标」。
+    static func accuracy(correct: Int, annotated: Int, pending: Int) -> String {
+        let head = annotated == 0 ? "研判准确率：还没标过" : "研判准确率：判断正确 \(correct) / 标过 \(annotated)"
+        return pending == 0 ? head : head + " · 还有 \(pending) 条没标"
+    }
+
+    /// 任务卡的依赖 chip：「依赖 · A-10 ✓、A-11」；没有依赖时「依赖…」。
+    static func deps(_ deps: [Int64], done: (Int64) -> Bool) -> String {
+        guard !deps.isEmpty else { return "依赖…" }
+        return "依赖 · " + deps.map { "A-\($0)" + (done($0) ? " ✓" : "") }.joined(separator: "、")
+    }
+
+    /// 定时任务到点后谁来做（`Schedule.assignee`）：空 = 待分配。
+    static func scheduleAssignee(_ raw: String) -> String {
+        raw.isEmpty ? "待分配" : raw
+    }
+}
+
+/// 观察记录（需求文档第 2 期）：研判过的决定——接单 / 本会接单 / 不接，且来自候选；最新在前。
+/// 人明确提的请求由主管直接接单，决定没有原因，不是研判，不列（它的准确率没有意义）。
+enum ObservationLog {
+    static func rows(_ decisions: [Decision], limit: Int = 10) -> [Decision] {
+        Array(decisions.filter {
+            $0.triggerID != nil && [.accept, .wouldAccept, .ignore].contains($0.kind) && !($0.kind == .accept && $0.reason.isEmpty)
+        }.sorted { $0.id > $1.id }.prefix(limit))
+    }
 }
 
 // MARK: - 工作清单的小组件（DESIGN.md §9：执行者 chip、工单号 chip、任务 chip、计数胶囊、勾选框）

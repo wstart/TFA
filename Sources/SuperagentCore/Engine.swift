@@ -542,7 +542,7 @@ public final class SuperagentEngine {
     /// 分配给 Agent 必须走这里，不要写第二套建工单代码）。
     func createTicket(trigger: inout Trigger, title: String, request: String, repo: String, note: String,
                       worktree: Bool?, by: String, rules: [String: String], role: Role? = nil,
-                      taskID: Int64? = nil, itemIDs: [Int64] = [], reviewOf: Int64? = nil) throws -> Int64 {
+                      taskID: Int64? = nil, itemIDs: [Int64] = [], reviewOf: Int64? = nil, reason: String = "") throws -> Int64 {
         let role = try role ?? requireRole(Role.developer)
         let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
         let notProject = repo.isEmpty || repo == "/" || URL(fileURLWithPath: repo).standardizedFileURL.path == home
@@ -573,8 +573,8 @@ public final class SuperagentEngine {
         let id = try store.insertTicket(ticket)
         trigger.ticketID = id
         try store.decideTrigger(trigger.id, ticketID: id)
-        try store.insertDecision(triggerID: trigger.id, ticketID: id, kind: .accept, reason: "", policyVersion: version,
-                                 rules: try Self.json(rules), at: at)
+        try store.insertDecision(triggerID: trigger.id, ticketID: id, kind: .accept, reason: reason, policyVersion: version,
+                                 rules: try Self.json(rules), at: at, taskID: taskID)
         _ = try store.insertAssignment(ticketID: id, reason: "accepted", at: at)
         try store.enqueue(.launch, String(id), at: at)
         try store.log(id, "accepted", "\(by) 接单：\(title)（\(role.name)）", at: at, task: taskID)
@@ -606,6 +606,9 @@ public final class SuperagentEngine {
     }
 
     func queueRelay(_ id: Int64?, _ text: String, at: Double) throws {
+        var text = text
+        // 工作清单第 2 期：任务层的消息在今天的打扰达到预算后带前缀，主管据此合并转告；不压制（注意事项 G-03）。
+        if let id, try store.ticket(id)?.taskID != nil, let prefix = try overBudgetPrefix() { text = prefix + text }
         try store.insertRelay(ticketID: id, text: text, at: at)
         try store.enqueue(.relay, "router", at: at)
     }

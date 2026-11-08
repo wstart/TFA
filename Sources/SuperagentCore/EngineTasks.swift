@@ -209,6 +209,19 @@ extension SuperagentEngine {
     /// 返回新建的工单。
     @discardableResult
     public func assign(_ taskID: Int64, _ allocations: [Allocation], oneTicket: Bool = true, by: String = "你") throws -> [Ticket] {
+        try assignItems(taskID, allocations, oneTicket: oneTicket, by: by, source: nil)
+    }
+
+    /// 自动接单（规则 / 定时，EnginePolicy）的来源：第一张工单直接挂在这条事件上（执行者看到的「来源」就是原候选，审计链
+    /// 「事件 → 决定 → 任务 → 工单」不断），授权的强度随事件（候选 = inferred），逐条研判和理由进它的决定行。
+    struct AutoSource {
+        var trigger: Trigger
+        var rules: [String: String]
+        var reason: String
+    }
+
+    /// `assign` 的内部版本：`source` 给了就是自动接单（见 `AutoSource`）。
+    func assignItems(_ taskID: Int64, _ allocations: [Allocation], oneTicket: Bool, by: String, source: AutoSource?) throws -> [Ticket] {
         guard !allocations.isEmpty else { throw SuperagentError("没有要分配的清单项") }
         // H-02：会改文件的角色要有合法目录。目录的 stat 在事务外做（事务里不做 I/O）；角色不存在的在事务里报。
         if try allocations.contains(where: { a in try a.to.role.map { try store.role($0)?.edits == true } ?? false }) {
@@ -287,16 +300,23 @@ extension SuperagentEngine {
             t = try requireTask(taskID) // 停工单可能已推进了阶段
             // 3. 交给 Agent 的项建工单（C-01：只走 createTicket）。
             var made: [Ticket] = []
-            for g in groups {
+            for (k, g) in groups.enumerated() {
                 let role = roles[g.role]!
                 let mine = g.ords.map { items[index($0)] }
                 let request = Self.agentRequest(task: t, mine: mine, all: items)
                 let title = String("\(t.title) · \(Self.ordLabel(g.ords))".prefix(WorkTask.maxTitle))
-                var trigger = Trigger(id: try store.nextTriggerID(), source: "task:\(t.label)", strength: .explicit, text: request,
-                                      repo: t.scope, status: .pending, ticketID: nil, createdAt: at)
-                try store.insertTrigger(trigger)
+                // 人分配：每张工单一条「task:A-N」事件；自动接单：第一张直接挂在原事件上，其余（不会有）各建一条。
+                var trigger: Trigger
+                if k == 0, let s = source {
+                    trigger = s.trigger
+                } else {
+                    trigger = Trigger(id: try store.nextTriggerID(), source: "task:\(t.label)", strength: source?.trigger.strength ?? .explicit,
+                                      text: request, repo: t.scope, status: .pending, ticketID: nil, createdAt: at)
+                    try store.insertTrigger(trigger)
+                }
                 let id = try createTicket(trigger: &trigger, title: title, request: request, repo: t.scope, note: t.note, worktree: nil,
-                                          by: by, rules: [:], role: role, taskID: t.id, itemIDs: mine.map(\.id))
+                                          by: by, rules: source?.rules ?? [:], role: role, taskID: t.id, itemIDs: mine.map(\.id),
+                                          reason: source?.reason ?? "")
                 for var i in mine {
                     i.ticketID = id
                     items[index(i.ord)] = i
@@ -315,6 +335,35 @@ extension SuperagentEngine {
             }
             try advanceIfComplete(taskID, at: at)
             return made
+        }
+    }
+
+    /// 规则 / 定时自动把全部清单项交给一个角色（EnginePolicy，第 2 期）。角色不存在：`fallbackToDeveloper` 为真退到「开发」，
+    /// 否则留在待分配；目录不合法等分配失败也留在待分配并记 timeline，不抛错给主管。返回建出的工单（没建出为空）。调用方在事务里。
+    func autoAssign(_ task: WorkTask, role name: String, by: String, source: AutoSource, fallbackToDeveloper: Bool, at: Double) throws -> [Ticket] {
+        var roleName = name.isEmpty ? Role.developer : name
+        if try store.role(roleName) == nil {
+            guard fallbackToDeveloper else {
+                try store.log(nil, "assign", "角色「\(roleName)」不存在，留在待分配", at: at, task: task.id)
+                return []
+            }
+            try store.log(nil, "assign", "角色「\(roleName)」不存在，改交给「\(Role.developer)」", at: at, task: task.id)
+            roleName = Role.developer
+        }
+        guard let role = try store.role(roleName) else { return [] }
+        let ords = try store.items(task.id).map(\.ord)
+        do {
+            // 每单一个终端的角色要有合法目录：先查，免得建到一半失败。
+            if role.edits || !role.standing { try Self.checkScope(task) }
+            return try assignItems(task.id, ords.map { Allocation(ord: $0, to: .agent(role: roleName)) }, oneTicket: true, by: by, source: source)
+        } catch {
+            for var i in try store.items(task.id) where i.assignee.isAgent && i.ticketID == nil {
+                i.assignee = .unassigned
+                i.status = .todo
+                try store.saveItem(i)
+            }
+            try store.log(nil, "assign", "自动交给「\(roleName)」失败：\(error)。留在待分配，等人定谁来做", at: at, task: task.id)
+            return []
         }
     }
 
@@ -400,7 +449,7 @@ extension SuperagentEngine {
                 if !list.contains(tid), let ticket = try store.ticket(tid), ticket.status != .stopped { list.append(tid) }
             }
             if targets.isEmpty {
-                let i = Item(id: 0, taskID: id, ord: items.count + 1, text: String(Self.clip(text, Item.maxText).prefix(Item.maxText)))
+                let i = Item(id: 0, taskID: id, ord: items.count + 1, text: Self.cut(text, Item.maxText))
                 _ = try store.insertItem(i)
                 try store.log(nil, "rejected", "\(by)打回：\(Self.clip(text, 300))（已作为第 \(i.ord) 项）", at: at, task: id)
             } else {
@@ -622,8 +671,8 @@ extension SuperagentEngine {
     func handbackToTask(_ t: Ticket, request: String, reason: String, at: Double) throws -> WorkTask? {
         guard let taskID = t.taskID, let task = try store.task(taskID) else { return nil }
         // Agent 生成的文字：超长截断并记录（注意事项 B-12）。
-        let title = String(Self.clip(request, WorkTask.maxTitle).prefix(WorkTask.maxTitle))
-        let text = String(Self.clip(request, Item.maxText).prefix(Item.maxText))
+        let title = Self.cut(request, WorkTask.maxTitle)
+        let text = Self.cut(request, Item.maxText)
         let w = try store.workflow(task.workflow) ?? Workflow.builtins[0]
         var n = WorkTask(id: 0, title: title, request: request, source: .handback, sourceRef: "#\(t.id)", scope: task.scope,
                          priority: task.priority, workflow: w.id, stages: w.stages, stage: Self.firstDoing(w.stages).name,
@@ -721,6 +770,13 @@ extension SuperagentEngine {
     /// 今天打扰了几次。
     public func interruptionsToday() throws -> Int {
         try store.interruptions(day: SuperagentStore.day(now()))
+    }
+
+    /// 第 2 期：今天的打扰达到预算后，任务层送主管的每条消息带上它，主管据此合并转告；不压制（注意事项 G-03）。
+    func overBudgetPrefix() throws -> String? {
+        let n = try interruptionsToday()
+        let budget = try store.settings().interruptionBudget
+        return n >= budget ? "[今天已打扰 \(n)/\(budget) 次] " : nil
     }
 
     // MARK: - 工作流模板
@@ -919,6 +975,9 @@ extension SuperagentEngine {
         }
         return "第 " + parts.joined(separator: "、") + " 项"
     }
+
+    /// 截到 n 字（Agent / 规则 / 定时生成的文字；人写的超长要报错，注意事项 B-12）。
+    static func cut(_ s: String, _ n: Int) -> String { String(clip(s, n).prefix(n)) }
 
     /// 拼进句子前去掉末尾的句号和空白（summary 自己带「。」时不会连成「。。」）。
     static func sentence(_ s: String) -> String {

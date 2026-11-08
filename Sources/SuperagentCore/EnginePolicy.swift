@@ -10,8 +10,10 @@ extension SuperagentEngine {
     // MARK: - 规则管理（人）
 
     public func setRules(_ rules: [Rule], by: String = "你") throws {
+        var rules = rules
         var seen = Set<String>()
-        for r in rules {
+        for i in rules.indices {
+            let r = rules[i]
             guard !r.id.isEmpty, r.id.range(of: #"^[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil else {
                 throw SuperagentError("规则 id 只能用字母、数字、- 和 _")
             }
@@ -19,6 +21,11 @@ extension SuperagentEngine {
             guard !r.name.trimmingCharacters(in: .whitespaces).isEmpty else { throw SuperagentError("规则 \(r.id) 缺少名称") }
             guard !r.instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw SuperagentError("规则 \(r.id) 缺少内容") }
             guard r.instruction.count <= Rule.maxInstruction else { throw SuperagentError("规则 \(r.id) 超过 \(Rule.maxInstruction) 字") }
+            // 第 2 期：候选自动接单时清单项交给的角色要存在；空 = 开发。
+            if r.role.isEmpty { rules[i].role = Role.developer }
+            guard try store.role(rules[i].role) != nil else {
+                throw SuperagentError("规则 \(r.id) 的角色「\(rules[i].role)」不存在（tfa read roles 查看现有角色）")
+            }
         }
         try store.transaction {
             let before = try store.policyVersion()
@@ -54,6 +61,31 @@ extension SuperagentEngine {
         }
     }
 
+    // MARK: - 观察记录的标注与准确率（第 2 期）
+
+    /// 人对一条研判决定的标注：`correct` = 判断正确，`wrong` = 不该接（或该接没接），nil = 清掉。
+    /// 只能标研判过的决定（accept / would_accept / ignore）。
+    public func annotateDecision(_ id: Int64, verdict: String?, by: String = "你") throws {
+        if let v = verdict, v != "correct", v != "wrong" { throw SuperagentError("标注只能是 correct 或 wrong") }
+        try store.transaction {
+            guard let d = try store.decision(id) else { throw SuperagentError("没有决定 d\(id)") }
+            guard let tid = d.triggerID, try store.trigger(tid)?.strength == .inferred, [.accept, .wouldAccept, .ignore].contains(d.kind) else {
+                throw SuperagentError("决定 d\(id) 不是研判结果（只有规则研判的决定能标注）")
+            }
+            try store.setDecisionVerdict(id, verdict)
+            let word = verdict == "correct" ? "判断正确" : verdict == "wrong" ? "不该这样" : "清掉标注"
+            try store.log(nil, "annotate", "\(by) 标注决定 d\(id)（\(d.kind.rawValue)）：\(word)", at: now())
+        }
+    }
+
+    /// 研判准确率：标了「判断正确」的 / 标过的；`pending` = 还没标的「本会接单」数（只观察 → 自动接单前该看它）。
+    public func policyAccuracy() throws -> (correct: Int, annotated: Int, pending: Int) {
+        let list = try store.assessedDecisions()
+        let annotated = list.filter { $0.verdict != nil }
+        return (annotated.filter { $0.verdict == "correct" }.count, annotated.count,
+                list.filter { $0.kind == .wouldAccept && $0.verdict == nil }.count)
+    }
+
     // MARK: - 候选（事件源 → 主管研判）
 
     /// 一条推断出的候选（终端事件等）。gate：模式 off 或没有启用的规则 → 不考虑；同一来源 10 分钟内只提一次。
@@ -74,9 +106,14 @@ extension SuperagentEngine {
             let version = try store.policyVersion()
             let list = rules.map { "\($0.id)「\($0.name)」：\(Self.clip($0.instruction, 160))" }.joined(separator: "；")
             let verdicts = rules.map { "--rule \($0.id)=match|no_match|requires_design_decision" }.joined(separator: " ")
+            // 研判通过后会发生什么，让主管知道它的 accept 意味着什么（第 2 期：自动接单 = 建任务并交给规则的角色）。
+            let outcome = try store.acceptMode() == .auto
+                ? "现在是自动接单：accept 会建任务并把清单项交给命中规则指定的角色（默认开发）"
+                : "现在是只观察：accept 只记录「本会接单」，不执行"
             try store.insertRelay(ticketID: nil, text: "[TFA 候选 \(trigger.id)] 来源 \(source)（目录 \(repo)）：\(Self.clip(text, 400))。"
                                   + "启用的规则：\(list)。研判后执行：tfa eval decide --trigger \(trigger.id) --version \(version) \(verdicts) "
-                                  + "--decision accept|ignore --title … --reason …（每条规则判断一次；方向不明确就 requires_design_decision 并 ignore）", at: at)
+                                  + "--decision accept|ignore --title … --reason …（每条规则判断一次；方向不明确就 requires_design_decision 并 ignore）。"
+                                  + "\(outcome)。", at: at)
             try store.enqueue(.relay, "router", at: at)
             try store.log(nil, "candidate", "\(trigger.id) \(source)：\(Self.clip(text, 120))", at: at)
             return trigger
@@ -97,11 +134,12 @@ extension SuperagentEngine {
         }
     }
 
-    /// 研判结果。返回建出的工单（observe 模式只记录 would_accept，返回 nil）。
+    /// 研判结果。auto 模式：建任务（source = rule）并把清单项交给命中规则的角色，返回第一张工单（分配失败时任务留在待分配，返回 nil）；
+    /// observe 模式只记录 would_accept，返回 nil。
     @discardableResult
     public func decide(_ a: Assessment, by: String = "主管") throws -> Ticket? {
         try store.transaction {
-            guard var trigger = try store.trigger(a.triggerID) else { throw SuperagentError("没有候选 \(a.triggerID)") }
+            guard let trigger = try store.trigger(a.triggerID) else { throw SuperagentError("没有候选 \(a.triggerID)") }
             guard trigger.status == .pending else { throw SuperagentError("候选 \(a.triggerID) 已经决定过") }
             guard trigger.strength == .inferred else { throw SuperagentError("候选 \(a.triggerID) 是明确请求，用 tfa route accept / ignore") }
             let version = try store.policyVersion()
@@ -133,10 +171,23 @@ extension SuperagentEngine {
             }
             switch try store.acceptMode() {
             case .auto:
+                // 第 2 期：进清单，不直接建工单。全部清单项交给命中规则的角色（命中多条取规则列表里最靠前的）；
+                // 工单的授权仍记 inferred + 逐条研判，规则变更时能通知到它。
                 let verdicts = Dictionary(uniqueKeysWithValues: a.verdicts.map { ($0.key, $0.value.rawValue) })
-                let id = try createTicket(trigger: &trigger, title: a.title, request: trigger.text, repo: trigger.repo,
-                                          note: "", worktree: nil, by: "\(by)（规则 \(matched.joined(separator: ","))）", rules: verdicts)
-                return try requireTicket(id)
+                let chosen = try store.rules().filter(\.enabled).first { matched.contains($0.id) }
+                let who = "规则 \(chosen?.id ?? matched[0])"
+                let task = try createTask(TaskDraft(title: Self.cut(a.title, WorkTask.maxTitle), request: trigger.text, source: .rule,
+                                                    sourceRef: trigger.id, scope: trigger.repo, items: [Self.cut(a.title, Item.maxText)], by: who))
+                let tickets = try autoAssign(task, role: chosen?.role ?? Role.developer, by: who,
+                                             source: AutoSource(trigger: trigger, rules: verdicts, reason: a.reason), fallbackToDeveloper: true, at: at)
+                if tickets.isEmpty { // 建出工单时事件和决定由 createTicket 记（挂在原候选上）；没建出的在这里记
+                    try store.decideTrigger(trigger.id, ticketID: nil)
+                    try store.insertDecision(triggerID: trigger.id, ticketID: nil, kind: .accept, reason: a.reason,
+                                             policyVersion: version, rules: rulesJSON, at: at, taskID: task.id)
+                }
+                try store.log(nil, "accept", "\(trigger.id) 命中规则 \(matched.joined(separator: ","))，\(by)研判接单 → 任务 \(task.label)"
+                              + (tickets.isEmpty ? "（待分配）" : "，工单 " + tickets.map { "#\($0.id)" }.joined(separator: "、")), at: at, task: task.id)
+                return tickets.first
             case .observe, .off:
                 try store.decideTrigger(trigger.id, ticketID: nil)
                 try store.insertDecision(triggerID: trigger.id, ticketID: nil, kind: .wouldAccept, reason: a.reason,
@@ -197,7 +248,8 @@ extension SuperagentEngine {
         }
     }
 
-    /// 到点的定时任务：每天一次，生成一条明确请求交给主管（定时任务本身就是人写下的请求）。
+    /// 到点的定时任务：每天一次，直接进清单（source = schedule），按定时任务上的 `assignee` 分配（「你」/ 角色名 / 空 = 待分配）；
+    /// 主管只收一行通知。返回每条的事件（已决定，`ticketID` 指第一张工单）。
     @discardableResult
     public func fireSchedules(at date: Date, calendar: Calendar = .current) throws -> [Trigger] {
         // 先只读判断有没有到点的（每 2 秒一次，不为「什么都不做」开写事务）。
@@ -216,13 +268,30 @@ extension SuperagentEngine {
                 list[i].lastFired = today
                 let at = now()
                 let s = list[i]
-                let trigger = Trigger(id: try store.nextTriggerID(), source: "schedule:\(s.id)", strength: .explicit,
+                var trigger = Trigger(id: try store.nextTriggerID(), source: "schedule:\(s.id)", strength: .explicit,
                                       text: s.request, repo: s.repo, status: .pending, ticketID: nil, createdAt: at)
                 try store.insertTrigger(trigger)
-                try store.insertRelay(ticketID: nil, text: "[TFA 定时 \(trigger.id)] 「\(s.name)」到点了：\(Self.clip(s.request, 400))（目录 \(s.repo)）。"
-                                      + "接单用 tfa route accept --trigger \(trigger.id) --role … --title …；今天不需要就 tfa route ignore --trigger \(trigger.id) --reason …", at: at)
+                let who = "定时「\(s.name)」"
+                let task = try createTask(TaskDraft(title: Self.cut(s.name, WorkTask.maxTitle), request: s.request, source: .schedule,
+                                                    sourceRef: "schedule:\(s.id)", scope: s.repo, items: [Self.cut(s.request, Item.maxText)], by: who))
+                var how = "待分配"
+                if s.assignee == "你" {
+                    let ords = try store.items(task.id).map(\.ord)
+                    _ = try assignItems(task.id, ords.map { Allocation(ord: $0, to: .you) }, oneTicket: true, by: who, source: nil)
+                    how = "已交给你"
+                } else if !s.assignee.isEmpty {
+                    let tickets = try autoAssign(task, role: s.assignee, by: who, source: AutoSource(trigger: trigger, rules: [:], reason: "定时到点"),
+                                                 fallbackToDeveloper: false, at: at)
+                    if let first = tickets.first {
+                        trigger.ticketID = first.id
+                        how = "已交给「\(first.role)」，工单 " + tickets.map { "#\($0.id)" }.joined(separator: "、")
+                    }
+                }
+                trigger.status = .decided
+                try store.decideTrigger(trigger.id, ticketID: trigger.ticketID)
+                try store.insertRelay(ticketID: nil, text: "[TFA 定时] 「\(s.name)」到点，已加入清单 \(task.label)（\(how)）：\(Self.clip(s.request, 200))", at: at)
                 try store.enqueue(.relay, "router", at: at)
-                try store.log(nil, "schedule", "\(s.name) 到点 → \(trigger.id)", at: at)
+                try store.log(nil, "schedule", "\(s.name) 到点 → 任务 \(task.label)（\(how)）", at: at, task: task.id)
                 fired.append(trigger)
             }
             if !fired.isEmpty { try store.saveSchedules(list) }

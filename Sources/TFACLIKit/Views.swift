@@ -107,8 +107,12 @@ enum Views {
         let inferred = pending.contains { $0.strength == .inferred }
         let version = try inferred ? engine.store.policyVersion() : ""
         let rules = try inferred ? engine.store.rules().filter(\.enabled) : []
+        // 研判通过后会怎样，取决于现在的接单模式（第 2 期）：自动接单建任务并交给规则的角色；其余只记录「本会接单」。
+        let outcome = try !inferred ? "" : engine.store.acceptMode() == .auto
+            ? " · 通过后：自动建任务，清单项交给命中规则的角色"
+            : " · 通过后：只记录「本会接单」，不执行（接单模式「\(engine.store.acceptMode().label)」）"
         for t in pending {
-            s += "\n\(t.id) [\(strength(t.strength))] 来源 \(t.source) · 目录 \(t.repo) · \(time(t.createdAt))\n\(t.text)\n"
+            s += "\n\(t.id) [\(strength(t.strength))] 来源 \(t.source) · 目录 \(t.repo) · \(time(t.createdAt))\(t.strength == .inferred ? outcome : "")\n\(t.text)\n"
             switch t.strength {
             case .explicit:
                 s += "→ 接单：tfa route accept --trigger \(t.id) --role … --title …；不接：tfa route ignore --trigger \(t.id) --reason …\n"
@@ -126,9 +130,15 @@ enum Views {
         let mode = try engine.store.acceptMode()
         let enabled = try engine.store.rules().filter(\.enabled)
         var s = "接单模式：\(mode.rawValue)（\(mode.label)）\n规则版本：\(try engine.store.policyVersion())\n"
-        guard !enabled.isEmpty else { return s + "启用的规则：没有\n" }
-        s += "启用的规则（\(enabled.count)）：\n"
-        for r in enabled { s += "\n\(r.id)「\(r.name)」\n\(r.instruction)\n" }
+        if enabled.isEmpty {
+            s += "启用的规则：没有\n"
+        } else {
+            // 每条规则后的「→ 角色」：自动接单时清单项交给谁（第 2 期）。
+            s += "启用的规则（\(enabled.count)；→ 后是自动接单时清单项交给的角色）：\n"
+            for r in enabled { s += "\n\(r.id)「\(r.name)」 → \(r.role)\n\(r.instruction)\n" }
+        }
+        let acc = try engine.policyAccuracy()
+        s += "\n研判准确率：判断正确 \(acc.correct) / 标过 \(acc.annotated)；还有 \(acc.pending) 条「本会接单」没标注\n"
         return s
     }
 

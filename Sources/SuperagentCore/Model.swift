@@ -182,6 +182,10 @@ public struct Decision: Equatable, Sendable {
     /// 逐条规则的研判（JSON 对象 ruleID → verdict）。
     public var rules: String
     public var createdAt: Double
+    /// 第 2 期：候选接成的任务（规则 / 定时 → 任务）。
+    public var taskID: Int64? = nil
+    /// 第 2 期：人对「本会接单」/ 接单决定的标注——`correct`（判断正确）/ `wrong`（不该接）；nil = 没标。准确率由此算。
+    public var verdict: String? = nil
 }
 
 public struct TimelineEvent: Equatable, Sendable {

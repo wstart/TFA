@@ -17,6 +17,7 @@ struct TaskCard: View {
     @State private var editing: Item?
     @State private var removing: Item?
     @State private var confirmCancel = false
+    @State private var showDeps = false
     /// 乐观更新的勾选（`Item.id` → 勾了没）：先翻状态再调引擎，失败回滚（注意事项 F-18）。
     @State private var pending: [Int64: Bool] = [:]
     @FocusState private var newItemFocused: Bool
@@ -116,11 +117,29 @@ struct TaskCard: View {
         if t.priority != .medium {
             MetaChip(text: "优先级 · \(t.priority.label)")
         }
-        ForEach(t.deps, id: \.self) { dep in
-            let done = sa.task(dep)?.task.status == .done
-            MetaChip(text: "依赖 · A-\(dep)" + (done ? " ✓" : ""), action: { appModel.worklistTaskID = dep })
-                .help(done ? "A-\(dep) 已完成" : "A-\(dep) 还没完成；完成前不能交给 Agent")
+        if editable {
+            // 依赖 chip 可点 → 选前置任务（第 2 期）；没有依赖时是淡色的「依赖…」。
+            MetaChip(text: WorklistText.deps(t.deps, done: { sa.task($0)?.task.status == .done }), faint: t.deps.isEmpty,
+                     action: { showDeps = true })
+                .help("前置任务没完成时不能交给 Agent；分配给你不限")
+                .popover(isPresented: $showDeps, arrowEdge: .bottom) {
+                    DepsPicker(candidates: depCandidates,
+                               selected: Binding(get: { Set(view.task.deps) },
+                                                 set: { sa.updateTask(view.id, deps: Array($0).sorted()) }),
+                               open: { id in showDeps = false; appModel.worklistTaskID = id })
+                        .environment(appModel)
+                }
+        } else if !t.deps.isEmpty {
+            MetaChip(text: WorklistText.deps(t.deps, done: { sa.task($0)?.task.status == .done }))
         }
+    }
+
+    /// 可选的前置：其它打开的任务，加上已经是依赖但不再打开的（能取消勾选）。新的在前。
+    private var depCandidates: [TaskView] {
+        let sa = appModel.superagent
+        let open = sa.openTasks.filter { $0.id != view.id }
+        let closed = view.task.deps.compactMap { id in open.contains { $0.id == id } ? nil : sa.task(id) }
+        return (open + closed).sorted { $0.id > $1.id }
     }
 
     // MARK: 阶段条
@@ -417,6 +436,8 @@ private struct ItemRow: View {
 private struct MetaChip: View {
     let text: String
     var strong = false
+    /// 淡色：还没填的可选项（「依赖…」）。
+    var faint = false
     var action: (() -> Void)?
 
     var body: some View {
@@ -432,12 +453,60 @@ private struct MetaChip: View {
     private var label: some View {
         Text(text)
             .font(.system(size: 12))
-            .foregroundStyle(Theme.textPrimary)
+            .foregroundStyle(faint ? Theme.textTertiary : Theme.textPrimary)
             .lineLimit(1)
             .padding(.horizontal, 10)
             .frame(height: 26)
-            .background(Theme.chrome, in: RoundedRectangle(cornerRadius: 6))
+            .background(faint ? Theme.surface : Theme.chrome, in: RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(strong ? Theme.brand : Theme.border, lineWidth: 1))
+    }
+}
+
+/// 前置任务选择器（任务卡的依赖 chip、「+ 任务」）：其它打开的任务，多选；前置没完成时引擎拒绝交给 Agent（注意事项 C-14）。
+struct DepsPicker: View {
+    let candidates: [TaskView]
+    @Binding var selected: Set<Int64>
+    /// 打开那张卡（任务卡里用；新建任务时没有）。
+    var open: ((Int64) -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            Text("前置任务").font(Theme.Font.sectionHeader).foregroundStyle(Theme.textTertiary)
+            if candidates.isEmpty {
+                Text("没有别的打开的任务。").font(.caption).foregroundStyle(Theme.textTertiary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                        ForEach(candidates) { tv in
+                            HStack(spacing: Theme.Space.sm) {
+                                Toggle(isOn: Binding(get: { selected.contains(tv.id) },
+                                                     set: { on in if on { selected.insert(tv.id) } else { selected.remove(tv.id) } })) {
+                                    HStack(spacing: Theme.Space.sm) {
+                                        Text(tv.task.label).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textTertiary)
+                                        Text(tv.task.title).font(.callout).lineLimit(1)
+                                        if !tv.task.isOpen { StateTag(text: tv.stateTag.text, tint: tv.stateTag.tint) }
+                                    }
+                                }
+                                .toggleStyle(.checkbox)
+                                .accessibilityLabel("前置任务 \(tv.task.label) \(tv.task.title)")
+                                Spacer(minLength: 0)
+                                if let open {
+                                    Button { open(tv.id) } label: { Image(systemName: "arrow.right.circle") }
+                                        .buttonStyle(.borderless).foregroundStyle(Theme.textTertiary)
+                                        .help("打开 \(tv.task.label)")
+                                        .accessibilityLabel("打开任务 \(tv.task.label)")
+                                }
+                            }
+                            .frame(height: 22)
+                        }
+                    }
+                }
+                .frame(height: min(CGFloat(candidates.count) * (22 + Theme.Space.xs), 240)) // popover 按内容定大小，滚动区要定高
+            }
+            Text("前置没完成时不能交给 Agent；分配给你不限。").font(.caption).foregroundStyle(Theme.textTertiary)
+        }
+        .padding(Theme.Space.lg)
+        .frame(width: 380)
     }
 }
 

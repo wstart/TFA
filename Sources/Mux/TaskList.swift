@@ -311,7 +311,7 @@ private struct InterruptionRow: View {
                 }
             }
             .accessibilityHidden(true)
-            Text("今天打扰你 \(used) / \(budget) 次")
+            Text(WorklistText.interruptions(used: used, budget: budget)) // 超预算：格子封顶、多一句「超了」，不着琥珀
                 .font(.callout).monospacedDigit()
                 .foregroundStyle(Theme.textPrimary)
             Spacer(minLength: Theme.Space.md)
@@ -506,6 +506,8 @@ struct NewTaskSheet: View {
     @State private var priority: TaskPriority = .medium
     @State private var hasDue = false
     @State private var due = Date()
+    @State private var deps: Set<Int64> = []
+    @State private var showDeps = false
     @State private var error: String?
     @FocusState private var focused: Bool
 
@@ -541,6 +543,17 @@ struct NewTaskSheet: View {
                             .controlSize(.small)
                     }
                 }
+                Field(title: "依赖（可选）") {
+                    HStack(spacing: Theme.Space.sm) {
+                        Text(deps.isEmpty ? "没有前置任务" : deps.sorted().map { "A-\($0)" }.joined(separator: "、"))
+                            .font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                        Button("选择…") { showDeps = true }
+                            .controlSize(.small)
+                            .popover(isPresented: $showDeps, arrowEdge: .bottom) {
+                                DepsPicker(candidates: sa.openTasks.sorted { $0.id > $1.id }, selected: $deps)
+                            }
+                    }
+                }
                 Spacer(minLength: 0)
             }
             HStack(alignment: .top, spacing: Theme.Space.xl) {
@@ -573,7 +586,8 @@ struct NewTaskSheet: View {
                     id = sa.createTask(.init(title: title.trimmingCharacters(in: .whitespacesAndNewlines),
                                              request: request.trimmingCharacters(in: .whitespacesAndNewlines), scope: scope,
                                              items: items, workflow: workflow, priority: priority,
-                                             due: hasDue ? Calendar.current.startOfDay(for: due).addingTimeInterval(86399).timeIntervalSince1970 : nil))
+                                             due: hasDue ? Calendar.current.startOfDay(for: due).addingTimeInterval(86399).timeIntervalSince1970 : nil,
+                                             deps: deps.sorted()))
                 }
                 if error == nil, let id {
                     created(id)

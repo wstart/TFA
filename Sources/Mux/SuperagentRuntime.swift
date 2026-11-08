@@ -21,6 +21,8 @@ final class SuperagentRuntime {
     /// 连续失败 ≥3 次的副作用（面板的「问题」列表）。
     private(set) var problems: [Effect] = []
     private(set) var decisions: [Decision] = []
+    /// 研判准确率（判断正确 / 标过的，待标的「本会接单」数）。
+    private(set) var policyAccuracy: (correct: Int, annotated: Int, pending: Int) = (0, 0, 0)
     private(set) var settings = Settings()
     private(set) var rules: [Rule] = []
     private(set) var mode: AcceptMode = .observe
@@ -291,6 +293,7 @@ final class SuperagentRuntime {
     }
     func rejectTask(_ id: Int64, _ text: String) { act { try $0.rejectTask(id, text: text) } }
     func cancelTask(_ id: Int64) { act { try $0.cancelTask(id) } }
+    func annotateDecision(_ id: Int64, verdict: String?) { act { try $0.annotateDecision(id, verdict: verdict) } }
     func setWorkflow(_ w: Workflow) { act { try $0.setWorkflow(w) } }
     func deleteWorkflow(_ id: String) { act { try $0.deleteWorkflow(id) } }
     /// 任务的活动时间线（打开任务卡时读，上限 80 条；注意事项 F-17）。
@@ -801,6 +804,7 @@ final class SuperagentRuntime {
         var tasks: [TaskView] = []
         var interruptionsToday = 0
         var workflows: [Workflow] = Workflow.builtins
+        var accuracy: (correct: Int, annotated: Int, pending: Int) = (0, 0, 0)
     }
 
     /// 引擎本身不是 Sendable；读视图只查库，连接以 FULLMUTEX 打开，跨线程查询是安全的。
@@ -821,6 +825,7 @@ final class SuperagentRuntime {
         s.tasks = (try? engine.taskViews()) ?? []
         s.interruptionsToday = (try? engine.interruptionsToday()) ?? 0
         s.workflows = (try? store.workflows()) ?? Workflow.builtins
+        s.accuracy = (try? engine.policyAccuracy()) ?? (0, 0, 0)
         return s
     }
 
@@ -837,6 +842,7 @@ final class SuperagentRuntime {
         if s.tasks != tasks { tasks = s.tasks }
         if s.interruptionsToday != interruptionsToday { interruptionsToday = s.interruptionsToday }
         if s.workflows != workflows { workflows = s.workflows }
+        if s.accuracy != policyAccuracy { policyAccuracy = s.accuracy }
     }
 
     /// 同步刷新：界面操作（`act`）之后立刻可见；测试也直接调。
