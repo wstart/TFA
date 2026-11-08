@@ -256,6 +256,14 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   Charcoal stroke, roles are plain, 「未定」 stone. The ticket number chip is mono. The ticket bar's task
   chip (`list.bullet.clipboard` + 「任务 A-12 · 第 1–3 项」, mono, the item range written as consecutive
   runs) opens the task card; the card's ticket chip jumps back to the terminal.
+- **待领取 / 组织 (claimable & org)** — an org task that is not yet yours sits in a 「待领取」 section with a
+  neutral `StateTag` 「待领取」 and a quiet row action 「领取」; it never counts as needing you. A task that
+  came from the organisation carries a mono Cream chip 「组织 · T-128」 (opens the task on the org site) and a
+  one-line 同步行 under the activity: 「已同步」 stone / 「N 条待发」 stone / an error in one sentence. A sync
+  conflict is a blocked item: the needs-you strip reads 「同步冲突」 with the item line and offers exactly two
+  actions, 「本地为准（…）」 and 「服务端为准（…）」. The 组织 card in the worklist settings (server, email,
+  invite code; registered: node id, status, 「立即同步」 + quiet 「断开…」 with a confirmation) uses the same
+  `SettingRow` grammar as the other settings; the token is never shown.
 - **需要你条 (needs-you strip)** — 44pt, amber 6% fill + amber 1pt stroke, `md` radius, an 8pt amber
   square at the left; the stage name in bold, then the question / report in one line; 1–2 actions on the
   right (回答… / 打回… + 通过 / 补充… + 重试). One per card: the first `PersonAction` in declaration order,

@@ -164,11 +164,14 @@ public struct Item: Equatable, Sendable, Identifiable {
     public var doneAt: Double?
     /// 「你」或角色名。
     public var doneBy: String?
+    /// 开始做的时间：Agent 的项在 `todo → doing`（ack / 第一次回报）时写；你的项没有「开始」这一步，分给你的那一刻就算开始；
+    /// 回到 `todo`（改派、放弃、取消勾）时清。清单页的「今天」视图据此把你名下做了超过 2 天还没勾的项提到前面（需求文档 §13）。
+    public var startedAt: Double?
 
     public init(id: Int64, taskID: Int64, ord: Int, text: String, assignee: Assignee = .unassigned, status: ItemStatus = .todo,
-                ticketID: Int64? = nil, doneAt: Double? = nil, doneBy: String? = nil) {
+                ticketID: Int64? = nil, doneAt: Double? = nil, doneBy: String? = nil, startedAt: Double? = nil) {
         self.id = id; self.taskID = taskID; self.ord = ord; self.text = text; self.assignee = assignee
-        self.status = status; self.ticketID = ticketID; self.doneAt = doneAt; self.doneBy = doneBy
+        self.status = status; self.ticketID = ticketID; self.doneAt = doneAt; self.doneBy = doneBy; self.startedAt = startedAt
     }
 
     public static let maxText = 200
@@ -271,10 +274,13 @@ public struct TaskView: Equatable, Sendable, Identifiable {
     public var reviewSummary: String?
     /// 自动评审正在进行（评审工单还开着）：清单勾完也先不进待评审。
     public var reviewing: Bool
+    /// 组织同步（第 3 期）：没裁决的同步冲突（同一项两边改成不同的非 done 状态），按 `ord`；本地任务恒为空。
+    public var syncConflicts: [SyncConflict]
 
-    public init(task: WorkTask, items: [Item], tickets: [TicketView], needsYou: [PersonAction], reviewSummary: String? = nil, reviewing: Bool = false) {
+    public init(task: WorkTask, items: [Item], tickets: [TicketView], needsYou: [PersonAction], reviewSummary: String? = nil, reviewing: Bool = false,
+                syncConflicts: [SyncConflict] = []) {
         self.task = task; self.items = items; self.tickets = tickets; self.needsYou = needsYou
-        self.reviewSummary = reviewSummary; self.reviewing = reviewing
+        self.reviewSummary = reviewSummary; self.reviewing = reviewing; self.syncConflicts = syncConflicts
     }
 
     public var id: Int64 { task.id }

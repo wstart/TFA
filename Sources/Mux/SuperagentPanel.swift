@@ -780,6 +780,27 @@ struct SettingsCard: View {
                 .controlSize(.small)
                 Toggle("", isOn: bind(\.acceptance)).labelsHidden().toggleStyle(.switch).controlSize(.small)
             }
+            Hairline()
+            // 看门狗（第 4 期）：模型定时看工作中的工单有没有偏离清单项；偏离先提醒执行者，宽限期过了仍偏离就把问题挂给你。
+            SettingRow(title: "看门狗", note: "每隔一段时间请模型看一眼工作中的工单有没有偏离清单项；偏离先提醒执行者，\(Int(SuperagentEngine.watchdogGrace / 60)) 分钟内不改正就把问题挂给你") {
+                Toggle("", isOn: bind(\.watchdogEnabled)).labelsHidden().toggleStyle(.switch).controlSize(.small)
+                    .accessibilityLabel("看门狗")
+            }
+            if s.watchdogEnabled {
+                SettingRow(title: "检查间隔") {
+                    Stepper(value: bind(\.watchdogIntervalMinutes), in: 1...60) { Text("\(s.watchdogIntervalMinutes) 分钟").monospacedDigit() }
+                }
+            }
+            SettingRow(title: "模型调用方式", note: s.modelBackend == .cli ? "本机的 claude 命令，走你的 Claude Code 登录" : "Anthropic Messages API，key 存在钥匙串") {
+                SegmentedChoice(selection: bind(\.modelBackend), options: ModelBackendKind.allCases.map { (value: $0, label: $0.label) })
+                    .accessibilityLabel("模型调用方式")
+            }
+            SettingRow(title: "研判用的模型", note: "默认 \(SuperagentCore.Settings.defaultModel)") {
+                ModelNameField()
+            }
+            if s.modelBackend == .api {
+                APIKeyRow()
+            }
         }
         .saCard()
     }
@@ -787,6 +808,63 @@ struct SettingsCard: View {
     private func bind<T>(_ key: WritableKeyPath<SuperagentCore.Settings, T>) -> Binding<T> {
         let sa = appModel.superagent
         return Binding(get: { sa.settings[keyPath: key] }, set: { var s = sa.settings; s[keyPath: key] = $0; sa.saveSettings(s) })
+    }
+}
+
+/// 模型名：回车或离开输入框才保存（不是每敲一个字就写库）；留空回到默认。
+private struct ModelNameField: View {
+    @Environment(AppModel.self) private var appModel
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let sa = appModel.superagent
+        TextField(SuperagentCore.Settings.defaultModel, text: $text)
+            .textFieldStyle(.roundedBorder)
+            .font(.callout.monospaced())
+            .frame(width: 200)
+            .focused($focused)
+            .onSubmit(commit)
+            .onChange(of: focused) { _, now in if !now { commit() } }
+            .onAppear { text = sa.settings.modelName }
+            .onChange(of: sa.settings.modelName) { _, new in if !focused { text = new } }
+            .accessibilityLabel("研判用的模型")
+    }
+
+    private func commit() {
+        let sa = appModel.superagent
+        let name = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let final = name.isEmpty ? SuperagentCore.Settings.defaultModel : name
+        text = final
+        guard final != sa.settings.modelName else { return }
+        var s = sa.settings
+        s.modelName = final
+        sa.saveSettings(s)
+    }
+}
+
+/// Anthropic API key → 钥匙串（`ModelAPIKeyStore`）。只在选了 API 后端时出现，所以只有那时才读钥匙串。
+private struct APIKeyRow: View {
+    @State private var key = ""
+    @State private var saved = false
+
+    var body: some View {
+        let typed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        SettingRow(title: "Anthropic API key", note: saved ? "已存在钥匙串，只在研判时读取" : "还没有：填入后保存到钥匙串") {
+            SecureField("sk-ant-…", text: $key)
+                .textFieldStyle(.roundedBorder).frame(width: 200)
+                .accessibilityLabel("Anthropic API key")
+            Button("保存") {
+                ModelAPIKeyStore.save(typed)
+                key = ""
+                saved = true
+            }
+            .controlSize(.small).disabled(typed.isEmpty)
+            if saved {
+                Button("清除") { ModelAPIKeyStore.delete(); saved = false }.controlSize(.small)
+            }
+        }
+        .onAppear { saved = ModelAPIKeyStore.load() != nil }
     }
 }
 
@@ -949,6 +1027,7 @@ struct WorklistSettings: View {
         let problems = sa.problems.filter { !(($0.kind == .launch || $0.kind == .deliver) && shown.contains($0.key)) }
         VStack(alignment: .leading, spacing: Theme.Space.xl) {
             RouterCard()
+            OrgCard() // 组织（第 3 期）：注册 / 断开 / 同步状态
             if !direct.isEmpty {
                 PanelSection(title: "直接派给 Agent 的工单 · \(direct.count)") {
                     ForEach(needs) { NeedsYouCard(item: $0) }

@@ -186,6 +186,8 @@ TFA 天然具备 Super-agent 的「执行层」，缺的是「授权层」和「
 | ready 即结单 | ready 进「待评审」，人点「通过」才结单（有工单分支就先合并进主仓库当前分支，合并不了不结单），「打回」把意见送回执行终端 | 本地评审是 TFA 的交付环节 |
 | 只靠结构化回报 | 屏幕信号只做兜底：停下 `idleSeconds`（默认 90 秒）没回报先催一次，仍不回报记「停下未回报」；agent 退出、会话丢失各自处理 | 终端无法强制结构化，兜底避免工单悄悄卡死 |
 | 「主管」是人的入口 | 工作清单（`docs/worklist/需求文档.md`）把主管从入口退到执行层：首屏是「我的清单」，任务和清单项先由人决定谁来做，交给 Agent 的清单项才变成工单；主管只把请求加进清单（`tfa task add`），不再直接 accept；属于任务的工单 ready 即交付，评审和合并在任务层做一次 | 人的工作单位是任务不是工单；一件事里人做一部分、Agent 做一部分要能表达 |
+| 看门狗（屏幕信号只做兜底） | 第 4 期加了可选的看门狗：定时把工作中工单终端最近的输出交给模型，判断有没有偏离清单项；偏离先提醒执行者，宽限期后仍偏离才挂给人（两步升级，状态在 kv）。模型调用可选本机 `claude -p` 或 Anthropic API（`Sources/Mux/ModelBackend.swift`） | 回报是执行者自己说的，看门狗是独立的第二双眼睛；默认关，开了也只在偏离时出声 |
+| 单机 | 第 3 期把同一套任务模型放到组织端（独立项目 TFA-Org）：TFA 注册为节点，下行导入组织任务，上行走 outbox 按序重放；合并规则和事件见 `docs/worklist/org-protocol.md`（`Sources/SuperagentCore/EngineOrg.swift`、`Sources/Mux/OrgSync.swift`） | 不注册的 TFA 一行代码都不走；注册了也只上传阶段 / 勾选 / 摘要，终端内容永不离开本机 |
 
 代码位置：`Sources/SuperagentCore`（模型、存储、引擎、规则、prompt）、`Sources/TFACLI`（`tfa`）、`Sources/Mux/Superagent*.swift`（tmux 驱动、Pass 循环、界面）、`Sources/Mux/AppModel+Superagent.swift`（侧栏/通知接入）。
 

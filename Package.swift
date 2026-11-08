@@ -63,6 +63,8 @@ if FileManager.default.fileExists(atPath: "Tests/MuxTests") {
             "TmuxKit",
             .product(name: "SwiftTerm", package: "SwiftTerm"),
         ],
+        // Fixtures/: scripts the tests spawn (the fake TFA-Org server); located via #filePath, not bundled.
+        exclude: ["Fixtures"],
         swiftSettings: [.swiftLanguageMode(.v5)]
     ))
 }

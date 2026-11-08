@@ -275,6 +275,8 @@ extension SuperagentEngine {
                     i.doneAt = nil
                     i.doneBy = nil
                 }
+                // 你的项没有「开始」这一步：分给你就算开始做了（Agent 的项等它 ack）。
+                i.startedAt = to == .you && i.status != .done ? at : nil
                 items[index(ord)] = i
                 try store.saveItem(i)
                 switch to {
@@ -334,6 +336,7 @@ extension SuperagentEngine {
                 try store.saveTask(t)
             }
             try advanceIfComplete(taskID, at: at)
+            try orgChanged(taskID) // 组织任务：清单项状态变了，上行（EngineOrg.swift）
             return made
         }
     }
@@ -360,6 +363,7 @@ extension SuperagentEngine {
             for var i in try store.items(task.id) where i.assignee.isAgent && i.ticketID == nil {
                 i.assignee = .unassigned
                 i.status = .todo
+                i.startedAt = nil
                 try store.saveItem(i)
             }
             try store.log(nil, "assign", "自动交给「\(roleName)」失败：\(error)。留在待分配，等人定谁来做", at: at, task: task.id)
@@ -382,7 +386,12 @@ extension SuperagentEngine {
                 throw SuperagentError("第 \(ord) 项由「\(ticket.role)」在做（工单 #\(tid)），由它的回报推进；要自己做先改派给你")
             }
             guard (i.status == .done) != done else { return }
-            if done { i.status = .done; i.doneAt = at; i.doneBy = by } else { i.status = .todo; i.doneAt = nil; i.doneBy = nil }
+            if done {
+                i.status = .done; i.doneAt = at; i.doneBy = by
+            } else {
+                i.status = .todo; i.doneAt = nil; i.doneBy = nil
+                i.startedAt = i.assignee == .you ? at : nil // 取消勾 = 还是你在做，2 天的计时从现在重新算
+            }
             try store.saveItem(i)
             try store.log(nil, "item", "\(by)\(done ? "勾掉" : "取消勾")第 \(ord) 项：\(i.text)", at: at, task: taskID)
             if !done, t.stageKind == .review {
@@ -392,6 +401,7 @@ extension SuperagentEngine {
                 try store.saveTask(t)
             }
             try advanceIfComplete(taskID, at: at)
+            try orgChanged(taskID) // 组织任务：勾选上行
         }
     }
 
@@ -410,6 +420,7 @@ extension SuperagentEngine {
         let idx = t.stageIndex
         guard idx + 1 < t.stages.count else { return }
         try enter(&t, t.stages[idx + 1], tickets: tickets, at: at)
+        try orgChanged(taskID) // 组织任务：阶段前进上行
     }
 
     /// 通过（§4.1）：`review` → `done`。`merged` = App 已把名下开发工单的分支合并进主仓库的那句结果（记 timeline）。
@@ -427,6 +438,7 @@ extension SuperagentEngine {
             try store.log(nil, "approved", merged.map { "\(by)通过；\($0)" } ?? "\(by)通过", at: at, task: id)
             let idx = t.stageIndex
             try enter(&t, t.stages[min(idx + 1, t.stages.count - 1)], tickets: try store.tickets(task: id), at: at)
+            try orgChanged(id) // 组织任务：阶段上行
         }
     }
 
@@ -460,6 +472,7 @@ extension SuperagentEngine {
                 try feedback(tid, text: "打回：\(text)", by: by)
                 try applyFollowUpToTask(try requireTicket(tid), by: by, at: at, redo: true) // 做完的项退回重做
             }
+            try orgChanged(id) // 组织任务：阶段 / 清单项上行
         }
     }
 
@@ -493,6 +506,32 @@ extension SuperagentEngine {
                 try store.log(nil, "blocked", "前置任务 \(t.label) 已取消，\(Self.ordLabel(blocked))受阻", at: at, task: dep)
                 try store.enqueue(.notify, d.label, at: at)
             }
+            try orgChanged(id) // 组织任务：本地取消 = 这个节点放弃，上行
+        }
+    }
+
+    /// 已放弃（§4.1、§5.3、注意事项 D-04）：Agent 把它的项都报了 dropped、人确认。只在「所有项都未分配且没有一项 done」时允许，
+    /// 否则抛错（还有人在做的、做完一部分的，不要了就取消）。`status = dropped`；名下还开着的工单 `stop`；记 timeline。
+    /// 之后的跟进（加项、分配、回报）会像已完成的任务一样重新打开它。
+    public func dropTask(_ id: Int64, by: String = "你") throws {
+        try store.transaction {
+            var t = try requireTask(id)
+            guard t.status == .open else { throw SuperagentError("任务 \(t.label) \(t.status.label)，不能标为已放弃") }
+            let items = try store.items(id)
+            guard items.allSatisfy({ $0.assignee == .unassigned && $0.status != .done }) else {
+                throw SuperagentError("任务 \(t.label) 还有已分配或已完成的清单项，不能标为已放弃；不要了就取消任务")
+            }
+            let at = now()
+            t.status = .dropped
+            t.notifiedStage = nil
+            t.updatedAt = at
+            try store.saveTask(t) // 先置已放弃，再停工单（停工单会尝试推进任务，已放弃的不动）
+            let open = try store.tickets(task: id).filter(\.isOpen)
+            for ticket in open { try stop(ticket.id, by: by, reason: "任务 \(t.label) 已放弃") }
+            try store.dropEffect(.notify, t.label)
+            try store.log(nil, "dropped", "\(by)确认任务已放弃：清单项都被放弃了，没有一项完成"
+                          + (open.isEmpty ? "" : "；停止了工单 " + open.map { "#\($0.id)" }.joined(separator: "、")), at: at, task: id)
+            try orgChanged(id) // 组织任务：放弃上行（status = dropped）
         }
     }
 
@@ -547,12 +586,17 @@ extension SuperagentEngine {
             // 其余没做完的项：还在做 = 工作中（没 ack 就回报也算开始了）；带问题 = 等人，受阻。
             for var i in mine where i.status != .done && !finished.contains(i.ord) {
                 i.status = ask == nil ? .doing : .blocked
+                if i.startedAt == nil { i.startedAt = at }
                 try store.saveItem(i)
             }
             if let ask { relay = "\(head)\(what)进行中。需要人回答：\(Self.clip(ask, 300))" }
         case .ready:
             guard delivered else {
-                for var i in mine where i.status != .done { i.status = .doing; try store.saveItem(i) }
+                for var i in mine where i.status != .done {
+                    i.status = .doing
+                    if i.startedAt == nil { i.startedAt = at }
+                    try store.saveItem(i)
+                }
                 try store.log(t.id, "item", "工单 #\(t.id) 报了 ready，但还有跟进没送到；等它处理完再算", at: at, task: taskID)
                 relay = "\(head)\(what)报了 ready，但还有跟进没送到，等下一轮。"
                 break
@@ -583,6 +627,7 @@ extension SuperagentEngine {
                 i.status = .todo
                 i.assignee = .unassigned
                 i.ticketID = nil
+                i.startedAt = nil
                 try store.saveItem(i)
                 back.append(i.ord)
             }
@@ -612,6 +657,7 @@ extension SuperagentEngine {
         }
         if let relay { try queueRelay(t.id, relay, at: at) }
         if ask != nil || r.state == .blocked || r.state == .failed { try store.enqueue(.notify, task.label, at: at) }
+        try orgChanged(taskID) // 组织任务：回报改了清单项 / 需要人，上行
     }
 
     /// `ack` 的清单项映射（`ack()` 在事务里调用）：这张单的项 → doing。
@@ -619,8 +665,10 @@ extension SuperagentEngine {
         guard let taskID = t.taskID else { return }
         for var i in try store.items(taskID) where i.ticketID == t.id && i.status == .todo {
             i.status = .doing
+            i.startedAt = at
             try store.saveItem(i)
         }
+        try orgChanged(taskID) // 组织任务：开始做了，上行
     }
 
     /// 人（或主管）对工单的跟进 / 重试（`feedback` / `attach` / `retry` 在事务里调用）：这张单受阻的项回到工作中（注意事项 D-03）；
@@ -634,8 +682,10 @@ extension SuperagentEngine {
             i.status = .doing
             i.doneAt = nil
             i.doneBy = nil
+            if i.startedAt == nil { i.startedAt = at }
             try store.saveItem(i)
         }
+        try orgChanged(taskID) // 组织任务：受阻解开 / 需要人变了，上行
     }
 
     /// 自动评审：为开发工单 `dev` 建一张「评审」工单（`createTicket(role: 评审, taskID:, itemIDs: [], reviewOf: dev.id)`，
@@ -691,7 +741,9 @@ extension SuperagentEngine {
 
     public func taskView(_ id: Int64) throws -> TaskView {
         let t = try requireTask(id)
-        return try makeView(t, items: try store.items(id), tickets: try store.tickets(task: id))
+        var v = try makeView(t, items: try store.items(id), tickets: try store.tickets(task: id))
+        v.syncConflicts = try store.orgConflicts(taskIDs: [id])[id] ?? [] // 组织同步（第 3 期）
+        return v
     }
 
     /// 打开的任务（新的在前）+ 最近结束的 `endedLimit` 个（按更新时间）；一次聚合，不 N+1（注意事项 B-11）。
@@ -701,16 +753,22 @@ extension SuperagentEngine {
         let ids = tasks.map(\.id)
         let items = try store.items(taskIDs: ids)
         let tickets = try store.tickets(taskIDs: ids)
-        return try tasks.map { try makeView($0, items: items[$0.id] ?? [], tickets: tickets[$0.id] ?? []) }
+        let conflicts = try store.orgConflicts(taskIDs: ids) // 组织同步（第 3 期）
+        return try tasks.map {
+            var v = try makeView($0, items: items[$0.id] ?? [], tickets: tickets[$0.id] ?? [])
+            v.syncConflicts = conflicts[$0.id] ?? []
+            return v
+        }
     }
 
     /// §4.3：名下打开工单的 PersonAction ∪ {review}（当前阶段是 review）∪ {blocked}（清单项受阻且没有打开的工单）。
+    /// 组织任务的「待评审」不算需要你：通过 / 打回由组织负责人在 Web 上做（第 3 期）。
     private func makeView(_ t: WorkTask, items: [Item], tickets: [Ticket]) throws -> TaskView {
         let views = try tickets.map(view)
         var needs = Set<PersonAction>()
         if t.isOpen {
             for v in views where v.ticket.isOpen { if let a = v.stage.needsPerson { needs.insert(a) } }
-            if t.stageKind == .review { needs.insert(.review) }
+            if t.stageKind == .review, t.origin == nil { needs.insert(.review) }
             let open = Set(tickets.filter(\.isOpen).map(\.id))
             if items.contains(where: { $0.status == .blocked && !($0.ticketID.map(open.contains) ?? false) }) { needs.insert(.blocked) }
         }
@@ -736,7 +794,13 @@ extension SuperagentEngine {
             for tv in v.tickets where tv.ticket.isOpen {
                 guard let a = tv.stage.needsPerson else { continue }
                 let tk = tv.ticket
-                let cause = a == .delivery ? "#\(tk.id):delivery:\(Self.clip(tk.deliveryError ?? "", 40))" : "#\(tk.id):\(a.rawValue):\(Int64((tk.reportAt ?? 0) * 1000))"
+                let cause: String
+                switch a {
+                case .delivery: cause = "#\(tk.id):delivery:\(Self.clip(tk.deliveryError ?? "", 40))"
+                // 问题文字也进键：看门狗挂上的问题不改 reportAt，和它之前问过、已答过的那件事要分得开。
+                case .answer: cause = "#\(tk.id):answer:\(Int64((tk.reportAt ?? 0) * 1000)):\(Self.clip(tk.attention ?? "", 40))"
+                default: cause = "#\(tk.id):\(a.rawValue):\(Int64((tk.reportAt ?? 0) * 1000))"
+                }
                 causes.append(cause.replacingOccurrences(of: "|", with: "/"))
                 if detail[a] == nil {
                     switch a {
@@ -746,7 +810,7 @@ extension SuperagentEngine {
                     }
                 }
             }
-            if t.stageKind == .review {
+            if t.stageKind == .review, t.origin == nil { // 组织任务的通过在组织那边，不在这里等你
                 causes.append("review")
                 if detail[.review] == nil { detail[.review] = v.reviewSummary ?? Self.lastDelivery(v.tickets.map(\.ticket))?.reportSummary ?? "清单全部完成" }
             }
@@ -762,6 +826,7 @@ extension SuperagentEngine {
             t.notifiedStage = prefix + causes.sorted().joined(separator: "|")
             try store.saveTask(t)
             try store.bumpInterruptions(day: SuperagentStore.day(now()))
+            try orgInterrupted(day: SuperagentStore.day(now())) // 组织：当天打扰次数上行（EngineOrg.swift）
             let title = causes.count > 1 ? "任务 \(t.label) 有 \(causes.count) 件事需要你：\(t.title)" : "任务 \(t.label) \(first.label)：\(t.title)"
             return (title, Self.clip(detail[first] ?? t.title, 200))
         }

@@ -397,6 +397,19 @@ public struct Role: Equatable, Sendable, Codable, Identifiable {
     ]
 }
 
+/// 看门狗研判用哪种方式调模型（工作清单第 4 期）：`cli` = 本机的 `claude -p`（走用户的订阅）；
+/// `api` = Anthropic Messages API（key 存钥匙串）。
+public enum ModelBackendKind: String, CaseIterable, Sendable {
+    case cli, api
+
+    public var label: String {
+        switch self {
+        case .cli: return "本机 claude"
+        case .api: return "Anthropic API"
+        }
+    }
+}
+
 /// 用户可调的少量设置（一个默认值适合几乎所有人）。
 public struct Settings: Equatable, Sendable {
     /// 同时执行的工单数。人的跟进额外 +1。
@@ -409,6 +422,16 @@ public struct Settings: Equatable, Sendable {
     public var idleSeconds: Double = 90
     /// 每天打扰（「需要你」通知）的预算；超了只显示，不压制（注意事项 G-03）。
     public var interruptionBudget: Int = 8
+    /// 看门狗（第 4 期）：模型定时研判工作中的工单有没有偏离清单项。默认关。
+    public var watchdogEnabled: Bool = false
+    /// 看门狗两次检查的间隔（分钟）。提醒执行者后再过 `SuperagentEngine.watchdogGrace` 仍偏离，就把问题挂给人。
+    public var watchdogIntervalMinutes: Int = 10
+    /// 研判用哪种方式调模型。
+    public var modelBackend: ModelBackendKind = .cli
+    /// 研判用的模型 id。
+    public var modelName: String = Settings.defaultModel
+
+    public static let defaultModel = "claude-sonnet-5-5"
 
     public init() {}
 }

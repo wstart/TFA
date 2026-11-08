@@ -95,13 +95,31 @@ public final class SuperagentStore {
             CREATE INDEX IF NOT EXISTS ticket_task ON ticket(task_id);
             CREATE INDEX IF NOT EXISTS event_task ON event(task_id, id);
             """)
+        // 第 4 期：清单项开始做的时间（「今天」视图把你名下拖了 2 天的项提到前面）。
+        try addColumn("item", "started_at", "REAL")
+        // 组织同步（第 3 期，需求文档 §10.3；注意事项 I-01 / I-02）：上行 outbox、组织任务的服务端版本、清单项 ↔ 服务端清单项。
+        try db.exec("""
+            CREATE TABLE IF NOT EXISTS outbox (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL,
+              payload TEXT NOT NULL DEFAULT '', seq INTEGER NOT NULL DEFAULT 1, attempts INTEGER NOT NULL DEFAULT 0,
+              next_at REAL NOT NULL, last_error TEXT, created_at REAL NOT NULL, UNIQUE (task_id, kind));
+            CREATE TABLE IF NOT EXISTS org_task (
+              task_id INTEGER PRIMARY KEY, version INTEGER NOT NULL DEFAULT 0, label TEXT NOT NULL DEFAULT '',
+              scope_name TEXT NOT NULL DEFAULT '', edits INTEGER NOT NULL DEFAULT 1,
+              needs_sent TEXT NOT NULL DEFAULT '', audit_after INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS org_item (
+              item_id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL, origin_item_id INTEGER NOT NULL,
+              synced_status TEXT NOT NULL DEFAULT 'todo', conflict_local TEXT, conflict_server TEXT);
+            CREATE INDEX IF NOT EXISTS org_item_task ON org_item(task_id);
+            CREATE INDEX IF NOT EXISTS task_origin ON task(origin, origin_id);
+            """)
         if try (db.query("PRAGMA user_version").first?.int(0) ?? 0) < Self.schemaVersion {
             try db.exec("PRAGMA user_version=\(Self.schemaVersion)")
         }
     }
 
-    /// 表结构版本（注意事项 B-01）：1 = 工单 + 角色；2 = 工作清单。
-    static let schemaVersion: Int64 = 2
+    /// 表结构版本（注意事项 B-01）：1 = 工单 + 角色；2 = 工作清单；3 = 清单项的 started_at；4 = 组织同步（outbox / org_task / org_item）。
+    static let schemaVersion: Int64 = 4
 
     /// 加一列；已有就跳过。App 和 tfa 可能同时打开旧库：另一个连接先加上了也不算错。
     private func addColumn(_ table: String, _ name: String, _ decl: String) throws {
@@ -558,10 +576,11 @@ public final class SuperagentStore {
 
     private static func item(_ r: SQLRow) -> Item {
         Item(id: r.int(0), taskID: r.int(1), ord: Int(r.int(2)), text: r.text(3), assignee: Assignee(raw: r.text(4)),
-             status: ItemStatus(rawValue: r.text(5)) ?? .todo, ticketID: r.optInt(6), doneAt: r.optDouble(7), doneBy: r.optText(8))
+             status: ItemStatus(rawValue: r.text(5)) ?? .todo, ticketID: r.optInt(6), doneAt: r.optDouble(7), doneBy: r.optText(8),
+             startedAt: r.optDouble(9))
     }
 
-    private static let itemColumns = "id,task_id,ord,text,assignee,status,ticket_id,done_at,done_by"
+    private static let itemColumns = "id,task_id,ord,text,assignee,status,ticket_id,done_at,done_by,started_at"
 
     public func items(_ taskID: Int64) throws -> [Item] {
         try db.query("SELECT \(Self.itemColumns) FROM item WHERE task_id=? ORDER BY ord", [.int(taskID)]).map(Self.item)
@@ -596,16 +615,16 @@ public final class SuperagentStore {
     }
 
     func insertItem(_ i: Item) throws -> Int64 {
-        try db.run("INSERT INTO item (task_id,ord,text,assignee,status,ticket_id,done_at,done_by) VALUES (?,?,?,?,?,?,?,?)",
+        try db.run("INSERT INTO item (task_id,ord,text,assignee,status,ticket_id,done_at,done_by,started_at) VALUES (?,?,?,?,?,?,?,?,?)",
                    [.int(i.taskID), .int(Int64(i.ord)), .text(i.text), .text(i.assignee.raw), .text(i.status.rawValue),
-                    i.ticketID.map(SQLValue.int) ?? .null, .opt(i.doneAt), .opt(i.doneBy)])
+                    i.ticketID.map(SQLValue.int) ?? .null, .opt(i.doneAt), .opt(i.doneBy), .opt(i.startedAt)])
         return db.lastInsertID
     }
 
     func saveItem(_ i: Item) throws {
-        try db.run("UPDATE item SET ord=?,text=?,assignee=?,status=?,ticket_id=?,done_at=?,done_by=? WHERE id=?",
+        try db.run("UPDATE item SET ord=?,text=?,assignee=?,status=?,ticket_id=?,done_at=?,done_by=?,started_at=? WHERE id=?",
                    [.int(Int64(i.ord)), .text(i.text), .text(i.assignee.raw), .text(i.status.rawValue),
-                    i.ticketID.map(SQLValue.int) ?? .null, .opt(i.doneAt), .opt(i.doneBy), .int(i.id)])
+                    i.ticketID.map(SQLValue.int) ?? .null, .opt(i.doneAt), .opt(i.doneBy), .opt(i.startedAt), .int(i.id)])
     }
 
     func deleteItem(_ id: Int64) throws {
@@ -670,6 +689,10 @@ public final class SuperagentStore {
         if let v = try kv("settings.acceptance") { s.acceptance = v == "1" }
         if let v = try kv("settings.idleSeconds").flatMap(Double.init) { s.idleSeconds = max(20, v) }
         if let v = try kvInt("settings.interruptionBudget") { s.interruptionBudget = max(1, min(99, v)) }
+        if let v = try kv("settings.watchdogEnabled") { s.watchdogEnabled = v == "1" }
+        if let v = try kvInt("settings.watchdogIntervalMinutes") { s.watchdogIntervalMinutes = max(1, min(120, v)) }
+        if let v = try kv("settings.modelBackend").flatMap(ModelBackendKind.init) { s.modelBackend = v }
+        if let v = try kv("settings.modelName")?.trimmingCharacters(in: .whitespaces), !v.isEmpty { s.modelName = v }
         return s
     }
 
@@ -680,6 +703,10 @@ public final class SuperagentStore {
             try setKV("settings.acceptance", s.acceptance ? "1" : "0")
             try setKV("settings.idleSeconds", String(Int(s.idleSeconds)))
             try setKV("settings.interruptionBudget", String(s.interruptionBudget))
+            try setKV("settings.watchdogEnabled", s.watchdogEnabled ? "1" : "0")
+            try setKV("settings.watchdogIntervalMinutes", String(s.watchdogIntervalMinutes))
+            try setKV("settings.modelBackend", s.modelBackend.rawValue)
+            try setKV("settings.modelName", s.modelName)
         }
     }
 
@@ -752,5 +779,165 @@ public final class SuperagentStore {
         rows.insert(["version": version, "at": at, "summary": summary], at: 0)
         let data = try JSONSerialization.data(withJSONObject: Array(rows.prefix(50)))
         try setKV("policy.history", String(decoding: data, as: UTF8.self))
+    }
+
+    // MARK: - 组织同步（第 3 期：outbox、组织任务的服务端状态、节点设置；注意事项 I-01 / I-02）
+
+    private static let outboxColumns = "id,task_id,kind,payload,seq,attempts,next_at,last_error,created_at"
+
+    private static func outbox(_ r: SQLRow) -> OutboxEntry {
+        OutboxEntry(id: r.int(0), taskID: r.int(1), kind: r.text(2), payload: r.text(3), seq: r.int(4), attempts: Int(r.int(5)),
+                    nextAt: r.double(6), lastError: r.optText(7), createdAt: r.double(8))
+    }
+
+    /// 入队。同一任务同类未发送的合并成一条：seq+1、payload 换成新的、立即到期（位置不变，仍按最早入队的顺序重放）；
+    /// 失败计数保留，直到成功一次。`taskID = 0` 是节点级（当天打扰次数）。
+    func enqueueOutbox(_ taskID: Int64, kind: String, payload: String = "", at: Double) throws {
+        try db.run("""
+            INSERT INTO outbox (task_id,kind,payload,seq,attempts,next_at,created_at) VALUES (?,?,?,1,0,?,?)
+            ON CONFLICT(task_id,kind) DO UPDATE SET seq=seq+1, payload=excluded.payload, next_at=MIN(next_at, excluded.next_at)
+            """, [.int(taskID), .text(kind), .text(payload), .real(at), .real(at)])
+    }
+
+    /// 到期的上行，按入队顺序（按序重放）。
+    public func pendingOutbox(now: Double) throws -> [OutboxEntry] {
+        try db.query("SELECT \(Self.outboxColumns) FROM outbox WHERE next_at<=? ORDER BY id", [.real(now)]).map(Self.outbox)
+    }
+
+    /// 全部未发送的上行，按入队顺序。
+    public func outbox() throws -> [OutboxEntry] {
+        try db.query("SELECT \(Self.outboxColumns) FROM outbox ORDER BY id").map(Self.outbox)
+    }
+
+    public func outbox(task id: Int64) throws -> [OutboxEntry] {
+        try db.query("SELECT \(Self.outboxColumns) FROM outbox WHERE task_id=? ORDER BY id", [.int(id)]).map(Self.outbox)
+    }
+
+    /// 发送成功：只有 seq 没变才删除（发送期间又入队的改动保留并立即到期）。
+    public func completeOutbox(_ e: OutboxEntry) throws {
+        try db.transaction {
+            let n = try db.run("DELETE FROM outbox WHERE id=? AND seq=?", [.int(e.id), .int(e.seq)])
+            if n == 0 { try db.run("UPDATE outbox SET attempts=0, last_error=NULL WHERE id=?", [.int(e.id)]) }
+        }
+    }
+
+    /// 发送失败（连不上 / 5xx）：指数退避 2s→60s，不停摆——断网恢复后要尽快重放。返回新的失败次数。
+    @discardableResult
+    public func failOutbox(_ e: OutboxEntry, error: String, now: Double) throws -> Int {
+        let attempts = e.attempts + 1
+        let delay = min(60, 2 * pow(2, Double(attempts - 1)))
+        try db.run("UPDATE outbox SET attempts=?, next_at=?, last_error=? WHERE id=?",
+                   [.int(Int64(attempts)), .real(now + delay), .text(String(error.prefix(300))), .int(e.id)])
+        return attempts
+    }
+
+    func dropOutbox(task id: Int64) throws {
+        try db.run("DELETE FROM outbox WHERE task_id=?", [.int(id)])
+    }
+
+    /// 组织任务按 `(origin, origin_id)` 唯一（I-01）。
+    public func task(origin: String, originID: String) throws -> WorkTask? {
+        try tasks(rows: try db.query("SELECT \(Self.taskColumns) FROM task WHERE origin=? AND origin_id=?", [.text(origin), .text(originID)])).first
+    }
+
+    /// 某个服务器的、处于某个同步状态的任务（「待领取」的对账用）。
+    public func tasks(origin: String, syncState: String) throws -> [WorkTask] {
+        try tasks(rows: try db.query("SELECT \(Self.taskColumns) FROM task WHERE origin=? AND sync_state=? ORDER BY id",
+                                     [.text(origin), .text(syncState)]))
+    }
+
+    /// 只给「待领取」的占位行用（它从没被做过）：连同清单项、同步状态、时间线、上行一起删。普通任务不硬删（注意事项 B-08）。
+    func deleteTask(_ id: Int64) throws {
+        for sql in ["DELETE FROM item WHERE task_id=?", "DELETE FROM org_item WHERE task_id=?", "DELETE FROM org_task WHERE task_id=?",
+                    "DELETE FROM task_dep WHERE task_id=? OR depends_on=?", "DELETE FROM event WHERE task_id=?",
+                    "DELETE FROM outbox WHERE task_id=?", "DELETE FROM task WHERE id=?"] {
+            try db.run(sql, Array(repeating: SQLValue.int(id), count: sql.components(separatedBy: "?").count - 1))
+        }
+    }
+
+    func orgState(_ taskID: Int64) throws -> OrgTaskState? {
+        try db.query("SELECT task_id,version,label,scope_name,edits,needs_sent,audit_after FROM org_task WHERE task_id=?", [.int(taskID)]).first.map {
+            OrgTaskState(taskID: $0.int(0), version: Int($0.int(1)), label: $0.text(2), scopeName: $0.text(3), edits: $0.int(4) != 0,
+                         needsSent: $0.text(5), auditAfter: $0.int(6))
+        }
+    }
+
+    func saveOrgState(_ s: OrgTaskState) throws {
+        try db.run("""
+            INSERT INTO org_task (task_id,version,label,scope_name,edits,needs_sent,audit_after) VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(task_id) DO UPDATE SET version=excluded.version, label=excluded.label, scope_name=excluded.scope_name,
+              edits=excluded.edits, needs_sent=excluded.needs_sent, audit_after=excluded.audit_after
+            """, [.int(s.taskID), .int(Int64(s.version)), .text(s.label), .text(s.scopeName), .bool(s.edits), .text(s.needsSent), .int(s.auditAfter)])
+    }
+
+    private static func orgItem(_ r: SQLRow) -> OrgItemState {
+        OrgItemState(itemID: r.int(0), taskID: r.int(1), originItemID: r.int(2), syncedStatus: ItemStatus(rawValue: r.text(3)) ?? .todo,
+                     conflictLocal: r.optText(4).flatMap(ItemStatus.init), conflictServer: r.optText(5).flatMap(ItemStatus.init))
+    }
+
+    func orgItems(_ taskID: Int64) throws -> [OrgItemState] {
+        try db.query("SELECT item_id,task_id,origin_item_id,synced_status,conflict_local,conflict_server FROM org_item WHERE task_id=? ORDER BY item_id",
+                     [.int(taskID)]).map(Self.orgItem)
+    }
+
+    func saveOrgItem(_ s: OrgItemState) throws {
+        try db.run("""
+            INSERT INTO org_item (item_id,task_id,origin_item_id,synced_status,conflict_local,conflict_server) VALUES (?,?,?,?,?,?)
+            ON CONFLICT(item_id) DO UPDATE SET origin_item_id=excluded.origin_item_id, synced_status=excluded.synced_status,
+              conflict_local=excluded.conflict_local, conflict_server=excluded.conflict_server
+            """, [.int(s.itemID), .int(s.taskID), .int(s.originItemID), .text(s.syncedStatus.rawValue),
+                  .opt(s.conflictLocal?.rawValue), .opt(s.conflictServer?.rawValue)])
+    }
+
+    func deleteOrgItem(_ itemID: Int64) throws {
+        try db.run("DELETE FROM org_item WHERE item_id=?", [.int(itemID)])
+    }
+
+    /// 一批任务里没裁决的同步冲突，按任务分组、各自按 `ord`（清单页一次聚合，注意事项 B-11）。
+    public func orgConflicts(taskIDs: [Int64]) throws -> [Int64: [SyncConflict]] {
+        var out: [Int64: [SyncConflict]] = [:]
+        for chunk in Self.chunks(taskIDs) {
+            let rows = try db.query("""
+                SELECT o.task_id, i.ord, i.text, o.conflict_local, o.conflict_server FROM org_item o JOIN item i ON i.id=o.item_id
+                WHERE o.conflict_server IS NOT NULL AND o.task_id IN (\(Self.marks(chunk.count))) ORDER BY o.task_id, i.ord
+                """, chunk.map(SQLValue.int))
+            for r in rows {
+                out[r.int(0), default: []].append(SyncConflict(ord: Int(r.int(1)), text: r.text(2), local: ItemStatus(rawValue: r.text(3)) ?? .todo,
+                                                               server: ItemStatus(rawValue: r.text(4)) ?? .todo))
+            }
+        }
+        return out
+    }
+
+    /// 任务的活动，`after` 之后的 `limit` 条（审计摘要上行用），按 id 升序。
+    public func events(taskID: Int64, after: Int64, limit: Int = 50) throws -> [TimelineEvent] {
+        try db.query("SELECT id,at,ticket_id,kind,text,task_id FROM event WHERE task_id=? AND id>? ORDER BY id LIMIT ?",
+                     [.int(taskID), .int(after), .int(Int64(limit))]).map {
+            TimelineEvent(id: $0.int(0), at: $0.double(1), ticketID: $0.optInt(2), kind: $0.text(3), text: $0.text(4), taskID: $0.optInt(5))
+        }
+    }
+
+    public func orgSettings() throws -> OrgSettings {
+        var s = OrgSettings()
+        s.serverURL = try kv("org.serverURL") ?? ""
+        s.email = try kv("org.email") ?? ""
+        s.nodeID = try kv("org.nodeID")
+        s.lastSync = try kv("org.lastSync").flatMap(Double.init)
+        s.taskCursor = try kv("org.taskCursor")
+        s.eventCursor = try kv("org.eventCursor")
+        s.workspace = try kv("org.workspace") ?? ""
+        return s
+    }
+
+    public func saveOrgSettings(_ s: OrgSettings) throws {
+        try db.transaction {
+            try setKV("org.serverURL", s.serverURL.nilIfEmpty)
+            try setKV("org.email", s.email.nilIfEmpty)
+            try setKV("org.nodeID", s.nodeID)
+            try setKV("org.lastSync", s.lastSync.map { String($0) })
+            try setKV("org.taskCursor", s.taskCursor)
+            try setKV("org.eventCursor", s.eventCursor)
+            try setKV("org.workspace", s.workspace.nilIfEmpty)
+        }
     }
 }

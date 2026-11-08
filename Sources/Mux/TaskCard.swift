@@ -17,6 +17,7 @@ struct TaskCard: View {
     @State private var editing: Item?
     @State private var removing: Item?
     @State private var confirmCancel = false
+    @State private var confirmDrop = false
     @State private var showDeps = false
     /// 乐观更新的勾选（`Item.id` → 勾了没）：先翻状态再调引擎，失败回滚（注意事项 F-18）。
     @State private var pending: [Int64: Bool] = [:]
@@ -24,6 +25,11 @@ struct TaskCard: View {
 
     /// 还能改清单、分配：打开的和已完成的（跟进会重新打开，注意事项 C-10）；已取消 / 已放弃的不能。
     private var editable: Bool { view.task.status == .open || view.task.status == .done }
+    /// 「已放弃？」只在这时出现（注意事项 D-04）：Agent 放弃过（有工单以放弃结束），现在所有项都未分配、没有一项完成。
+    private var abandoned: Bool {
+        view.task.isOpen && view.tickets.contains { $0.ticket.status == .dropped }
+            && view.items.allSatisfy { $0.assignee == .unassigned && $0.status != .done }
+    }
 
     var body: some View {
         let sa = appModel.superagent
@@ -36,6 +42,7 @@ struct TaskCard: View {
                     needBar.id("needs")
                     checklistCard
                     activityCard
+                    OrgSyncRow(view: view) // 同步行（第 3 期）：只有组织任务显示
                     bottomActions
                 }
                 .padding(Theme.Space.xxl)
@@ -73,6 +80,15 @@ struct TaskCard: View {
                  ? "任务标为已取消；没有正在跑的终端。"
                  : "会中断 \(sessions.count) 个终端：\(sessions.joined(separator: "、"))。任务标为已取消，终端、目录和已有改动都保留。")
         }
+        .alert("任务 \(view.task.label) 已放弃？", isPresented: $confirmDrop) {
+            Button("标为已放弃", role: .destructive) {
+                sa.dropTask(view.id)
+                appModel.worklistTaskID = nil
+            }
+            Button("保留", role: .cancel) {}
+        } message: {
+            Text("Agent 放弃了它的清单项，现在没有一项完成、也没有人在做。标为已放弃后任务结束；还要做就改派给别人或自己做。")
+        }
     }
 
     // MARK: 标题 + 元信息 + 原文
@@ -107,6 +123,7 @@ struct TaskCard: View {
         let t = view.task
         let sa = appModel.superagent
         MetaChip(text: "来源 · \(t.source.label)" + (t.sourceRef.map { " · \($0)" } ?? ""))
+        OrgTaskChip(task: t) // 组织任务（第 3 期）：「组织 · T-128」，点开服务端任务页；本地任务不显示
         if !t.scope.isEmpty {
             MetaChip(text: "范围 · \(WorklistSections.projectName(t.scope))").help(t.scope)
         }
@@ -323,6 +340,11 @@ struct TaskCard: View {
                 Button { startAdding() } label: { Label("加一项", systemImage: "plus") }
             }
             Spacer()
+            if abandoned {
+                Button("已放弃？") { confirmDrop = true }
+                    .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)
+                    .help("Agent 放弃了全部清单项：确认后任务标为已放弃")
+            }
             if view.task.isOpen {
                 Button("取消任务…") { confirmCancel = true }
                     .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)

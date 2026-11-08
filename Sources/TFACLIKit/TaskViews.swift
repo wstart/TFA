@@ -5,10 +5,12 @@ import SuperagentCore
 /// 清单项编号三处同源：都从 `Item.line` 来（注意事项 E-04）。
 extension Views {
     /// 一个任务在清单里的分区（§9.1）：需要你 → 进行中 → 待分配（有未分配的项）；已结束另算。
-    enum Bucket { case needsYou, doing, unassigned, ended }
+    /// 组织的待领取（第 3 期，`syncState == "claimable"`）还不是你的任务：不进任务段的计数，`task list` 单独一组。
+    enum Bucket { case needsYou, doing, unassigned, claimable, ended }
 
     static func bucket(_ v: TaskView) -> Bucket {
         if !v.task.isOpen { return .ended }
+        if v.task.syncState == "claimable" { return .claimable }
         if !v.needsYou.isEmpty { return .needsYou }
         if v.unassignedCount > 0 { return .unassigned }
         return .doing
@@ -21,6 +23,7 @@ extension Views {
         switch bucket(v) {
         case .needsYou: tag = v.firstNeed!.label
         case .unassigned: tag = "待分配"
+        case .claimable: tag = "待领取"
         case .doing: tag = t.stage
         case .ended: tag = t.status.label
         }
@@ -34,7 +37,7 @@ extension Views {
 
     /// `任务（需要你 N / 进行中 M / 待分配 K）：` + 每个打开的任务一行；没有打开的任务 → nil。
     static func taskSummary(_ views: [TaskView]) -> String? {
-        let open = views.filter { $0.task.isOpen }
+        let open = views.filter { $0.task.isOpen && bucket($0) != .claimable }
         guard !open.isEmpty else { return nil }
         let needs = open.filter { bucket($0) == .needsYou }.sorted { ($0.firstNeed!, $0.id) < ($1.firstNeed!, $1.id) }
         let doing = open.filter { bucket($0) == .doing }.sorted { $0.id < $1.id }
@@ -53,6 +56,8 @@ extension Views {
             return "需要你的任务（\(needs.count)）：\n" + needs.map { taskLine($0) + "\n" }.joined()
         }
         var s = taskSummary(views) ?? "没有打开的任务。\n"
+        let claimable = views.filter { bucket($0) == .claimable }.sorted { $0.id < $1.id }
+        if !claimable.isEmpty { s += "组织的待领取（\(claimable.count)，领了才是你的）：\n" + claimable.map { taskLine($0) + "\n" }.joined() }
         let ended = views.filter { bucket($0) == .ended }
         if !ended.isEmpty { s += "最近结束（\(ended.count)）：\n" + ended.map { taskLine($0) + "\n" }.joined() }
         return s

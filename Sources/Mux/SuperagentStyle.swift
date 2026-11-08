@@ -90,6 +90,7 @@ extension TaskView {
         case .dropped: return ("已放弃", Theme.Status.neutral)
         case .open: break
         }
+        if task.syncState == "claimable" { return ("待领取", Theme.Status.neutral) } // 组织的待领取（第 3 期）：还不是你的任务
         if let need = needsYou.first {
             return (need.label, need == .failed || need == .delivery ? Theme.Status.error : Theme.Status.attention)
         }
@@ -139,6 +140,9 @@ extension TaskView {
             if let t { return (need.label, "\(who) 已就绪" + (t.ticket.reportSummary.isEmpty ? "" : "：\(t.ticket.reportSummary)")) }
             return (need.label, "清单项都完成了，等你通过或打回")
         case .blocked:
+            if let c = syncConflicts.first { // 组织同步冲突（第 3 期）：两边改成不同状态，人定一边
+                return ("同步冲突", c.line + (syncConflicts.count > 1 ? "（还有 \(syncConflicts.count - 1) 处）" : ""))
+            }
             if let t { return (need.label, "\(who) 受阻" + (t.ticket.reportSummary.isEmpty ? "" : "：\(t.ticket.reportSummary)")) }
             let ords = items.filter { $0.status == .blocked }.map(\.ord)
             return (need.label, ords.isEmpty ? "有清单项受阻" : "\(WorklistText.ords(ords))受阻，没有工单在做")

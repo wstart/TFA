@@ -50,7 +50,8 @@ final class SuperagentRuntime {
         tasks.filter { $0.task.isOpen && !$0.needsYou.isEmpty }
             .sorted { ($0.needsYou[0], -$0.id) < ($1.needsYou[0], -$1.id) }
     }
-    var openTasks: [TaskView] { tasks.filter { $0.task.isOpen } }
+    /// 打开的任务；组织的待领取占位行（`syncState == "claimable"`，第 3 期）还不是你的任务，不算在内（侧栏计数、依赖候选都用这个）。
+    var openTasks: [TaskView] { tasks.filter { $0.task.isOpen && $0.task.syncState != "claimable" } }
     func task(_ id: Int64) -> TaskView? { tasks.first { $0.id == id } }
     /// 某张工单所属的任务。
     func task(ofTicket id: Int64) -> TaskView? {
@@ -136,11 +137,17 @@ final class SuperagentRuntime {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             }
         }
+        startWatchdog()
+        startOrgSync()
     }
 
     func stopLoop() {
         loop?.cancel()
         loop = nil
+        watchdogLoop?.cancel()
+        watchdogLoop = nil
+        ClaudeCLIBackend.terminateAll() // 研判中的 claude 子进程：App 退出时一并结束，不留孤儿
+        org.stop()
         if notifyToken != 0 { notify_cancel(notifyToken); notifyToken = 0 }
     }
 
@@ -906,5 +913,71 @@ final class SuperagentRuntime {
     nonisolated static func claudeRouterCommand() -> String {
         "\(envPrefix) TFA_ROLE=router claude --append-system-prompt-file \(SuperagentTmux.quote(SuperagentPaths.routerPrompt.path)) "
             + "--permission-mode dontAsk --allowedTools 'Bash(tfa *)' --disallowedTools 'Edit,Write,NotebookEdit'"
+    }
+
+    // MARK: - 看门狗（工作清单第 4 期；候选、判定和两步升级在引擎的 Watchdog.swift）
+
+    /// 研判用的模型后端；nil = 按设置选（本机 claude / Anthropic API）。测试注入假后端。
+    @ObservationIgnored var modelBackend: ModelBackend?
+    /// 看门狗循环的节拍（秒）：每拍问引擎有没有到期的候选，有就逐张研判。间隔本身是设置里的分钟数。
+    @ObservationIgnored var watchdogTick: Double = 60
+    @ObservationIgnored private var watchdogLoop: Task<Void, Never>?
+    @ObservationIgnored private var watchdogBusy = false
+
+    /// Pass 之外独立定时：模型调用慢（几秒到一分钟），不能拖住每 2 秒一次的 Pass。
+    private func startWatchdog() {
+        watchdogLoop = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64((self?.watchdogTick ?? 60) * 1_000_000_000))
+                await self?.watchdogPass()
+            }
+        }
+    }
+
+    /// 一轮看门狗：关着就什么都不做；到期的候选逐张（串行）取终端最近的输出 → 后台调模型 → 判定落库。
+    /// 模型调不通 / 输出解析不了只记时间线，不通知人。测试直接调它。
+    func watchdogPass() async {
+        guard let engine, settings.watchdogEnabled, !watchdogBusy else { return }
+        let candidates = (try? engine.watchdogCandidates()) ?? []
+        guard !candidates.isEmpty else { return }
+        watchdogBusy = true
+        defer { watchdogBusy = false }
+        let backend = modelBackend ?? ModelBackends.make(settings)
+        let tmux = self.tmux
+        let snap = await Task.detached(priority: .utility) { tmux.snapshot() }.value ?? []
+        for c in candidates {
+            var tail = ""
+            if let target = pane(for: c.ticket, in: snap)?.pane {
+                tail = await Task.detached(priority: .utility) { tmux.capture(target, lines: 80) }.value
+            }
+            let prompt = SuperagentEngine.watchdogPrompt(c, tail: tail, now: clock())
+            do {
+                let text = try await backend.complete(system: prompt.system, user: prompt.user)
+                let v = try SuperagentEngine.parseWatchdogVerdict(text)
+                try engine.watchdogVerdict(ticketID: c.ticket.id, onTrack: v.onTrack, reason: v.reason, question: v.question)
+            } catch {
+                try? engine.watchdogFailed(ticketID: c.ticket.id, error: "\(error)")
+            }
+        }
+        reload()
+        kick()
+    }
+
+    /// 任务卡的「已放弃？」（注意事项 D-04）。
+    func dropTask(_ id: Int64) { act { try $0.dropTask(id) } }
+
+    // MARK: - 组织同步（工作清单第 3 期；协议和循环在 OrgSync.swift，引擎侧在 EngineOrg.swift）
+
+    /// 节点同步：注册过才跑（心跳、长轮询、兜底拉取、outbox 重放）；没注册什么都不做。
+    let org = OrgSync()
+
+    private func startOrgSync() {
+        guard let engine else { return }
+        org.attach(engine: engine)
+        org.roles = { [weak self] in (self?.roles ?? Role.builtins).map(\.name) }
+        org.slots = { [weak self] in self?.settings.slots ?? 3 }
+        org.openTickets = { [weak self] in self?.openTickets.count ?? 0 }
+        org.onChanged = { [weak self] in self?.reload(); self?.kick() }
+        org.start()
     }
 }

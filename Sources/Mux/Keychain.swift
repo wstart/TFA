@@ -121,3 +121,74 @@ enum SSHPasswordStore {
         return SymmetricKey(data: hasher.finalize())
     }
 }
+
+/// 看门狗研判用的 Anthropic API key（工作清单第 4 期）：一条 generic-password。只在模型调用方式选了 API 时读写；
+/// 值不进 UserDefaults、不进日志。
+enum ModelAPIKeyStore {
+    private static let service = "com.tfa.model"
+    private static let account = "anthropic"
+
+    static func load() -> String? {
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data, let key = String(data: data, encoding: .utf8), !key.isEmpty else { return nil }
+        return key
+    }
+
+    static func save(_ key: String) {
+        SecItemDelete(baseQuery() as CFDictionary) // upsert
+        guard !key.isEmpty else { return }
+        var add = baseQuery()
+        add[kSecValueData as String] = Data(key.utf8)
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        SecItemAdd(add as CFDictionary, nil)
+    }
+
+    static func delete() {
+        SecItemDelete(baseQuery() as CFDictionary)
+    }
+
+    private static func baseQuery() -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: service,
+         kSecAttrAccount as String: account]
+    }
+}
+
+/// 组织节点的 token（工作清单第 3 期，注意事项 I-04）：一个节点一条 generic-password，account = 节点 id。
+/// 注册时服务端只给一次；「断开」删掉它（服务端的吊销由管理员做）。值不进 UserDefaults、不进库、不进日志。
+enum OrgTokenStore {
+    private static let service = "com.tfa.org"
+
+    static func load(nodeID: String) -> String? {
+        var query = baseQuery(nodeID)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data, let token = String(data: data, encoding: .utf8), !token.isEmpty else { return nil }
+        return token
+    }
+
+    static func save(_ token: String, nodeID: String) {
+        SecItemDelete(baseQuery(nodeID) as CFDictionary) // upsert
+        guard !token.isEmpty else { return }
+        var add = baseQuery(nodeID)
+        add[kSecValueData as String] = Data(token.utf8)
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        SecItemAdd(add as CFDictionary, nil)
+    }
+
+    static func delete(nodeID: String) {
+        SecItemDelete(baseQuery(nodeID) as CFDictionary)
+    }
+
+    private static func baseQuery(_ nodeID: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: service,
+         kSecAttrAccount as String: nodeID]
+    }
+}

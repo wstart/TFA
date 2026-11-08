@@ -131,6 +131,12 @@ struct WorklistView: View {
                             ForEach(sections.unassigned) { row($0) }
                         }
                     }
+                    if !sections.claimable.isEmpty {
+                        // 组织的待领取（第 3 期）：本地只是占位行，领取后才进行中。
+                        section("待领取", count: sections.claimable.count) {
+                            ForEach(sections.claimable) { row($0) }
+                        }
+                    }
                     if !sections.done.isEmpty {
                         VStack(alignment: .leading, spacing: Theme.Space.sm) {
                             Button {
@@ -207,14 +213,16 @@ enum WorklistFilter: Hashable {
     case all, today, week
 }
 
-/// 清单页的四个分区：需要你 → 进行中 → 待分配（有未分配清单项）→ 已完成（最近 30）。
+/// 清单页的分区：需要你 → 进行中 → 待分配（有未分配清单项）→ 待领取（组织，第 3 期）→ 已完成（最近 30）。
 struct WorklistSections: Equatable {
     var needsYou: [TaskView] = []
     var working: [TaskView] = []
     var unassigned: [TaskView] = []
+    /// 组织的待领取任务（本地的占位行，`syncState == "claimable"`）。
+    var claimable: [TaskView] = []
     var done: [TaskView] = []
 
-    var isEmpty: Bool { needsYou.isEmpty && working.isEmpty && unassigned.isEmpty && done.isEmpty }
+    var isEmpty: Bool { needsYou.isEmpty && working.isEmpty && unassigned.isEmpty && claimable.isEmpty && done.isEmpty }
 
     static func make(_ tasks: [TaskView], filter: WorklistFilter = .all, project: String? = nil, search: String = "",
                      now: Date = Date(), calendar: Calendar = .current) -> WorklistSections {
@@ -225,17 +233,41 @@ struct WorklistSections: Equatable {
             if !q.isEmpty, !matches(tv, q) { continue }
             if !within(tv, filter, now: now, calendar: calendar) { continue }
             if !tv.task.isOpen { r.done.append(tv) }
+            else if tv.task.syncState == "claimable" { r.claimable.append(tv) }
             else if !tv.needsYou.isEmpty { r.needsYou.append(tv) }
             else if tv.unassignedCount > 0 { r.unassigned.append(tv) }
             else { r.working.append(tv) }
         }
         // 需要你：按第一件事的 PersonAction 顺序，再新的在前（§4.3）；其余新的在前，不随回报跳动。
         r.needsYou.sort { ($0.needsYou[0], -$0.id) < ($1.needsYou[0], -$1.id) }
-        r.working.sort { $0.id > $1.id }
+        if filter == .today {
+            // 「今天」：你名下做了超过 2 天还没勾的项所在任务提到进行中最前（需求文档 §13：忘了勾的项别永远沉底）；不弹窗。
+            r.working.sort { (staleYourItems($0, now: now).isEmpty ? 1 : 0, -$0.id) < (staleYourItems($1, now: now).isEmpty ? 1 : 0, -$1.id) }
+        } else {
+            r.working.sort { $0.id > $1.id }
+        }
         r.unassigned.sort { $0.id > $1.id }
+        r.claimable.sort { $0.id > $1.id }
         r.done.sort { $0.task.updatedAt > $1.task.updatedAt }
         r.done = Array(r.done.prefix(30))
         return r
+    }
+
+    /// 你名下开始做了 ≥ `staleAfter` 还没勾的项（打开的任务；`Item.startedAt` 从分给你那一刻算）。
+    static func staleYourItems(_ tv: TaskView, now: Date = Date()) -> [Item] {
+        guard tv.task.isOpen else { return [] }
+        return tv.items.filter {
+            $0.assignee == .you && ($0.status == .todo || $0.status == .doing)
+                && ($0.startedAt.map { now.timeIntervalSince1970 - $0 >= staleAfter } ?? false)
+        }
+    }
+
+    static let staleAfter: Double = 2 * 86400
+
+    /// 清单行上的那句小字：「第 2 项已做 3 天」（几项一起就「第 2、4 项已做 3 天」，天数按最早的算）；没有就 nil。
+    static func staleLine(_ items: [Item], now: Date = Date()) -> String? {
+        guard let oldest = items.compactMap(\.startedAt).min() else { return nil }
+        return "\(WorklistText.ords(items.map(\.ord)))已做 \(Int((now.timeIntervalSince1970 - oldest) / 86400)) 天"
     }
 
     /// 「按项目」菜单的候选：任务里出现过的目录（去重，按名字）。
@@ -251,7 +283,7 @@ struct WorklistSections: Equatable {
         return tv.items.contains { $0.text.lowercased().contains(q) }
     }
 
-    /// 今天 = 需要你的 + 今天到期（含过期）的 + 今天有动静的；本周同理按本周算。
+    /// 今天 = 需要你的 + 今天到期（含过期）的 + 今天有动静的 + 你名下拖了 2 天还没勾的；本周同理按本周算。
     private static func within(_ tv: TaskView, _ filter: WorklistFilter, now: Date, calendar: Calendar) -> Bool {
         let interval: DateInterval
         switch filter {
@@ -260,6 +292,7 @@ struct WorklistSections: Equatable {
         case .week: interval = calendar.dateInterval(of: .weekOfYear, for: now) ?? DateInterval(start: now, duration: 7 * 86400)
         }
         if tv.task.isOpen && !tv.needsYou.isEmpty { return true }
+        if filter == .today, !staleYourItems(tv, now: now).isEmpty { return true }
         if tv.task.isOpen, let due = tv.task.due, due < interval.end.timeIntervalSince1970 { return true }
         return tv.task.updatedAt >= interval.start.timeIntervalSince1970
     }
@@ -361,6 +394,7 @@ private struct InterruptionRow: View {
 /// 白卡 · Linen 1pt · 最小高 52：第一行 `A-12` + 标题 + 右侧 `StateTag`（只在需要你时着色）+ 该阶段的动作；
 /// 第二行 进度 `3/5` · 截止（3 天内）· 来源 · 执行者 chips（≤3）。需要你时整行 amber 6% 底。
 struct TaskRow: View {
+    @Environment(AppModel.self) private var appModel
     let view: TaskView
     let open: () -> Void
     let assign: () -> Void
@@ -379,11 +413,22 @@ struct TaskRow: View {
                     Text(meta).font(Theme.Font.rowSubtitle).monospacedDigit().foregroundStyle(Theme.textSecondary).lineLimit(1)
                     ForEach(view.assignees.prefix(3), id: \.self) { AssigneeChip(assignee: $0) }
                     if view.assignees.isEmpty && view.task.isOpen { AssigneeChip(assignee: .unassigned) }
+                    if let stale = WorklistSections.staleLine(WorklistSections.staleYourItems(view)) {
+                        // 你忘了勾的项：一句小字，不着琥珀（A-04），不弹窗。
+                        Text(stale).font(.caption).monospacedDigit().foregroundStyle(Theme.textTertiary).lineLimit(1)
+                    }
                 }
             }
             Spacer(minLength: Theme.Space.md)
             StateTag(text: tag.text, tint: tag.tint)
-            if view.task.isOpen {
+            if view.task.syncState == "claimable" {
+                // 组织的待领取（第 3 期）：领到手才是你的任务。
+                let org = appModel.superagent.org
+                Button("领取") { Task { await org.claim(view.id) } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(org.busy || !org.registered)
+                    .help("向组织领取这个任务；别人先领走了就从这里消失")
+            } else if view.task.isOpen {
                 if needs {
                     TaskNeedActions(view: view, assign: assign)
                 } else if view.unassignedCount > 0 {
@@ -444,7 +489,9 @@ struct TaskNeedActions: View {
                     .buttonStyle(.borderedProminent)
             }
         case .blocked?, .failed?, .delivery?, .stalled?:
-            if let t = view.ticket(needing: view.needsYou[0]) {
+            if view.needsYou[0] == .blocked, let c = view.syncConflicts.first {
+                OrgConflictButtons(taskID: view.id, conflict: c) // 组织同步冲突（第 3 期）：人定一边
+            } else if let t = view.ticket(needing: view.needsYou[0]) {
                 Button("补充…") { appModel.ticketFeedback = TicketFeedbackRequest(ticketID: t.id, kind: .add) }
                 Button("重试") { sa.retry(t.id) }.buttonStyle(.borderedProminent)
             } else if let assign {
