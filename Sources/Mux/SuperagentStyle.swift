@@ -104,8 +104,9 @@ extension TaskView {
         tickets.first { $0.ticket.isOpen && $0.stage.needsPerson == a }
     }
 
-    /// 清单项的状态词：待做 / 工作中 / 完成 / 受阻 / 排队 / 待你 / 待分配。`attention` = 该用琥珀（待你、受阻）。
+    /// 清单项的状态词：待做 / 工作中 / 完成 / 受阻 / 排队 / 待你 / 待分配；被退回成新任务的项写「→ A-13」（4A）。`attention` = 该用琥珀（待你、受阻）。
     func statusWord(_ item: Item) -> (text: String, attention: Bool) {
+        if let link = handback(of: item) { return ("→ A-\(link.toTaskID)", false) }
         switch item.status {
         case .done: return ("完成", false)
         case .doing: return ("工作中", false)
@@ -128,28 +129,84 @@ extension TaskView {
         return seen
     }
 
-    /// 需要你条的正文：阶段名加粗 + 问题原文 / 回报摘要（一句）。
-    var needLine: (title: String, body: String)? {
+    /// 需要你条的正文：阶段名加粗 + 一句话。工单的回报固定前缀「工单 #12 回报：」（设计评审 2026-11-08，Pass 3）：
+    /// 「通过：…」不再紧挨着「通过」按钮被读成已通过。
+    var needLine: (title: String, body: String)? { needLine(handbackTarget: nil) }
+
+    /// `handbackTarget` = 受阻的那一项退回成的新任务（有退回时传）：它还没定谁来做就写「等你定谁来做」，否则写它的状态。
+    func needLine(handbackTarget: TaskView?) -> (title: String, body: String)? {
         guard let need = needsYou.first else { return nil }
         let t = ticket(needing: need)
         let who = t.map { "工单 #\($0.id)" } ?? ""
+        func report(_ summary: String, or fallback: String) -> String { "\(who) 回报：" + (summary.isEmpty ? fallback : summary) }
         switch need {
         case .answer: return (need.label, t?.ticket.attention.map { "\(who) 问：\($0)" } ?? "")
         case .review:
-            if let s = reviewSummary, !s.isEmpty { return (need.label, s) }
-            if let t { return (need.label, "\(who) 已就绪" + (t.ticket.reportSummary.isEmpty ? "" : "：\(t.ticket.reportSummary)")) }
-            return (need.label, "清单项都完成了，等你通过或打回")
+            if let s = reviewSummary, !s.isEmpty {
+                let reviewer = tickets.last { $0.ticket.reviewOf != nil && $0.ticket.status == .done }
+                return (need.label, (reviewer.map { "工单 #\($0.id) 回报：" } ?? "评审回报：") + s)
+            }
+            if let t { return (need.label, report(t.ticket.reportSummary, or: "已就绪")) }
+            return (need.label, "清单项都完成了，等你完成任务或打回")
         case .blocked:
             if let c = syncConflicts.first { // 组织同步冲突（第 3 期）：两边改成不同状态，人定一边
                 return ("同步冲突", c.line + (syncConflicts.count > 1 ? "（还有 \(syncConflicts.count - 1) 处）" : ""))
             }
-            if let t { return (need.label, "\(who) 受阻" + (t.ticket.reportSummary.isEmpty ? "" : "：\(t.ticket.reportSummary)")) }
+            if let link = handbackNeed { // 退回（4A）：指向新任务，人知道下一步点哪里
+                let state = handbackTarget.map { $0.unassignedCount > 0 ? "等你定谁来做" : $0.stateTag.text } ?? "等你定谁来做"
+                return (need.label, "工单 #\(link.ticketID) 退回了一件事 → 已成为任务 A-\(link.toTaskID)，\(state)")
+            }
+            if let t { return (need.label, report(t.ticket.reportSummary, or: "受阻")) }
             let ords = items.filter { $0.status == .blocked }.map(\.ord)
             return (need.label, ords.isEmpty ? "有清单项受阻" : "\(WorklistText.ords(ords))受阻，没有工单在做")
-        case .failed: return (need.label, t.map { "\(who) 失败" + ($0.ticket.reportSummary.isEmpty ? "" : "：\($0.ticket.reportSummary)") } ?? "")
+        case .failed: return (need.label, t.map { report($0.ticket.reportSummary, or: "失败") } ?? "")
         case .delivery: return (need.label, t.flatMap { $0.ticket.deliveryError }.map { "\(who)：\($0)" } ?? "")
         case .stalled: return (need.label, "\(who) 停下了，没有回报")
         }
+    }
+
+    /// 退回（设计评审 2026-11-08，4A）：第一件需要你的事是受阻，而受阻的那一项已被工单退回成了新任务 → 条改说退回。
+    /// 有打开的工单正报着受阻（它剩下的项）时条先说它的回报——补充 / 重试在那里；退回的那项在清单里仍写「→ A-13」。
+    var handbackNeed: HandbackLink? {
+        guard needsYou.first == .blocked, syncConflicts.isEmpty, ticket(needing: .blocked) == nil else { return nil }
+        for i in items where i.status == .blocked && i.ticketID == nil { if let link = handback(of: i) { return link } }
+        return nil
+    }
+
+    /// 这一项被退回成了哪个任务（同一项退回过几次取最后一条）；做完了的项不算（新任务完成时引擎回填，它就是普通的完成）。
+    func handback(of item: Item) -> HandbackLink? {
+        guard item.status != .done else { return nil }
+        return handbacks.last { $0.itemOrd == item.ord }
+    }
+
+    /// 头卡的元信息一行（设计评审 2026-11-08，Pass 4）：「来源 主管 · 范围 payment-service · 负责人 你 · 截止 周四 · 优先级 高」。
+    /// 可点的（依赖、组织 T-128、退回来源）另做 chip，不在这行；触发器 id（t88040）不上卡，进决定记录。
+    func metaLine(now: Date = Date()) -> String {
+        var parts: [String] = []
+        switch task.source {
+        case .org: break // 有可点的 chip
+        case .handback where handbackOrigin != nil: break // 同上；没绑定原任务的退回没有 chip，这行写来源
+        default: parts.append("来源 \(task.source.label)")
+        }
+        if !task.scope.isEmpty { parts.append("范围 \(WorklistSections.projectName(task.scope))") }
+        parts.append("负责人 \(task.owner)")
+        if let due = task.due { parts.append("截止 \(DueText.long(due, now: now))") }
+        if task.priority != .medium { parts.append("优先级 \(task.priority.label)") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// 任务卡页头的状态行（设计评审 2026-11-08，Pass 1；替掉那句说明）：「更新于 刚刚 · 工单 #12 · 分支 tfa/12」，
+    /// 结束态前缀「已完成 · 」。只列打开的工单和它们的分支。
+    func headerStatus(now: Date = Date()) -> String {
+        var parts: [String] = []
+        if !task.isOpen { parts.append(task.status.label) }
+        parts.append("更新于 \(WorklistText.ago(task.updatedAt, now: now))")
+        let open = tickets.filter { $0.ticket.isOpen }
+        if !open.isEmpty { parts.append("工单 " + open.map { "#\($0.id)" }.joined(separator: "、")) }
+        var branches: [String] = []
+        for b in open.map(\.ticket.branch) where !b.isEmpty && !branches.contains(b) { branches.append(b) }
+        if !branches.isEmpty { parts.append("分支 " + branches.joined(separator: "、")) }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -186,6 +243,17 @@ enum WorklistText {
     /// 定时任务到点后谁来做（`Schedule.assignee`）：空 = 待分配。
     static func scheduleAssignee(_ raw: String) -> String {
         raw.isEmpty ? "待分配" : raw
+    }
+
+    private static let day: DateFormatter = { let f = DateFormatter(); f.dateFormat = "M月d日 HH:mm"; return f }()
+
+    /// 相对时间（页头状态行）：「刚刚」「3 分钟前」「2 小时前」，更早显示「M月d日 HH:mm」。
+    static func ago(_ t: Double, now: Date = Date()) -> String {
+        let d = now.timeIntervalSince1970 - t
+        if d < 60 { return "刚刚" }
+        if d < 3600 { return "\(Int(d / 60)) 分钟前" }
+        if d < 86400 { return "\(Int(d / 3600)) 小时前" }
+        return day.string(from: Date(timeIntervalSince1970: t))
     }
 }
 

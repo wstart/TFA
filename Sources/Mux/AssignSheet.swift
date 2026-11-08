@@ -23,7 +23,7 @@ enum AssignHeuristic {
     }
 }
 
-/// 「将开 N 张工单：开发（第 1–3 项）、助理（第 5 项）」的预告（纯函数，可测）。
+/// 「将开 N 张工单：开发（第 1–3 项）、助理（第 5 项）」的预告和底部的后果预览（纯函数，可测）。
 enum AssignPreview {
     /// `allocations` = 这次要交给 Agent 的项（ord → 角色）；`oneTicket` 为真时同一角色合成一张。
     static func text(_ allocations: [(ord: Int, role: String)], oneTicket: Bool) -> String {
@@ -35,6 +35,38 @@ enum AssignPreview {
         }
         return "将开 \(groups.count) 张工单：" + groups.map { "\($0.role)（\(WorklistText.ords($0.ords))）" }.joined(separator: "、")
     }
+
+    /// 底部一行后果预览（设计评审 2026-11-08，Pass 2）：「确认后：第 4 项归你；第 1–3 项交给开发（1 张工单）；改第 2 项的文字；
+    /// 第 5 项已在工单 #13 排队，不变；会停掉工单 #9 的终端」。`changes` = 执行者变了的项；`queued` = 没动、仍在排队的项；
+    /// `stopping` = 改派会停掉的工单。什么都没变为 nil。
+    static func consequence(changes: [(ord: Int, to: Assignee)], oneTicket: Bool, edited: [Int] = [],
+                            queued: [(ord: Int, ticket: Int64)] = [], stopping: [Int64] = []) -> String? {
+        var parts: [String] = []
+        let yours = changes.filter { $0.to == .you }.map(\.ord)
+        if !yours.isEmpty { parts.append("\(WorklistText.ords(yours))归你") }
+        var roles: [(role: String, ords: [Int])] = []
+        for c in changes.sorted(by: { $0.ord < $1.ord }) {
+            guard let role = c.to.role else { continue }
+            if let i = roles.firstIndex(where: { $0.role == role }) { roles[i].ords.append(c.ord) } else { roles.append((role, [c.ord])) }
+        }
+        for r in roles {
+            parts.append("\(WorklistText.ords(r.ords))交给\(r.role)（\(oneTicket ? 1 : r.ords.count) 张工单）")
+        }
+        let dropped = changes.filter { $0.to == .unassigned }.map(\.ord)
+        if !dropped.isEmpty { parts.append("\(WorklistText.ords(dropped))回到待分配") }
+        if !edited.isEmpty { parts.append("改\(WorklistText.ords(edited))的文字") }
+        for q in queued.sorted(by: { $0.ord < $1.ord }) { parts.append("第 \(q.ord) 项已在工单 #\(q.ticket) 排队，不变") }
+        if !stopping.isEmpty { parts.append("会停掉工单 " + stopping.map { "#\($0)" }.joined(separator: "、") + " 的终端") }
+        return parts.isEmpty ? nil : "确认后：" + parts.joined(separator: "；")
+    }
+
+    /// 改派会停掉的工单（引擎 `assign`，注意事项 C-03）：只有它名下没做完的项**全部**被改派走才停；还剩项就继续做，
+    /// 只是告诉它哪项不用做了。`reassigned` = 这次换了执行者的项的序号，`open` = 还开着的工单。按工单号升序。
+    static func stopping(items: [Item], reassigned: Set<Int>, open: Set<Int64>) -> [Int64] {
+        var held: [Int64: [Item]] = [:]
+        for i in items where i.status != .done { if let id = i.ticketID, open.contains(id) { held[id, default: []].append(i) } }
+        return held.filter { $0.value.allSatisfy { reassigned.contains($0.ord) } }.keys.sorted()
+    }
 }
 
 struct AssignSheet: View {
@@ -43,6 +75,8 @@ struct AssignSheet: View {
     let view: TaskView
     /// 角色（按 `tfa read roles` 顺序）：分段控件的选项、只读提示。
     let roles: [Role]
+    /// 打开时定位到这一项（退回条的「改派第 N 项…」，4A）：滚到它、浅浅着色。
+    let focusOrd: Int?
     @State private var rows: [Row]
     @State private var initial: [Row]
     @State private var oneTicket = true
@@ -59,9 +93,10 @@ struct AssignSheet: View {
 
     /// 默认值在这里算好（sheet 按内容定大小，不能等 onAppear）：`Item.assignee` 有值就用它，否则按启发式；
     /// 启发式给的角色不存在就退到你。
-    init(view: TaskView, roles: [Role]) {
+    init(view: TaskView, roles: [Role], focusOrd: Int? = nil) {
         self.view = view
         self.roles = roles
+        self.focusOrd = focusOrd
         let rows = view.items.map { item -> Row in
             var to = item.assignee
             if to == .unassigned {
@@ -80,9 +115,14 @@ struct AssignSheet: View {
         for r in rows where r.to.isAgent && !list.contains(r.to) { list.append(r.to) }
         return list
     }
+    /// 已完成的项合成一行「第 1–3 项已完成，不能改派」，不占一行一个。
+    private var doneOrds: [Int] { rows.filter { $0.item.status == .done }.map(\.item.ord) }
+    private var openRows: [Row] { rows.filter { $0.item.status != .done } }
     /// 每行定高（带提示的高一些），滚动区按行数定高：sheet 不会把滚动区挤成 0。
     private var listHeight: CGFloat {
-        min(rows.reduce(CGFloat(0)) { $0 + rowHeight($1) } + CGFloat(max(rows.count - 1, 0)), 420)
+        let rows = openRows
+        let done: CGFloat = doneOrds.isEmpty ? 0 : 28
+        return min(done + rows.reduce(CGFloat(0)) { $0 + rowHeight($1) } + CGFloat(max(rows.count - 1, 0)), 420)
     }
     private func rowHeight(_ r: Row) -> CGFloat { hintFor(r) == nil ? 48 : 66 }
     private var dirty: Bool { rows != initial }
@@ -104,6 +144,22 @@ struct AssignSheet: View {
         if changed.isEmpty { return "没有改动" }
         return nil
     }
+    /// 会被停掉的工单：名下没做完的项全被改派走的（`AssignPreview.stopping`），按工单号。
+    private var stoppingTickets: [Int64] {
+        let reassigned = Set(rows.filter { $0.item.status != .done && $0.to != $0.item.assignee }.map(\.item.ord))
+        return AssignPreview.stopping(items: view.items, reassigned: reassigned, open: Set(view.tickets.filter(\.ticket.isOpen).map(\.id)))
+    }
+    /// 底部的后果预览；什么都没变就不显示。
+    private var consequence: String? {
+        let changes = rows.filter { $0.item.status != .done && ($0.to != $0.item.assignee || redispatch($0)) }.map { (ord: $0.item.ord, to: $0.to) }
+        let edited = rows.filter { $0.item.status != .done && $0.text != $0.item.text }.map(\.item.ord)
+        let queued = rows.filter { r in r.item.status != .done && !changed.contains(r) }.compactMap { r -> (ord: Int, ticket: Int64)? in
+            guard let id = r.item.ticketID, view.ticket(id)?.stage == .working(queued: true) else { return nil }
+            return (r.item.ord, id)
+        }
+        guard !changes.isEmpty || !edited.isEmpty else { return nil }
+        return AssignPreview.consequence(changes: changes, oneTicket: oneTicket, edited: edited, queued: queued, stopping: stoppingTickets)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
@@ -111,24 +167,39 @@ struct AssignSheet: View {
             Text("每一项选你或某个角色的 Agent。默认是主管的建议，可以改。交给 Agent 的项会开工单；在哪个目录、能否改文件由角色决定。")
                 .font(.caption).foregroundStyle(Theme.textTertiary).fixedSize(horizontal: false, vertical: true)
             Hairline()
-            ScrollView {
-                VStack(spacing: 0) {
-                    ForEach($rows) { $row in
-                        itemRow($row)
-                        if row.id != rows.last?.id { Hairline() }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        if !doneOrds.isEmpty {
+                            Text("\(WorklistText.ords(doneOrds))已完成，不能改派")
+                                .font(.caption).foregroundStyle(Theme.textTertiary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .frame(height: 28)
+                                .padding(.leading, 18 + Theme.Space.md)
+                            if !openRows.isEmpty { Hairline() }
+                        }
+                        ForEach($rows) { $row in
+                            if row.item.status != .done {
+                                itemRow($row).id(row.id)
+                                if row.id != openRows.last?.id { Hairline() }
+                            }
+                        }
                     }
                 }
+                .frame(height: listHeight)
+                .onAppear {
+                    if let ord = focusOrd, let r = rows.first(where: { $0.item.ord == ord }) { proxy.scrollTo(r.id, anchor: .center) }
+                }
             }
-            .frame(height: listHeight)
             Hairline()
-            HStack(spacing: Theme.Space.md) {
+            if !agentAllocations.isEmpty { // 合单开关只在会开工单时有意义；默认开
                 Toggle("同一角色的项合成一张工单", isOn: $oneTicket).toggleStyle(.switch).controlSize(.small)
-                Spacer()
-                Text(AssignPreview.text(agentAllocations, oneTicket: oneTicket))
-                    .font(.caption).foregroundStyle(Theme.textTertiary).lineLimit(2).multilineTextAlignment(.trailing)
             }
-            Text("交给 Agent 的项会开工单；在哪个目录、能否改文件由角色决定。")
-                .font(.caption).foregroundStyle(Theme.textTertiary)
+            if let consequence {
+                Text(consequence).font(.caption).foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(consequence)
+            }
             VStack(alignment: .leading, spacing: Theme.Space.sm) {
                 if let error {
                     Text(error).font(.caption).foregroundStyle(Theme.Status.error).textSelection(.enabled)
@@ -159,8 +230,8 @@ struct AssignSheet: View {
 
     private func itemRow(_ row: Binding<Row>) -> some View {
         let r = row.wrappedValue
-        let done = r.item.status == .done
         let hint = hintFor(r)
+        let focused = r.item.ord == focusOrd
         return VStack(alignment: .leading, spacing: Theme.Space.xs) {
             HStack(spacing: Theme.Space.md) {
                 Text("\(r.item.ord)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textTertiary)
@@ -168,10 +239,9 @@ struct AssignSheet: View {
                 TextField("一句话、可验证的结果", text: row.text)
                     .textFieldStyle(.plain)
                     .font(.callout)
-                    .foregroundStyle(done ? Theme.textTertiary : Theme.textPrimary)
-                    .disabled(done)
+                    .foregroundStyle(Theme.textPrimary)
                     .accessibilityLabel("第 \(r.item.ord) 项的文字")
-                SegmentedChoice(selection: row.to, options: options.map { ($0, $0.label) }, disabled: done)
+                SegmentedChoice(selection: row.to, options: options.map { ($0, $0.label) })
                     .accessibilityLabel("第 \(r.item.ord) 项谁来做")
             }
             if let hint {
@@ -179,17 +249,18 @@ struct AssignSheet: View {
             }
         }
         .frame(height: rowHeight(r))
+        .padding(.horizontal, focused ? Theme.Space.sm : 0)
+        .background(focused ? Theme.brand.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
     }
 
-    /// 已完成的项说明一下；交给只读角色而文字像要改文件时提示一句（D-08，不拦）；有工单的项改派会中断。
+    /// 交给只读角色而文字像要改文件时提示一句（D-08，不拦）；有工单的项改派会中断。
     private func hintFor(_ r: Row) -> String? {
-        if r.item.status == .done { return "已完成，不能改派" }
         if let role = r.to.role, let def = roles.first(where: { $0.name == role }), !def.edits,
            AssignHeuristic.looksLikeEdit(r.text) {
             return "这项看起来要改文件，「\(role)」只读"
         }
         if r.to != r.item.assignee, let id = r.item.ticketID, view.ticket(id)?.ticket.isOpen == true {
-            return "改派会停掉工单 #\(id)"
+            return stoppingTickets.contains(id) ? "改派会停掉工单 #\(id)" : "工单 #\(id) 继续做它剩下的项"
         }
         return nil
     }
@@ -212,9 +283,8 @@ struct AssignSheet: View {
 
     private func confirm() {
         guard problem == nil else { return }
-        let sessions = rows.filter { $0.item.status != .done && $0.to != $0.item.assignee }
-            .compactMap { r in r.item.ticketID.flatMap { view.ticket($0) } }
-            .filter { $0.ticket.isOpen && !$0.ticket.session.isEmpty }
+        let sessions = stoppingTickets.compactMap { view.ticket($0) }
+            .filter { !$0.ticket.session.isEmpty }
             .map(\.ticket.session)
         let unique = sessions.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
         if unique.isEmpty { perform() } else { interrupting = unique }

@@ -4,6 +4,17 @@ import Foundation
 // 人能看到的概念只有：任务、清单项、谁来做、工作流、需要你（注意事项 A-03）。
 
 /// 任务从哪来。
+/// 一次退回（handback）：任务 `fromTaskID` 的第 `itemOrd` 项被工单 `ticketID` 退回，成为新任务 `toTaskID`（设计评审 2026-11-08，4A）。
+public struct HandbackLink: Equatable, Hashable, Sendable {
+    public let fromTaskID: Int64
+    public let itemOrd: Int
+    public let ticketID: Int64
+    public let toTaskID: Int64
+    public init(fromTaskID: Int64, itemOrd: Int, ticketID: Int64, toTaskID: Int64) {
+        self.fromTaskID = fromTaskID; self.itemOrd = itemOrd; self.ticketID = ticketID; self.toTaskID = toTaskID
+    }
+}
+
 public enum TaskSource: String, CaseIterable, Sendable {
     case manual, router, rule, schedule, handback, org
 
@@ -276,6 +287,11 @@ public struct TaskView: Equatable, Sendable, Identifiable {
     public var reviewing: Bool
     /// 组织同步（第 3 期）：没裁决的同步冲突（同一项两边改成不同的非 done 状态），按 `ord`；本地任务恒为空。
     public var syncConflicts: [SyncConflict]
+    /// 退回链接（设计评审 2026-11-08，4A）：这个任务的哪些项被工单退回、成了哪个新任务（`fromTaskID == task.id`）；
+    /// 按新任务号升序，同一项退回过两次（前一个新任务被取消后又退回）时以最后一条为准。
+    public var handbacks: [HandbackLink] = []
+    /// 这个任务本身是退回产生的：来自哪个任务的第几项、哪张工单（`toTaskID == task.id`）；不是退回产生的为 nil。
+    public var handbackOrigin: HandbackLink?
 
     public init(task: WorkTask, items: [Item], tickets: [TicketView], needsYou: [PersonAction], reviewSummary: String? = nil, reviewing: Bool = false,
                 syncConflicts: [SyncConflict] = []) {
@@ -296,4 +312,17 @@ public struct TaskView: Equatable, Sendable, Identifiable {
     public var firstNeed: PersonAction? { needsYou.first }
     public func item(ord: Int) -> Item? { items.first { $0.ord == ord } }
     public func ticket(_ id: Int64) -> TicketView? { tickets.first { $0.id == id } }
+}
+
+/// 「完成任务…」确认单的数据（设计评审 2026-11-08，5A）：要合并的分支、没有分支的工单、没做完的项。目标分支由 App 用 git 算。
+public struct FinishPreview: Sendable {
+    /// 名下交付了的非评审工单，按工单号：已结束为 `done`（含退回结束的），或还开着但已报 ready——App 通过时合并的就是这一批。
+    /// `branch` 没有（常驻角色、还没启动）为 nil。
+    public var tickets: [(ticketID: Int64, branch: String?, title: String)]
+    /// 还没完成的清单项序号（含退回出去、还在等新任务的项）。
+    public var unfinishedOrds: [Int]
+
+    public init(tickets: [(ticketID: Int64, branch: String?, title: String)], unfinishedOrds: [Int]) {
+        self.tickets = tickets; self.unfinishedOrds = unfinishedOrds
+    }
 }

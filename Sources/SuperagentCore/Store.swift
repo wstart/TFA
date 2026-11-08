@@ -682,6 +682,21 @@ public final class SuperagentStore {
         }
     }
 
+    /// 退回链接（设计评审 2026-11-08，4A）：不加列，存 kv `task.handback.<新任务>` = `"<原任务>:<序号>:<工单>"`。
+    /// 全部读出、按新任务号升序（同一项退回过两次时，后一条是现行的）。
+    public func handbackLinks() throws -> [HandbackLink] {
+        try db.query("SELECT key,value FROM kv WHERE key LIKE 'task.handback.%' ORDER BY key").compactMap { r in
+            let parts = r.text(1).split(separator: ":").map(String.init)
+            guard let to = Int64(r.text(0).dropFirst("task.handback.".count)), parts.count == 3,
+                  let from = Int64(parts[0]), let ord = Int(parts[1]), let ticket = Int64(parts[2]) else { return nil }
+            return HandbackLink(fromTaskID: from, itemOrd: ord, ticketID: ticket, toTaskID: to)
+        }.sorted { $0.toTaskID < $1.toTaskID }
+    }
+
+    func saveHandbackLink(_ l: HandbackLink) throws {
+        try setKV("task.handback.\(l.toTaskID)", "\(l.fromTaskID):\(l.itemOrd):\(l.ticketID)")
+    }
+
     public func settings() throws -> Settings {
         var s = Settings()
         if let v = try kvInt("settings.slots") { s.slots = max(1, min(8, v)) }

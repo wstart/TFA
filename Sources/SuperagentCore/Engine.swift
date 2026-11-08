@@ -288,10 +288,23 @@ public final class SuperagentEngine {
         }
     }
 
+    /// `handback` 的结果。
+    public struct HandbackResult: Equatable, Sendable {
+        /// 新任务 `A-<id>`；工单不属于任务时是候选 `t<id>`。
+        public var ref: String
+        /// 等新任务完成的那一项（工作清单 4A）；没绑定（候选路径，或工单的项都已完成）为 nil。
+        public var itemOrd: Int?
+        /// 工单没有剩下的项，已结束。
+        public var ticketEnded: Bool
+        /// 工单剩下还没完成、仍归它的项。
+        public var remaining: [Int]
+    }
+
     /// 退回一个超出本工单范围（或属于别的工单）的请求：成为主管的新候选；属于任务的工单则成为**新任务**
-    /// （返回 `A-<id>`，注意事项 C-08），否则返回候选 `t<id>`。
+    /// （`ref = A-<id>`，注意事项 C-08），并把原工单的第 `item` 项（省略 = 它唯一没完成的项）绑给新任务等它完成
+    /// （设计评审 2026-11-08，4A；见 `handbackToTask`）；否则 `ref` 是候选 `t<id>`。
     @discardableResult
-    public func handback(_ id: Int64, request: String, reason: String) throws -> String {
+    public func handback(_ id: Int64, request: String, reason: String, item: Int? = nil) throws -> HandbackResult {
         let request = request.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !request.isEmpty else { throw SuperagentError("缺少要退回的请求原文") }
         guard !reason.isEmpty else { throw SuperagentError("缺少一句退回原因") }
@@ -299,14 +312,15 @@ public final class SuperagentEngine {
             let t = try requireTicket(id)
             guard t.status == .open else { throw SuperagentError("工单 #\(id) 已经结束，不能退回") }
             let at = now()
-            if let task = try handbackToTask(t, request: request, reason: reason, at: at) { return task.label }
+            if let r = try handbackToTask(t, request: request, reason: reason, item: item, at: at) { return r }
+            if item != nil { throw SuperagentError("这张工单不属于任务，没有清单项；不要带 --item") }
             let trigger = Trigger(id: try store.nextTriggerID(), source: "handback:#\(id)", strength: .explicit, text: request,
                                   repo: t.repo, status: .pending, ticketID: nil, createdAt: at)
             try store.insertTrigger(trigger)
             try store.log(id, "handback", "退回 \(trigger.id)：\(reason)", at: at)
             try queueRelay(id, "[TFA] 工单 #\(id) 退回了一个超出范围的请求（候选 \(trigger.id)）：\(Self.clip(request, 300))；原因：\(Self.clip(reason, 120))。"
                            + "接单用 tfa route accept --trigger \(trigger.id) --role … --title …，不接用 tfa route ignore --trigger \(trigger.id) --reason …；不要挂回 #\(id)。", at: at)
-            return trigger.id
+            return HandbackResult(ref: trigger.id, itemOrd: nil, ticketEnded: false, remaining: [])
         }
     }
 
@@ -634,6 +648,15 @@ public final class SuperagentEngine {
         try store.saveTicket(t)
         if let a = try store.latestAssignment(t.id), a.state != .ended { try store.setAssignment(a.id, state: .ended, at: at, reason: status.rawValue) }
         try store.dropEffect(.notify, String(t.id))
+    }
+
+    /// 退回后没有剩下的项（工作清单 4A）：工单结束（`endedBy = 退回`），状态同交付——它分支上已完成项的提交留着，
+    /// 任务完成时和别的工单一起合并。不发 .stop：执行者从 `tfa handback` 的输出得知工单已结束。
+    func endByHandback(_ t: inout Ticket, at: Double) throws {
+        try end(&t, .done, by: "退回", at: at)
+        try store.dropUndelivered(t.id)
+        try store.dropEffect(.deliver, String(t.id))
+        try store.dropEffect(.launch, String(t.id))
     }
 
     private func reopen(_ t: inout Ticket, by: String) throws {

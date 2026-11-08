@@ -360,17 +360,25 @@ public enum TFACommand {
 
     private static func handback(_ args: ArraySlice<String>, _ c: Context) throws -> Outcome {
         let cmd = "handback"
-        let a = try parse(args, cmd, values: ["ticket", "reason", "request"])
+        let a = try parse(args, cmd, values: ["ticket", "reason", "request", "item"])
         try noPositional(a, cmd)
         guard let reason = a.value("reason") else { throw CLIError.usage("缺少 --reason（一句退回原因）", command: cmd) }
         guard let request = a.value("request") ?? c.piped() else {
             throw CLIError.usage("缺少 --request（要退回的请求原文；也可从 stdin 传入）", command: cmd)
         }
+        // 工作清单 4A：退回绑定本工单的第 n 项（只剩一项没完成时可省略）；项不归这张工单时由引擎报错。
+        let item = try a.value("item").map { v -> Int in
+            guard let n = Int(v), n > 0 else { throw CLIError.usage("--item 要写清单项序号（整数，从 1 起）：\(v)", command: cmd) }
+            return n
+        }
         let id = try c.workerTicket(a, cmd)
         // 属于任务的工单退回 → 新任务 A-N 等人分配（注意事项 C-08）；其余 → 主管的候选 tN。
-        let ref = try c.engine().handback(id, request: request, reason: reason)
-        if ref.hasPrefix("A-") { return Outcome(out: "已退回：成为新任务 \(ref)，等人定谁来做；不要在本工单里做它。\n", changed: true) }
-        return Outcome(out: "已退回：候选 \(ref)，由主管决定是否接单；不要在本工单里做它。\n", changed: true)
+        let r = try c.engine().handback(id, request: request, reason: reason, item: item)
+        guard r.ref.hasPrefix("A-") else { return Outcome(out: "已退回：候选 \(r.ref)，由主管决定是否接单；不要在本工单里做它。\n", changed: true) }
+        guard let ord = r.itemOrd else { return Outcome(out: "已退回：成为新任务 \(r.ref)，等人定谁来做；不要在本工单里做它。\n", changed: true) }
+        var out = "已退回：成为新任务 \(r.ref)，等人定谁来做；第 \(ord) 项等它完成后自动勾掉，不要在本工单里做它。"
+        out += r.ticketEnded ? "本工单没有剩下的项，已结束，停止工作。\n" : "你剩下的是\(SuperagentEngine.ordLabel(r.remaining))，继续做。\n"
+        return Outcome(out: out, changed: true)
     }
 
     // MARK: - 参数
@@ -517,8 +525,9 @@ public enum TFACommand {
               usage: "tfa report --state progress|ready|blocked|failed|dropped --summary 摘要 [--ask 一个问题] [--report 文件] [--item n]",
               about: "结构化回报；要人决定就加 --ask（ready / dropped 不能带）。属于任务的工单做完一项可加 --item n 勾掉第 n 项（可选），ready 勾掉全部",
               worker: true),
-        Entry(command: "handback", usage: "tfa handback --reason 原因 [--request 原文]",
-              about: "退回超出本工单范围的请求：属于任务的工单退成新任务等人分配，否则成为主管的新候选", worker: true),
+        Entry(command: "handback", usage: "tfa handback --reason 原因 [--request 原文] [--item n]",
+              about: "退回超出本工单范围、要先由别人做的请求：属于任务的工单退成新任务等人分配，你的第 n 项（只剩一项没完成时可省略）停下等它，新任务完成后自动勾掉；没有剩下的项时本工单结束。不属于任务的工单成为主管的新候选",
+              worker: true),
     ]
 
     private static func matches(_ e: Entry, _ command: String) -> Bool {

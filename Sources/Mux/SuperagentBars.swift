@@ -117,7 +117,8 @@ struct TicketBar: View {
         switch stage {
         case .person(.review):
             Button("打回…") { appModel.ticketFeedback = .init(ticketID: t.id, kind: .reject) }
-            Button(sa.merging.contains(t.id) ? "合并中…" : "通过") { sa.approve(t.id) }.buttonStyle(.borderedProminent)
+            // 工单级的通过写明对象（设计评审 2026-11-08，5A）：和任务卡上的「完成任务…」分得开。
+            Button(sa.merging.contains(t.id) ? "合并中…" : "通过工单 #\(t.id)") { sa.approve(t.id) }.buttonStyle(.borderedProminent)
                 .disabled(sa.merging.contains(t.id))
                 .help(t.branch.isEmpty ? "结单" : "把 \(t.branch) 合并进主仓库当前分支，然后结单")
         case .person(.answer):

@@ -651,11 +651,12 @@ private struct ToolDock: View {
 
     private var tools: [Tool] {
         [
-            // 主管 opens the work list with its bottom「设置」fold expanded (roles / rules / schedules live there now);
-            // the badge counts tasks that need you plus tickets outside any task (注意事项 B-03), never both for one thing.
-            Tool(id: "superagent", title: "主管", icon: "person.crop.rectangle.stack", selected: appModel.superagentSelected,
+            // 主管 opens the work list's settings sub-page at its 主管 segment (roles / rules / schedules live there now) and
+            // lights up while that page (or the fallback 主管 panel) is on screen; the badge counts tasks that need you plus
+            // tickets outside any task (注意事项 B-03), never both for one thing.
+            Tool(id: "superagent", title: "主管", icon: "person.crop.rectangle.stack", selected: appModel.superagentToolSelected,
                  badge: appModel.superagent.tasksNeedingYou.count + appModel.superagent.needsYouOutsideTasks.count) {
-                appModel.openWorklist(settings: true)
+                appModel.openWorklistSettings(.router)
             },
             Tool(id: "axis",    title: "模型",   icon: "cpu",                                selected: appModel.axisSelected)    { appModel.openAxis() },
             Tool(id: "tunnels", title: "隧道",   icon: "network.badge.shield.half.filled",   selected: appModel.tunnelsSelected) { appModel.openTunnels() },
@@ -1025,17 +1026,18 @@ private struct RouterRow: View {
 }
 
 /// The pinned「我的清单」row above 主管 (注意事项 F-01 / F-02): a 22px charcoal badge with the
-/// `list.bullet.clipboard` glyph, 「我的清单」 in `rowTitle`, one subtitle line — 「N 件需要你」(amber) /
-/// 「N 件进行中」/「清单是空的」— and an amber count capsule in the signal column while tasks need you
-/// (nothing else there: the equalizer belongs to terminals). While the list is on screen the row shows the
-/// 3px charcoal bar a tool pane's row gets. Tapping opens the list.
+/// `list.bullet.clipboard` glyph, 「我的清单」 in `rowTitle`, one subtitle line — 「N 件需要你」(amber) >
+/// 「N 件待分配」(stone, 设计评审 2026-11-08 1A) > 「N 件进行中」> 「清单是空的」— and an amber count capsule in the
+/// signal column while tasks need you (nothing else there: the equalizer belongs to terminals; 待分配 gets no
+/// capsule). While the list is on screen the row shows the 3px charcoal bar a tool pane's row gets. Tapping opens the list.
 private struct WorklistRow: View {
     @Environment(AppModel.self) private var appModel
 
     var body: some View {
         let sa = appModel.superagent
         let needs = sa.tasksNeedingYou.count
-        let open = sa.openTasks.count
+        let subtitle = WorklistSidebarText.subtitle(needs: needs, unassigned: sa.unassignedTasks.count, open: sa.openTasks.count,
+                                                    available: appModel.worklistAvailable)
         HStack(spacing: Theme.Space.md) {
             Image(systemName: "list.bullet.clipboard")
                 .font(.system(size: 11, weight: .semibold))
@@ -1045,14 +1047,12 @@ private struct WorklistRow: View {
             VStack(alignment: .leading, spacing: Theme.Space.xxs) {
                 Text("我的清单").font(Theme.Font.rowTitle).foregroundStyle(Theme.textPrimary).lineLimit(1)
                 Group {
-                    if needs > 0 {
-                        Text("\(needs) 件需要你").foregroundStyle(Theme.Status.attention)
-                    } else if open > 0 {
-                        Text("\(open) 件进行中").foregroundStyle(.secondary)
-                    } else if !appModel.worklistAvailable {
-                        Text("迁移失败 · 先用主管面板").foregroundStyle(.tertiary) // 注意事项 K-05：原因在面板顶部
+                    if subtitle.attention {
+                        Text(subtitle.text).foregroundStyle(Theme.Status.attention)
+                    } else if sa.openTasks.isEmpty {
+                        Text(subtitle.text).foregroundStyle(.tertiary) // 清单是空的 / 迁移失败（注意事项 K-05：原因在面板顶部）
                     } else {
-                        Text("清单是空的").foregroundStyle(.tertiary)
+                        Text(subtitle.text).foregroundStyle(.secondary)
                     }
                 }
                 .font(Theme.Font.rowSubtitle)
@@ -1081,7 +1081,7 @@ private struct WorklistRow: View {
         .help("我的清单：先定谁来做，需要你的事在最上面")
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(needs > 0 ? "我的清单，\(needs) 件需要你" : open > 0 ? "我的清单，\(open) 件进行中" : "我的清单，清单是空的")
+        .accessibilityLabel("我的清单，\(subtitle.text)")
         .accessibilityAction { appModel.openWorklist() }
     }
 }

@@ -31,9 +31,13 @@ extension Views {
         var s = "\(t.label) [\(tag)] \(t.title) · \(v.doneCount)/\(v.totalCount) · \(who)"
         if v.reviewing { s += " · 自动评审中" }
         if !t.scope.isEmpty { s += " · \(t.scope)" }
+        if let o = v.handbackOrigin { s += " · \(origin(o))" }
         if let q = v.tickets.first(where: { $0.ticket.isOpen && $0.ticket.attention != nil })?.ticket.attention { s += " · 问：\(clip(q, 80))" }
         return s
     }
+
+    /// 退回产生的任务的来源（设计评审 2026-11-08，4A）：`来自 A-12 的退回（工单 #13）`。
+    static func origin(_ o: HandbackLink) -> String { "来自 A-\(o.fromTaskID) 的退回（工单 #\(o.ticketID)）" }
 
     /// `任务（需要你 N / 进行中 M / 待分配 K）：` + 每个打开的任务一行；没有打开的任务 → nil。
     static func taskSummary(_ views: [TaskView]) -> String? {
@@ -69,7 +73,7 @@ extension Views {
         let v = try engine.taskView(id)
         let t = v.task
         var s = "\(t.label)「\(t.title)」 \(t.isOpen ? t.stage : t.status.label)\(v.reviewing ? "（自动评审中）" : "")\n"
-        var meta = ["来源 \(t.source.label)\(t.sourceRef.map { "（\($0)）" } ?? "")", "优先级 \(t.priority.label)"]
+        var meta = [v.handbackOrigin.map(origin) ?? "来源 \(t.source.label)\(t.sourceRef.map { "（\($0)）" } ?? "")", "优先级 \(t.priority.label)"]
         if let d = t.due { meta.append("截止 \(day(d))") }
         if !t.deps.isEmpty { meta.append("依赖 " + t.deps.map { "A-\($0)" }.joined(separator: "、")) }
         s += meta.joined(separator: " · ") + "\n"
@@ -79,7 +83,7 @@ extension Views {
 
         s += "\n【原文】\n\(t.request)\n"
         if !t.note.isEmpty { s += "\n【路由备注】\(t.note)\n" }
-        s += "\n【清单】\(v.doneCount)/\(v.totalCount)：\n" + v.items.map { itemLine($0) + "\n" }.joined()
+        s += "\n【清单】\(v.doneCount)/\(v.totalCount)：\n" + v.items.map { itemLine($0, handbacks: v.handbacks) + "\n" }.joined()
         if !v.tickets.isEmpty {
             s += "\n【工单】\(v.tickets.count) 张：\n"
             for tv in v.tickets {
@@ -100,10 +104,12 @@ extension Views {
     }
 
     /// `3. 改为分段加锁，跑回归 · 开发 · #12 · 工作中`：`Item.line` 之后是执行者、工单号、状态词；没分配的项只标「待分配」。
-    static func itemLine(_ i: Item) -> String {
+    /// 退回出去、在等新任务的项（4A）状态词写 `→ A-13`。
+    static func itemLine(_ i: Item, handbacks: [HandbackLink] = []) -> String {
         guard i.assignee != .unassigned else { return i.line + " · 待分配" }
         var s = i.line + " · " + i.assignee.label
         if let id = i.ticketID { s += " · #\(id)" }
+        if i.status == .blocked, let link = handbacks.last(where: { $0.itemOrd == i.ord }) { return s + " · → A-\(link.toTaskID)" }
         return s + " · " + i.status.label
     }
 

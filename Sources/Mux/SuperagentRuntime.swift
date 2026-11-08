@@ -37,6 +37,8 @@ final class SuperagentRuntime {
     private(set) var setupError: String?
     /// 「我的清单」可用：启动时的工单 → 任务迁移成功。失败时首屏回退到旧的主管面板（注意事项 K-05）。
     private(set) var worklistAvailable = true
+    /// 首个快照已到（`start()` 跑完；库打不开也算）：之前清单页什么都不画，免得空态闪一下（设计评审 2026-11-08，Pass 2）。
+    var loaded = false
 
     var needsYou: [TicketView] {
         views.filter { $0.stage.needsPerson != nil }.sorted { ($0.stage.needsPerson!, -$0.id) < ($1.stage.needsPerson!, -$1.id) }
@@ -52,6 +54,8 @@ final class SuperagentRuntime {
     }
     /// 打开的任务；组织的待领取占位行（`syncState == "claimable"`，第 3 期）还不是你的任务，不算在内（侧栏计数、依赖候选都用这个）。
     var openTasks: [TaskView] { tasks.filter { $0.task.isOpen && $0.task.syncState != "claimable" } }
+    /// 待分配的任务（设计评审 2026-11-08，1A）：打开、不需要你、还有没定谁来做的项——侧栏「N 件待分配」，不着琥珀、不计打扰。
+    var unassignedTasks: [TaskView] { openTasks.filter { $0.needsYou.isEmpty && $0.unassignedCount > 0 } }
     func task(_ id: Int64) -> TaskView? { tasks.first { $0.id == id } }
     /// 某张工单所属的任务。
     func task(ofTicket id: Int64) -> TaskView? {
@@ -121,12 +125,14 @@ final class SuperagentRuntime {
             engine = SuperagentEngine(store: try store ?? SuperagentStore())
         } catch {
             setupError = "工单数据库打不开：\(error)"
+            loaded = true
             return
         }
         migrateTasks()
         reader = (try? SuperagentStore(url: engine!.store.url)).map { SuperagentEngine(store: $0) }
         if installTools { installSupport() }
         reload()
+        loaded = true
         let name = SuperagentPaths.changedNotification
         notify_register_dispatch(name, &notifyToken, DispatchQueue.main) { [weak self] (_: Int32) in
             MainActor.assumeIsolated { self?.kick() }
@@ -219,7 +225,11 @@ final class SuperagentRuntime {
     func approve(_ id: Int64) -> Task<Void, Never> {
         Task { @MainActor in
             guard let engine = self.engine, !self.merging.contains(id), let t = try? engine.store.ticket(id), t.isOpen else { return }
-            guard !t.branch.isEmpty else { return self.act { try $0.approve(id) } }
+            let task = self.task(ofTicket: id)?.id
+            guard !t.branch.isEmpty else {
+                if self.act(task: task, { try $0.approve(id) }), let task { self.noteEcho(task, "已通过 · 工单 #\(id)") }
+                return
+            }
             self.merging.insert(id)
             let message = "Merge \(t.branch) (#\(id) \(t.title))"
             let result = await Task.detached(priority: .userInitiated) {
@@ -227,14 +237,23 @@ final class SuperagentRuntime {
             }.value
             self.merging.remove(id)
             switch result {
-            case .success(let note): self.act { try $0.approve(id, merged: note) }
+            case .success(let note):
+                if self.act(task: task, { try $0.approve(id, merged: note) }), let task { self.noteEcho(task, "已通过 · 工单 #\(id)，\(note)") }
             case .failure(let e): self.mergeError = "工单 #\(id) 仍在待评审：\(e)"
             }
         }
     }
-    func feedback(_ id: Int64, _ text: String) { act { try $0.feedback(id, text: text) } }
-    func stop(_ id: Int64) { act { try $0.stop(id, by: "你") } }
-    func retry(_ id: Int64) { act { try $0.retry(id) } }
+    /// 回答 / 打回 / 补充：送成功就记下时刻（清单行显示「已发送 / 已送达」直到执行者回应）。
+    func feedback(_ id: Int64, _ text: String) {
+        guard act({ try $0.feedback(id, text: text) }) else { return }
+        followUps[id] = clock()
+        if let task = task(ofTicket: id)?.id { noteEcho(task, "已发送 · 工单 #\(id)") }
+    }
+    func stop(_ id: Int64) { act(task: task(ofTicket: id)?.id) { try $0.stop(id, by: "你") } }
+    func retry(_ id: Int64) {
+        let task = task(ofTicket: id)?.id
+        if act(task: task, { try $0.retry(id) }), let task { noteEcho(task, "已重试 · 工单 #\(id)") }
+    }
     func setRules(_ r: [Rule]) { act { try $0.setRules(r) } }
     func setMode(_ m: AcceptMode) { act { try $0.setMode(m) } }
     func setSchedules(_ s: [Schedule]) { act { try $0.setSchedules(s) } }
@@ -265,7 +284,7 @@ final class SuperagentRuntime {
     func editItem(_ taskID: Int64, ord: Int, text: String) { act { try $0.editItem(taskID, ord: ord, text: text) } }
     func removeItem(_ taskID: Int64, ord: Int) { act { try $0.removeItem(taskID, ord: ord) } }
     func assign(_ taskID: Int64, _ allocations: [SuperagentEngine.Allocation], oneTicket: Bool = true) {
-        act { _ = try $0.assign(taskID, allocations, oneTicket: oneTicket) }
+        if act({ _ = try $0.assign(taskID, allocations, oneTicket: oneTicket) }) { noteEcho(taskID, WorklistEchoText.assigned(allocations)) }
     }
     func setItemDone(_ taskID: Int64, ord: Int, done: Bool) { act { try $0.setItemDone(taskID, ord: ord, done: done) } }
 
@@ -277,11 +296,14 @@ final class SuperagentRuntime {
         Task { @MainActor in
             guard let engine = self.engine, !self.mergingTasks.contains(id), let task = try? engine.store.task(id), task.isOpen else { return }
             // 合并不可逆：只在待评审阶段做（点通过和合并之间任务可能被打回 / 加项回到进行中）。
-            guard task.stageKind == .review else { return self.act { try $0.approveTask(id) } }
+            guard task.stageKind == .review else { self.act(task: id) { try $0.approveTask(id) }; return }
             // 交付了的开发工单（含迁移进来、还开着等通过的旧工单）：有分支、角色能改文件；评审工单（`reviewOf`）只审不改，不合并。
             let tickets = ((try? engine.store.tickets(task: id)) ?? [])
                 .filter { ($0.status == .done || ($0.isOpen && $0.reportState == .ready)) && !$0.branch.isEmpty && $0.reviewOf == nil && self.role(for: $0).edits }
-            guard !tickets.isEmpty else { return self.act { try $0.approveTask(id) } }
+            guard !tickets.isEmpty else {
+                if self.act(task: id, { try $0.approveTask(id) }) { self.noteEcho(id, "已完成") }
+                return
+            }
             self.mergingTasks.insert(id)
             let result = await Task.detached(priority: .userInitiated) {
                 Result {
@@ -293,13 +315,21 @@ final class SuperagentRuntime {
             }.value
             self.mergingTasks.remove(id)
             switch result {
-            case .success(let notes): self.act { try $0.approveTask(id, merged: notes.joined(separator: "；")) }
+            case .success(let notes):
+                let merged = notes.joined(separator: "；")
+                if self.act(task: id, { try $0.approveTask(id, merged: merged) }) { self.noteEcho(id, "已完成 · \(merged)") }
             case .failure(let e): self.mergeError = "任务 A-\(id) 仍在待评审：\(e)"
             }
         }
     }
-    func rejectTask(_ id: Int64, _ text: String) { act { try $0.rejectTask(id, text: text) } }
-    func cancelTask(_ id: Int64) { act { try $0.cancelTask(id) } }
+    /// 打回任务：意见送到了哪些工单，它们排队的输入就是这次打回（清单行显示「已发送 / 已送达」直到执行者回应）。
+    func rejectTask(_ id: Int64, _ text: String) {
+        guard act({ try $0.rejectTask(id, text: text) }) else { return }
+        let at = clock()
+        for t in task(id)?.tickets ?? [] where t.ticket.isOpen && t.pendingInputs > 0 { followUps[t.id] = at }
+        noteEcho(id, "已打回")
+    }
+    func cancelTask(_ id: Int64) { act(task: id) { try $0.cancelTask(id) } }
     func annotateDecision(_ id: Int64, verdict: String?) { act { try $0.annotateDecision(id, verdict: verdict) } }
     func setWorkflow(_ w: Workflow) { act { try $0.setWorkflow(w) } }
     func deleteWorkflow(_ id: String) { act { try $0.deleteWorkflow(id) } }
@@ -315,11 +345,54 @@ final class SuperagentRuntime {
     /// 点「通过」却没能合并的原因（根视图弹窗显示，关掉后清空）。
     var mergeError: String?
 
-    private func act(_ body: (SuperagentEngine) throws -> Void) {
-        guard let engine else { return }
-        do { try body(engine) } catch { actionError = "\(error)" }
+    // MARK: 行内回声与按任务的错误（设计评审 2026-11-08，3A）
+
+    /// 按任务记的操作错误（清单行下方的砖红小字）。只有没有表单的动作写它——通过 / 重试 / 停止 / 取消 / 放弃；
+    /// 表单里的动作仍走 `actionError`（`attempt` 拿它给表单显示）。该任务下一次动作成功就清。
+    var actionErrors: [Int64: String] = [:]
+    /// 行内回声：任务 id → 一句话（「已完成 · 已把 tfa/12 合并到 main」），`echoSeconds` 后自动清。清单页读到新的回声就把那行原地停住，
+    /// 任务卡也显示它。动作调用方给文案；再调一次就覆盖并重新计时。
+    private(set) var actionEchoes: [Int64: String] = [:]
+    @ObservationIgnored var echoSeconds: Double = 6
+    @ObservationIgnored private var echoGeneration: [Int64: Int] = [:]
+    /// 人发出的跟进（回答 / 打回 / 补充）：工单 id → 时刻。执行者回报 / 提问、工单结束就清；清单行据此显示「已发送 / 已送达」。
+    private(set) var followUps: [Int64: Double] = [:]
+
+    func noteEcho(_ taskID: Int64, _ text: String) {
+        actionEchoes[taskID] = text
+        let gen = (echoGeneration[taskID] ?? 0) + 1
+        echoGeneration[taskID] = gen
+        let wait = echoSeconds
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(wait, 0) * 1_000_000_000))
+            guard let self, self.echoGeneration[taskID] == gen else { return }
+            self.actionEchoes[taskID] = nil
+            self.echoGeneration[taskID] = nil
+        }
+    }
+
+    /// 执行者回应了（新回报、提问、结单、工单没了）→ 不再显示「已送达」。
+    private func pruneFollowUps() {
+        for (id, at) in followUps {
+            let v = views.first { $0.id == id }
+            let waiting = v.map { $0.ticket.isOpen && $0.stage.needsPerson == nil && ($0.ticket.reportAt ?? 0) <= at } ?? false
+            if !waiting { followUps[id] = nil }
+        }
+    }
+
+    /// 跑一个写库操作。`task` 给了就把错误记到那个任务名下（行下方），否则记到 `actionError`（页顶 / 表单）。返回有没有成功。
+    @discardableResult
+    private func act(task: Int64? = nil, _ body: (SuperagentEngine) throws -> Void) -> Bool {
+        guard let engine else { return false }
+        var ok = true
+        do { try body(engine) } catch {
+            ok = false
+            if let task { actionErrors[task] = "\(error)" } else { actionError = "\(error)" }
+        }
+        if ok, let task { actionErrors[task] = nil }
         reload()
         kick()
+        return ok
     }
 
     /// 终端事件 → 候选（附最后几行输出）。
@@ -850,6 +923,7 @@ final class SuperagentRuntime {
         if s.interruptionsToday != interruptionsToday { interruptionsToday = s.interruptionsToday }
         if s.workflows != workflows { workflows = s.workflows }
         if s.accuracy != policyAccuracy { policyAccuracy = s.accuracy }
+        if !followUps.isEmpty { pruneFollowUps() }
     }
 
     /// 同步刷新：界面操作（`act`）之后立刻可见；测试也直接调。
@@ -964,7 +1038,7 @@ final class SuperagentRuntime {
     }
 
     /// 任务卡的「已放弃？」（注意事项 D-04）。
-    func dropTask(_ id: Int64) { act { try $0.dropTask(id) } }
+    func dropTask(_ id: Int64) { act(task: id) { try $0.dropTask(id) } }
 
     // MARK: - 组织同步（工作清单第 3 期；协议和循环在 OrgSync.swift，引擎侧在 EngineOrg.swift）
 

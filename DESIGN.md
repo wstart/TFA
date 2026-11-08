@@ -232,20 +232,27 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   tasks (one row each: stage tag, `A-12 标题`, the first thing it needs, 打开任务), then task-less
   tickets, then terminals.
 - **我的清单 row** — pinned above 主管: a 40pt row with a 22px charcoal badge (`list.bullet.clipboard`),
-  「我的清单」 in `rowTitle`, and one subtitle — 「N 件需要你」 (amber) > 「N 件进行中」 (stone) > 「清单是
-  空的」. The signal column carries an amber count capsule while tasks need you, else nothing (no
+  「我的清单」 in `rowTitle`, and one subtitle — 「N 件需要你」 (amber) > 「N 件待分配」 (stone) > 「N 件进行中」
+  (stone) > 「清单是空的」. The signal column carries an amber count capsule while tasks need you, else nothing (no
   equalizer — that is a terminal's). Tapping opens the list; while the list is on screen the row shows the
   3px charcoal bar a tool pane's row gets (the system List highlight belongs to terminal rows).
 - **清单行 (task row)** — a White card, Linen 1px, `md` radius, at least 52pt tall, 8/14 padding, 6pt
   between its lines; the whole card takes a 6% amber wash while the task needs you. Line 1: `A-12` in
   mono 11 stone + the title in `rowTitle` (truncated, full text in the tooltip) + a `StateTag` on the
-  right (tinted only when it needs you). Line 2: progress `3/5` (monospaced digits) · executor chips (你 /
-  开发 / 助理, deduplicated, at most 3) · the due date only within 3 days. The right end holds that stage's
-  one or two actions (the ticket bar's set: 回答… / 打回… + 通过 / 补充… + 重试; 待分配: 谁来做…); a row in
-  progress has no button.
-- **阶段条 (stage bar)** — one segment per stage, 32pt tall, `md` radius, 24pt Linen connectors between
-  segments. Current = Charcoal fill + ivory semibold text; passed = Cream + stone; ahead = White + Linen
-  stroke. Stages are never told apart by hue.
+  right (tinted only when it needs you; omitted when it would repeat the section's name). Line 2 is the one
+  sentence that lets the person decide without opening the card — the question / blocked reason / report
+  summary for 需要你, 「第 1–3 项还没定」 for 待分配, 「来自 A-12 的退回 · A-12 第 2 项在等它」 for a
+  handed-back task, the last report for 进行中 — followed by a stone relative time (「3 分钟前」). Progress
+  `3/5`, source and executor chips (deduplicated, at most 3) form a quieter third line only when the column is
+  ≥ 900pt wide, else they live in the tooltip. The right end holds that stage's one or two actions (回答… /
+  打回… + 完成任务… / 补充… (prominent) + 重试 / 待分配: 谁来做…); a row in progress has no button. After an
+  action the row echoes in place: 「已送达」 until the executor acks, 「已完成 · tfa/12 已合并到 main」 for
+  6 s before the row moves to 已完成; an action error is one brick caption under that row. Sections run
+  需要你 → 待分配 → 进行中 → 待领取 → 已完成.
+- **阶段步进 (stage stepper)** — one 24pt line under the task title inside the header card: 「待领取 › 进行中 ›
+  待评审 › 完成」. Current = Charcoal semibold with a 2px Charcoal underline; passed = stone; ahead = light
+  stone. It is status, so it is the lightest ink on the card — the heaviest belongs to the needs-you strip,
+  which sits directly under the header card, before the checklist. Stages are never told apart by hue.
 - **清单项行 (item row)** — 40pt, a Linen rule above; the ordinal in mono 11 (always `ord`, never an item
   id); a 22pt checkbox with 6pt corners: done = Charcoal fill + ivory check, working = a static half disc
   `◐`, todo = Cool Stone stroke, blocked = amber stroke + `hand.raised`. Your items are clickable
@@ -265,15 +272,20 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   invite code; registered: node id, status, 「立即同步」 + quiet 「断开…」 with a confirmation) uses the same
   `SettingRow` grammar as the other settings; the token is never shown.
 - **需要你条 (needs-you strip)** — 44pt, amber 6% fill + amber 1pt stroke, `md` radius, an 8pt amber
-  square at the left; the stage name in bold, then the question / report in one line; 1–2 actions on the
-  right (回答… / 打回… + 通过 / 补充… + 重试). One per card: the first `PersonAction` in declaration order,
-  the rest as a small 「还有 N 件：…」 line.
+  square at the left; the stage name in bold, then 「工单 #12 回报：…」 in one line; 1–2 actions on the right.
+  The prominent action is the one the person most likely needs: 回答…; 打回… + 完成任务…; 补充… (+ quiet
+  重试) for 受阻 / 停下未回报; 重试 only for 失败 / 送达失败. A handed-back item reads 「工单 #13 退回了一件事
+  → 已成为任务 A-13，等你定谁来做」 with 去分配 A-13… + 改派第 2 项…; 待评审 adds 看改动. One per card: the
+  first `PersonAction` in declaration order, the rest as a small 「还有 N 件：…」 line. 「完成任务…」 opens a
+  confirmation sheet listing the branches to merge → the target branch, tickets without a branch and
+  unfinished items; the ticket bar's ticket-level button is 「通过工单 #12」.
 - **谁来做 sheet** — 560pt wide; one row per item: ordinal, editable text, and a segmented control (你 +
   the roles in `tfa read roles` order; a Linen well with `md` corners, the chosen segment raised in White
   with a 1pt Linen ring — the 在线 / 已断开 switch). Defaults come from the 主管's `--suggest`, else the
-  heuristic (改 / 修 / 实现 / 提交 → 开发; 查 / 问 / 分析 / 总结 → 助理; otherwise 你). At the bottom a
-  「同一角色的项合成一张工单」 switch (on) and one line of explanation; ⌘↩ confirms, Esc cancels, and an
-  unconfirmed change on close asks save / discard / cancel.
+  heuristic (改 / 修 / 实现 / 提交 → 开发; 查 / 问 / 分析 / 总结 → 助理; otherwise 你). Finished items collapse
+  into one line 「第 1–3 项已完成，不能改派」. At the bottom a consequence line 「确认后：第 4 项归你；第 5 项已在
+  工单 #13 排队，不变；会停掉工单 #N 的终端」 and the 「同一角色的项合成一张工单」 switch (on; hidden while
+  nothing changes); ⌘↩ confirms, Esc cancels, and an unconfirmed change on close asks save / discard / cancel.
 - **在线 / 已断开 switch** — full-width segmented bar: a Linen well with the chosen half raised in white.
 - **Sidebar terminal row** — a 22px rounded-square **kind badge** (agents — axis-claude / Claude /
   Codex — solid Charcoal with an ivory glyph; shells and ssh a White chip with a Linen hairline;
@@ -295,9 +307,17 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   detail. Laid out in a 760pt column (two wide cards, then three small).
 - **Status capsule** (new-session sheet) — a 7px dot + caption on a 10% tint of the same status color.
 - **Tool dock** (主管 / 模型 / 隧道 / 规则 / Skills / 实验室) — sidebar bottom; equal-width icon+label cells,
-  selected = filled charcoal cell with ivory glyph (mirrors a selected row). 主管 opens the work list with
-  its 设置 fold expanded and carries a 7px amber dot (chrome ring) while a task, or a ticket outside any
+  selected = filled charcoal cell with ivory glyph (mirrors a selected row). 主管 opens the work list's 设置
+  page at its 主管 segment and carries a 7px amber dot (chrome ring) while a task, or a ticket outside any
   task, needs you.
+- **清单页头 / 设置页 (worklist header & settings page)** — the list's header is a status line, not a slogan:
+  「主管 运行中 · 今天打扰 0 / 8」 (「主管 未启动」 + a small 启动 button while it is down; the budget part
+  gains weight only past the budget), a search field, 「+ 任务」 and a quiet gear that opens the settings
+  page. Filters are their own row: a Linen-well segmented 「全部 | 今天 | 本周」 and a 「按项目」 menu. The
+  empty list (only after the first snapshot) says one sentence and offers 「启动主管 / 打开主管终端」 and
+  「+ 任务」. The settings page is a sibling of the task card (back chevron, Esc returns) with a segmented
+  index — 主管 · 组织 · 工作流 · 角色 · 规则 · 定时 · 其它 · 记录 — showing one group at a time; its cards keep the
+  `SettingRow` grammar.
 - **主管 row** — pinned under 我的清单: a 22px charcoal badge with the `person.crop.rectangle.stack`
   glyph, 「主管」 in `rowTitle`, and one subtitle line — 「N 个工单需要你」 (amber, only tickets outside any
   task: tasks are counted on the 我的清单 row) / 「N 个任务进行中 · 对我说一句就能加任务」 / 「未启动 ·
@@ -311,9 +331,11 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   truncated line, then the stage's actions (待评审: 打回… + prominent 通过; 等你回答: prominent 回答…;
   stuck: 补充… + prominent 重试; working: 补充…) and a quiet stop glyph. A needing stage tints the
   strip at 6%. The 主管 terminal gets the same strip with a one-line explanation and 工单面板.
-- **主管 panel** — tool pane in the 760pt column: 主管 card (status, folder, 打开/启动), then 需要你
-  (only when non-empty; one white card per ticket with its actions), 进行中 (compact rows), 问题 (only
-  when effects keep failing), 最近结束, rules & accept mode, schedules, settings, decision log.
+- **主管 panel** — the fallback tool pane (only while the ticket → task migration failed): 主管 card
+  (status, folder, 打开/启动), then 需要你 (only when non-empty; one white card per ticket with its actions),
+  进行中 (compact rows), 问题 (only when effects keep failing), 最近结束, rules & accept mode, schedules,
+  settings, decision log. Normally these same cards live in the worklist's settings page, one segment at a
+  time (主管 segment = the 主管 card + tickets outside any task).
 - **Status indicator** — shared spinner-or-glyph component; symbol + tint + VoiceOver label.
 - **Terminal header** — 40px: sidebar toggle, name (`headerTitle`), a state tag (运行中 sage / 需要你
   amber / 连接失败 brick / 空闲·已断开 stone, tinted 12% fill), a muted monospaced `~` path, then small

@@ -30,10 +30,13 @@ final class AppModel {
     /// True when the「主管」panel (Super-agent tickets / needs-you / rules) is shown in the detail area.
     var superagentSelected = false
     /// True when「我的清单」(the work list) is shown in the detail area; `worklistTaskID` = the task card pushed
-    /// inside it (nil = the list), `worklistShowsSettings` = open with the bottom「设置」fold expanded.
+    /// inside it (nil = the list), `worklistShowsSettings` = the settings sub-page is pushed instead of the list
+    /// (`WorklistSettingsPage`; back / Esc clear it).
     var worklistSelected = false
     var worklistTaskID: Int64?
     var worklistShowsSettings = false
+    /// 设置子页当前的段（设计评审 2026-11-08，2A）；`openWorklistSettings` 不给段就保持上次的。
+    var worklistSettingsSegment: WorklistSettingsSegment = .router
     /// The task-level follow-up being written (打回任务) — the sheet is hosted at the root.
     var taskFeedback: TaskFeedbackRequest?
     /// The follow-up being written for a ticket (打回 / 回答 / 补充) — the sheet is hosted at the root.
@@ -419,7 +422,16 @@ final class AppModel {
     /// 「我的清单」可用：启动时的工单 → 任务迁移成功。失败时清单页不开，回退到旧的主管面板（注意事项 K-05）。
     var worklistAvailable: Bool { superagent.worklistAvailable }
 
-    /// Show「我的清单」: the list, or one task's card (`task`), optionally scrolled to the settings fold.
+    /// 打开清单的设置子页（2A）：工具栏「主管」给 `.router`，清单页头的齿轮不给段、回到上次看的那段。
+    func openWorklistSettings(_ segment: WorklistSettingsSegment? = nil) {
+        if let segment { worklistSettingsSegment = segment }
+        openWorklist(settings: true)
+    }
+
+    /// 工具栏「主管」格高亮：清单的设置子页在屏幕上，或回退的主管面板在屏幕上。
+    var superagentToolSelected: Bool { superagentSelected || (worklistSelected && worklistShowsSettings) }
+
+    /// Show「我的清单」: the list, or one task's card (`task`), or the settings sub-page (`settings`).
     func openWorklist(task: Int64? = nil, settings: Bool = false) {
         guard worklistAvailable else { return openSuperagent() }
         clearToolPanes(); worklistSelected = true
@@ -1638,4 +1650,10 @@ final class AppModel {
         for conn in connections { conn.disconnect() }
         connections.removeAll()
     }
+}
+
+/// 清单设置子页的段（设计评审 2026-11-08，2A）：一次只显示一组。
+enum WorklistSettingsSegment: String, CaseIterable, Identifiable {
+    case router = "主管", org = "组织", workflow = "工作流", roles = "角色", rules = "规则", schedules = "定时", other = "其它", records = "记录"
+    var id: String { rawValue }
 }

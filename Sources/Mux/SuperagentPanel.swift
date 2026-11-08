@@ -1009,11 +1009,11 @@ private struct WorkflowSheet: View {
     }
 }
 
-// MARK: - 我的清单页底部的「设置」折叠区（需求文档 §9.1）
+// MARK: - 不属于任务的工单 / 决定记录（设置折叠区和设置子页共用）
 
-/// 主管面板的内容重组：主管终端、不属于任务的工单（旧工单、直接派的；注意事项 B-03）、问题、模板、角色、
-/// 规则、定时任务、设置、决定记录。属于任务的工单只在任务卡里出现。
-struct WorklistSettings: View {
+/// 不属于任务的工单（旧工单、直接派的；注意事项 B-03）：需要你的卡、进行中的行、最近结束（收起），再加连续失败的
+/// 副作用。属于任务的工单只在任务卡里出现。
+struct DirectTicketsSection: View {
     @Environment(AppModel.self) private var appModel
 
     var body: some View {
@@ -1025,25 +1025,55 @@ struct WorklistSettings: View {
             .sorted { ($0.ticket.endedAt ?? $0.ticket.updatedAt) > ($1.ticket.endedAt ?? $1.ticket.updatedAt) }
         let shown = Set(needs.filter { $0.stage == .person(.delivery) }.map { String($0.id) })
         let problems = sa.problems.filter { !(($0.kind == .launch || $0.kind == .deliver) && shown.contains($0.key)) }
-        VStack(alignment: .leading, spacing: Theme.Space.xl) {
-            RouterCard()
-            OrgCard() // 组织（第 3 期）：注册 / 断开 / 同步状态
-            if !direct.isEmpty {
-                PanelSection(title: "直接派给 Agent 的工单 · \(direct.count)") {
-                    ForEach(needs) { NeedsYouCard(item: $0) }
-                    if !working.isEmpty { RowList(items: working) { WorkingRow(item: $0) } }
-                    if !ended.isEmpty {
-                        Collapsible(title: "最近结束 · \(ended.count)") {
-                            RowList(items: ended) { EndedRow(item: $0) }
-                        }
+        if !direct.isEmpty {
+            PanelSection(title: "直接派给 Agent 的工单 · \(direct.count)") {
+                ForEach(needs) { NeedsYouCard(item: $0) }
+                if !working.isEmpty { RowList(items: working) { WorkingRow(item: $0) } }
+                if !ended.isEmpty {
+                    Collapsible(title: "最近结束 · \(ended.count)") {
+                        RowList(items: ended) { EndedRow(item: $0) }
                     }
                 }
             }
-            if !problems.isEmpty {
-                PanelSection(title: "问题") {
-                    RowList(items: problems.map(IdentifiedEffect.init)) { ProblemRow(effect: $0.effect) }
-                }
+        }
+        if !problems.isEmpty {
+            PanelSection(title: "问题") {
+                RowList(items: problems.map(IdentifiedEffect.init)) { ProblemRow(effect: $0.effect) }
             }
+        }
+    }
+}
+
+/// 决定记录全部展开（设置子页的「记录」段）；没有时一句话。面板和折叠区仍用收起的 `Collapsible`。
+struct DecisionLog: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        let sa = appModel.superagent
+        if sa.decisions.isEmpty {
+            Text("还没有决定记录。主管接单、不接、停止，都会记在这里。")
+                .font(.callout).foregroundStyle(Theme.textTertiary).padding(.horizontal, Theme.Space.xs)
+        } else {
+            PanelSection(title: "决定记录 · \(sa.decisions.count)") {
+                RowList(items: sa.decisions.map(IdentifiedDecision.init)) { DecisionRow(decision: $0.decision) }
+            }
+        }
+    }
+}
+
+// MARK: - 我的清单页底部的「设置」折叠区（需求文档 §9.1）
+
+/// 主管面板的内容重组：主管终端、组织、不属于任务的工单、问题、模板、角色、规则、定时任务、设置、决定记录，
+/// 一页摊开。设计评审（2026-11-08，2A）后首选是分段的设置子页 `WorklistSettingsPage`；这里留给折叠区继续用。
+struct WorklistSettings: View {
+    @Environment(AppModel.self) private var appModel
+
+    var body: some View {
+        let sa = appModel.superagent
+        VStack(alignment: .leading, spacing: Theme.Space.xl) {
+            RouterCard()
+            OrgCard() // 组织（第 3 期）：注册 / 断开 / 同步状态
+            DirectTicketsSection()
             WorkflowsCard()
             RolesCard()
             RulesCard()

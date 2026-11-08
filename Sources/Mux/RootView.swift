@@ -68,8 +68,14 @@ struct RootView: View {
                     TunnelsView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.worklistSelected {
-                    WorklistView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // 设置子页和任务卡同级（设计评审 2026-11-08，2A）：推入时替掉清单，返回就回到清单。
+                    if appModel.worklistShowsSettings {
+                        WorklistSettingsPage()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        WorklistView()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                 } else if appModel.superagentSelected {
                     ToolHeaderBar(icon: "person.crop.rectangle.stack", title: "主管",
                                   subtitle: "在主管终端里用自然语言提需求；这里只列需要你的工单、问题和规则。")
