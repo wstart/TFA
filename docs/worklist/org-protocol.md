@@ -83,7 +83,7 @@ payload：`task.assigned` `{edits, by, reserved?}`；`task.rejected` `{text, ite
 - **上行**：阶段、清单勾选、结果摘要、需要人、当天打扰次数、审计摘要。走 outbox（append-only，按序重放，发送成功才删，I-02）。
 - **合并**（服务端 PATCH 时）：任务字段以服务端为准（标题 / 原文 / 范围 / 截止 / 优先级 / 依赖 / 工作流不接受客户端修改）；清单逐项按 `item.changed_version`（服务端这一项上次改动的版本）和 `base_version` 比：服务端在 `base_version` 之后没动过的项**听客户端的**（含 done → doing / todo：打回后重做、人取消勾选）；服务端在 `base_version` 之后置 done 的留 done（任一边的新 done 都不丢）；两边在 `base_version` 之后改成不同的非 done 状态 → 不裁决，返回 `conflicts`，客户端把它放进「需要你」（冲突项本地先标受阻，人选「本地为准 / 服务端为准」）；`stage` 只能前进（后退靠服务端的打回事件），客户端只在前进到 doing 时上行 stage，review / done 由服务端按清单完成情况自动推进；`status` 的结束态只能由服务端（通过 / 取消）或节点的 `dropped` 设置。
 - **打回**：服务端把意见追加为新清单项（否则清单仍全 done，下一次上行又立刻进待评审），任务回第一个 doing。
-- **节点侧**：组织任务的待评审不算本地「需要你」（通过 / 打回在 Web），节点只上行 `needs: review`；本地取消组织任务 → 上行 `status: dropped`；预留给我但还没绑节点的任务本地显示为待领取，人点「领取」才绑定；只有直接派给节点的 `task.assigned`（带 `edits`）才自动把清单项交给角色。`policy.changed` 客户端目前忽略（本机规则是本机的，`GET /scopes/{id}/policy` 暂未接）。
+- **节点侧**：组织任务的待评审不算本地「需要你」（通过 / 打回在 Web），节点只上行 `needs: review`；本地取消组织任务 → 上行 `status: dropped`；预留给我的任务（Web 自领 / 派单给人）：收到 `task.assigned`（`reserved`）就 `claim` 绑定本节点，同一人几台 TFA 先到先得、另一台 409 / 403 就删本地占位行；自己在 Web 上领的进待分配，别人派的按 `edits` 自动把清单项交给角色（直接派给节点的 `task.assigned` 同样）。拉取路径只兜底绑定超过一个长轮询周期还没绑上的预留，避免和事件路径抢。`task.updated {change: audit}` 的留言送给名下打开的工单（同本地主管的 attach）。`policy.changed` 客户端目前忽略（本机规则是本机的，`GET /scopes/{id}/policy` 暂未接）。
 - **离线**：本地照常；重连后先拉（`GET /tasks?since=`）再重放 outbox；重放时 `base_version` 用本地记录的最后已知版本。
 - **领取**：人领取（Web 或 TFA 的「待领取」分区）、TFA 自动领取（范围接单模式为自动 + 节点在线 + 能力匹配）、负责人派单（Web）。派单带授权：范围、能否改文件（`payload.edits`），节点据此选角色 / 建工单。
 
