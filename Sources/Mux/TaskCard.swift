@@ -2,8 +2,19 @@ import AppKit
 import SwiftUI
 import SuperagentCore
 
-// 任务卡（TFA-工作清单-需求文档 §9.2、注意事项 F-07～F-10；设计评审 2026-11-08）。顺序固定：头卡（标题 → 阶段步进 →
-// 元信息 → 原文）→ 需要你条 → 工作清单 → 活动 → 底部动作；缺的部分不占位。一张卡只有一条需要你；工单号可点，跳到它的终端。
+// 任务卡（TFA-工作清单-需求文档 §9.2、注意事项 F-07～F-10；设计评审 2026-11-08）。够宽时分三列：左活动、中清单、右详情
+// （头卡 → 需要你条 → 同步行 → 底部动作），左中两列窄、各列各自滚动；窄窗口退回单列：头卡 → 需要你条 → 工作清单 → 活动 →
+// 底部动作。缺的部分不占位。一张卡只有一条需要你；工单号可点，跳到它的终端。
+
+/// 三列的宽度（纯函数，可测）：容器宽 ≥ 900 才分列；左（活动）取 24%、限 220～300，中（清单）取 28%、限 260～360，右（详情）占其余。
+enum TaskCardLayout {
+    static let threeColumnMinWidth: CGFloat = 900
+
+    static func columns(width: CGFloat) -> (activity: CGFloat, checklist: CGFloat)? {
+        guard width >= threeColumnMinWidth else { return nil }
+        return (min(max((width * 0.24).rounded(), 220), 300), min(max((width * 0.28).rounded(), 260), 360))
+    }
+}
 
 struct TaskCard: View {
     @Environment(AppModel.self) private var appModel
@@ -35,33 +46,18 @@ struct TaskCard: View {
 
     var body: some View {
         let sa = appModel.superagent
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: Theme.Space.xl) {
-                    // 这张卡上动作的错误（`actionErrors[任务]`）和表单动作的错误（`actionError`）都在顶上（3A）。
-                    if let e = sa.actionErrors[view.id] ?? sa.actionError {
-                        Banner(text: e) { sa.actionErrors[view.id] = nil; sa.actionError = nil }
-                    }
-                    titleCard
-                    needBar.id("needs")
-                    checklistCard
-                    if !events.isEmpty { activityCard } // 没有活动不占一张卡
-                    OrgSyncRow(view: view) // 同步行（第 3 期）：只有组织任务显示
-                    bottomActions
-                }
-                .padding(Theme.Space.xxl)
-                .frame(maxWidth: 760, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        GeometryReader { geo in
+            if let cols = TaskCardLayout.columns(width: geo.size.width) {
+                threeColumns(cols)
+            } else {
+                singleColumn
             }
-            .onAppear {
-                events = sa.taskEvents(view.id)
-                if !view.needsYou.isEmpty { proxy.scrollTo("needs", anchor: .center) }
-            }
-            .onChange(of: view) { _, new in
-                events = sa.taskEvents(new.id)
-                for (id, done) in pending where new.items.first(where: { $0.id == id }).map({ ($0.status == .done) == done }) ?? true {
-                    pending[id] = nil
-                }
+        }
+        .onAppear { events = sa.taskEvents(view.id) }
+        .onChange(of: view) { _, new in
+            events = sa.taskEvents(new.id)
+            for (id, done) in pending where new.items.first(where: { $0.id == id }).map({ ($0.status == .done) == done }) ?? true {
+                pending[id] = nil
             }
         }
         .background(Theme.canvas)
@@ -104,6 +100,61 @@ struct TaskCard: View {
         }
     }
 
+    // MARK: 版式：三列 / 单列
+
+    /// 这张卡上动作的错误（`actionErrors[任务]`）和表单动作的错误（`actionError`）都在详情最上面（3A）。
+    @ViewBuilder private var errorBanner: some View {
+        let sa = appModel.superagent
+        if let e = sa.actionErrors[view.id] ?? sa.actionError {
+            Banner(text: e) { sa.actionErrors[view.id] = nil; sa.actionError = nil }
+        }
+    }
+
+    /// 左活动、中清单、右详情；三列各自滚动，左中两列定宽（`TaskCardLayout`）。
+    private func threeColumns(_ cols: (activity: CGFloat, checklist: CGFloat)) -> some View {
+        HStack(alignment: .top, spacing: Theme.Space.lg) {
+            ScrollView { activityCard(compact: true).padding(.vertical, Theme.Space.xxl) }
+                .frame(width: cols.activity)
+            ScrollView { checklistCard(compact: true).padding(.vertical, Theme.Space.xxl) }
+                .frame(width: cols.checklist)
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.Space.xl) {
+                    errorBanner
+                    titleCard
+                    needBar
+                    textCard
+                    OrgSyncRow(view: view) // 同步行（第 3 期）：只有组织任务显示
+                    bottomActions
+                }
+                .padding(.vertical, Theme.Space.xxl)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.horizontal, Theme.Space.xxl)
+    }
+
+    /// 窄窗口：原来的单列，最宽 760。
+    private var singleColumn: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.Space.xl) {
+                    errorBanner
+                    titleCard
+                    needBar.id("needs")
+                    textCard
+                    checklistCard(compact: false)
+                    if !events.isEmpty { activityCard(compact: false) } // 没有活动不占一张卡
+                    OrgSyncRow(view: view)
+                    bottomActions
+                }
+                .padding(Theme.Space.xxl)
+                .frame(maxWidth: 760, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .onAppear { if !view.needsYou.isEmpty { proxy.scrollTo("needs", anchor: .center) } }
+        }
+    }
+
     // MARK: 标题 + 阶段步进 + 元信息 + 原文
 
     private var titleCard: some View {
@@ -119,23 +170,33 @@ struct TaskCard: View {
                 Spacer(minLength: 0)
             }
             StageStepper(stages: t.stages, current: t.stageIndex)
-            if !t.resultSummary.isEmpty { // 完成态：结果一句话在标题下
-                (Text("结果：").foregroundStyle(Theme.textTertiary) + Text(t.resultSummary))
-                    .font(.callout).foregroundStyle(Theme.textPrimary)
-                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-            }
             Text(meta).font(.system(size: 12)).foregroundStyle(Theme.textTertiary)
                 .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 .help(t.scope)
                 .accessibilityLabel("元信息：\(meta)")
             if hasChips { FlowLayout(spacing: Theme.Space.md) { metaChips } }
-            if !t.request.isEmpty, t.request != t.title {
-                (Text("原文：").foregroundStyle(Theme.textTertiary) + Text(t.request))
-                    .font(.callout).foregroundStyle(Theme.textPrimary)
-                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-            }
         }
         .saCard()
+    }
+
+    // MARK: 原文 + 结果：放在需要你条之后，长文先收起（不把需要你条挤下去）
+
+    @ViewBuilder private var textCard: some View {
+        let t = view.task
+        let request = t.request != t.title ? t.request : ""
+        if !request.isEmpty || !t.resultSummary.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Space.lg) {
+                // 完成了先看结果，没完成先看原文。
+                if t.status == .done {
+                    LongText(label: "结果", text: t.resultSummary)
+                    LongText(label: "原文", text: request)
+                } else {
+                    LongText(label: "原文", text: request)
+                    LongText(label: "结果", text: t.resultSummary)
+                }
+            }
+            .saCard()
+        }
     }
 
     /// 只有可点的才做 chip：退回来源、组织 T-128、依赖。
@@ -254,7 +315,8 @@ struct TaskCard: View {
 
     // MARK: 工作清单（F-09）
 
-    private var checklistCard: some View {
+    /// `compact`：三列里的窄清单列，每项的执行者 / 工单 / 状态挪到文字下一行。
+    private func checklistCard(compact: Bool) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: Theme.Space.md) {
                 Text("工作清单").font(Theme.Font.rowTitle)
@@ -269,13 +331,13 @@ struct TaskCard: View {
                 }
             }
             .controlSize(.large) // 28pt 的点击目标（Pass 6）
-            .padding(.horizontal, Theme.Space.xl)
+            .padding(.horizontal, compact ? Theme.Space.lg : Theme.Space.xl)
             .padding(.vertical, Theme.Space.md)
             ForEach(view.items) { item in
                 Hairline()
-                ItemRow(view: view, item: item, status: shownStatus(item), editable: editable,
+                ItemRow(view: view, item: item, status: shownStatus(item), editable: editable, compact: compact,
                         toggle: { toggle(item) }, edit: { editing = item }, remove: { removing = item })
-                    .padding(.horizontal, Theme.Space.xl)
+                    .padding(.horizontal, compact ? Theme.Space.lg : Theme.Space.xl)
             }
             if addingItem {
                 Hairline()
@@ -330,13 +392,18 @@ struct TaskCard: View {
 
     // MARK: 活动
 
-    private var activityCard: some View {
+    /// `compact`：三列里的窄活动列，每条最多 4 行（悬停看全文），免得一条长回报占满一屏。
+    private func activityCard(compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: Theme.Space.md) {
             Text("活动").font(Theme.Font.rowTitle)
+            if events.isEmpty { // 三列时这一列总在，空着要说一句
+                Text("还没有活动。").font(.callout).foregroundStyle(Theme.textTertiary)
+            }
             ForEach(events, id: \.id) { e in
                 HStack(alignment: .firstTextBaseline, spacing: Theme.Space.md) {
                     Text(Self.time(e.at)).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.textTertiary)
                     Text(e.text).font(.callout).foregroundStyle(Theme.textSecondary)
+                        .lineLimit(compact ? 4 : nil).help(compact ? e.text : "")
                         .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -424,6 +491,8 @@ private struct ItemRow: View {
     /// 乐观更新后显示的状态。
     let status: ItemStatus
     let editable: Bool
+    /// 窄清单列（三列版式）：文字独占一行（≤3 行），执行者 / 工单 / 状态放在它下面一行。
+    var compact = false
     let toggle: () -> Void
     let edit: () -> Void
     let remove: () -> Void
@@ -432,43 +501,39 @@ private struct ItemRow: View {
         var shown = item
         shown.status = status
         let word = view.statusWord(shown)
-        let mine = item.assignee == .you && editable
         let handback = view.handback(of: shown)
-        return HStack(spacing: Theme.Space.md) {
-            Text("\(item.ord)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textTertiary)
-                .frame(width: 18, alignment: .trailing)
-            if mine {
-                Button(action: toggle) { ItemCheckbox(status: status) }
-                    .buttonStyle(.plain)
-                    .help(status == .done ? "取消勾选" : "标为完成")
-                    .accessibilityLabel(status == .done ? "取消勾选第 \(item.ord) 项" : "第 \(item.ord) 项标为完成")
+        return Group {
+            if compact {
+                HStack(alignment: .top, spacing: Theme.Space.md) {
+                    ordinal.padding(.top, 4)
+                    checkbox
+                    VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                        itemText(lines: 3)
+                        HStack(spacing: Theme.Space.sm) {
+                            AssigneeChip(assignee: item.assignee)
+                            if let id = item.ticketID { TicketChip(id: id, action: { appModel.goToTicket(id) }) }
+                            Spacer(minLength: 0)
+                            statusWord(word, handback: handback, width: nil)
+                        }
+                    }
+                }
             } else {
-                ItemCheckbox(status: status)
-            }
-            Text(item.text).font(.callout)
-                .foregroundStyle(status == .done ? Theme.textSecondary : Theme.textPrimary)
-                .lineLimit(2).help(item.text)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            AssigneeChip(assignee: item.assignee)
-            if let id = item.ticketID {
-                TicketChip(id: id, action: { appModel.goToTicket(id) })
-            } else {
-                Text("—").font(.system(size: 11)).foregroundStyle(Theme.Colors.mist).frame(width: 34)
-                    .accessibilityHidden(true)
-            }
-            if let handback {
-                Button(word.text) { appModel.openWorklist(task: handback.toTaskID) }
-                    .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
-                    .frame(width: 60, alignment: .trailing)
-                    .help("这项被工单 #\(handback.ticketID) 退回，成了任务 A-\(handback.toTaskID)；打开它")
-                    .accessibilityLabel("打开任务 A-\(handback.toTaskID)")
-            } else {
-                Text(word.text).font(.system(size: 12))
-                    .foregroundStyle(word.attention ? Theme.Status.attention : Theme.textSecondary)
-                    .frame(width: 60, alignment: .trailing)
+                HStack(spacing: Theme.Space.md) {
+                    ordinal
+                    checkbox
+                    itemText(lines: 2)
+                    AssigneeChip(assignee: item.assignee)
+                    if let id = item.ticketID {
+                        TicketChip(id: id, action: { appModel.goToTicket(id) })
+                    } else {
+                        Text("—").font(.system(size: 11)).foregroundStyle(Theme.Colors.mist).frame(width: 34)
+                            .accessibilityHidden(true)
+                    }
+                    statusWord(word, handback: handback, width: 60)
+                }
             }
         }
-        .padding(.vertical, Theme.Space.xs)
+        .padding(.vertical, compact ? Theme.Space.sm : Theme.Space.xs)
         .frame(minHeight: 40)
         .contentShape(Rectangle())
         .contextMenu {
@@ -480,6 +545,73 @@ private struct ItemRow: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("第 \(item.ord) 项，\(item.assignee.spoken)，\(word.text)：\(item.text)")
+    }
+
+    private var ordinal: some View {
+        Text("\(item.ord)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textTertiary)
+            .frame(width: 18, alignment: .trailing)
+    }
+
+    /// 你的项可点（乐观更新），Agent 的只读。
+    @ViewBuilder private var checkbox: some View {
+        if item.assignee == .you && editable {
+            Button(action: toggle) { ItemCheckbox(status: status) }
+                .buttonStyle(.plain)
+                .help(status == .done ? "取消勾选" : "标为完成")
+                .accessibilityLabel(status == .done ? "取消勾选第 \(item.ord) 项" : "第 \(item.ord) 项标为完成")
+        } else {
+            ItemCheckbox(status: status)
+        }
+    }
+
+    private func itemText(lines: Int) -> some View {
+        Text(item.text).font(.callout)
+            .foregroundStyle(status == .done ? Theme.textSecondary : Theme.textPrimary)
+            .lineLimit(lines).help(item.text)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// 状态词；退回成新任务的项写「→ A-13」，可点打开它。`width` 为 nil 时按内容宽（窄列里靠右）。
+    @ViewBuilder private func statusWord(_ word: (text: String, attention: Bool), handback: HandbackLink?, width: CGFloat?) -> some View {
+        if let handback {
+            Button(word.text) { appModel.openWorklist(task: handback.toTaskID) }
+                .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                .frame(width: width, alignment: .trailing)
+                .help("这项被工单 #\(handback.ticketID) 退回，成了任务 A-\(handback.toTaskID)；打开它")
+                .accessibilityLabel("打开任务 A-\(handback.toTaskID)")
+        } else {
+            Text(word.text).font(.system(size: 12))
+                .foregroundStyle(word.attention ? Theme.Status.attention : Theme.textSecondary)
+                .frame(width: width, alignment: .trailing)
+        }
+    }
+}
+
+// MARK: - 长文（原文 / 结果）
+
+/// 「原文：…」「结果：…」：超过 6 行（或 240 字）先收起，点「展开全部」看完。空文字不占位。
+private struct LongText: View {
+    let label: String
+    let text: String
+    @State private var expanded = false
+
+    private var long: Bool { text.count > 240 || text.filter { $0 == "\n" }.count > 5 }
+
+    var body: some View {
+        if !text.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                (Text("\(label)：").foregroundStyle(Theme.textTertiary) + Text(text))
+                    .font(.callout).foregroundStyle(Theme.textPrimary)
+                    .lineLimit(long && !expanded ? 6 : nil)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                if long {
+                    Button(expanded ? "收起" : "展开全部") { expanded.toggle() }
+                        .buttonStyle(.plain).font(.caption).foregroundStyle(Theme.textTertiary)
+                        .accessibilityLabel(expanded ? "收起\(label)" : "展开\(label)全文")
+                }
+            }
+        }
     }
 }
 

@@ -249,6 +249,13 @@ Each maps to the tokens above. Flat, border-defined, 9.6px corners, no shadows.
   action the row echoes in place: 「已送达」 until the executor acks, 「已完成 · tfa/12 已合并到 main」 for
   6 s before the row moves to 已完成; an action error is one brick caption under that row. Sections run
   需要你 → 待分配 → 进行中 → 待领取 → 已完成.
+- **任务卡版式 (task card layout)** — when the detail area is ≥ 900pt wide the card is three independently
+  scrolling columns: 活动 on the left (24%, clamped 220–300pt; each event at most 4 lines, full text on hover),
+  工作清单 in the middle (28%, clamped 260–360pt; an item's executor chip, ticket chip and status word sit on
+  a second line under its text) and the task detail on the right taking the rest — header card (title, stage
+  stepper, one stone meta line, clickable chips incl. 「范围…」), the needs-you strip, then 原文 / 结果
+  (collapsed past 6 lines with 「展开全部」), the sync row and 取消任务…. Narrower than 900pt it falls back to
+  one 760pt column in the same order with the checklist and activity after 原文 / 结果.
 - **阶段步进 (stage stepper)** — one 24pt line under the task title inside the header card: 「待领取 › 进行中 ›
   待评审 › 完成」. Current = Charcoal semibold with a 2px Charcoal underline; passed = stone; ahead = light
   stone. It is status, so it is the lightest ink on the card — the heaviest belongs to the needs-you strip,
