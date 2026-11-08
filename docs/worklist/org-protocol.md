@@ -1,0 +1,108 @@
+# TFA ↔ TFA-Org 节点协议 v1
+
+> 需求文档 §10.3 的落地。两边（TFA 的同步客户端、TFA-Org 的 `api` Blueprint）都以本文为准；改协议先改本文。
+> 服务端：`~/Desktop/TFA-Org`（Flask）。客户端：TFA 的 `SuperagentRuntime` 同步循环。
+
+## 0. 约定
+
+- 前缀 `/api/v1`，全部 JSON；时间 ISO 8601 UTC 字符串（`2026-11-08T03:12:00Z`）。
+- 节点请求头 `Authorization: Bearer <node_token>`；`X-TFA-Node: <node_id>` 可选（便于日志）。注册用邀请码，不带 token。
+- 错误：`{"error": "<机器可读的 code>", "message": "<给人看的一句>"}`，HTTP 状态：400 参数错、401 token 无效或被吊销、403 不在范围允许名单内、404 不存在、409 冲突（领取失败 / 版本过期）、422 业务拒绝。
+- 服务端时间为准（I-07）；客户端 `updated_at` 只用于界面排序。
+- 永不上传：终端回滚、环境变量、命令全文（I-06）。审计只传命令摘要和凭据**名字**。
+
+## 1. 对象
+
+### Task（组织任务）
+
+```json
+{
+  "id": 128, "label": "T-128",
+  "title": "结算对账任务偶发超时",
+  "request": "结算服务的对账任务昨晚又超时了，看一下。",
+  "source": "feishu", "source_ref": "feishu:om_xxx/thread_yyy",
+  "scope": {"id": 3, "name": "payment-service", "kind": "repo", "path_hint": "payment-service"},
+  "owner_email": "a@x.com",
+  "assignee_email": "b@x.com", "assignee_node": "node-7f3a", "claimed_at": "…",
+  "due": "2026-11-14T00:00:00Z", "priority": "high",
+  "deps": [120],
+  "workflow": {"id": "default", "name": "默认", "stages": [{"name": "待领取", "kind": "todo"}, {"name": "进行中", "kind": "doing"}, {"name": "待评审", "kind": "review"}, {"name": "完成", "kind": "done"}]},
+  "stage": "进行中", "status": "open",
+  "items": [{"id": 901, "ord": 1, "text": "复现超时", "assignee": "agent:开发", "status": "done", "done_by": "开发", "done_at": "…", "started_at": "…"}],
+  "result_summary": "", "note": "",
+  "needs": {"kind": "answer", "question": "…", "since": "…"},
+  "version": 7, "updated_at": "…"
+}
+```
+
+- `status`: `open | done | cancelled | dropped`；`stage` 是工作流快照里的阶段名；`kind` 同 TFA（todo / doing / review / done）。
+- `assignee` 同 TFA 的 `Assignee.raw`：`""` / `你` / `agent:<角色>`。
+- `version` 每次服务端写入 +1；客户端 PATCH 时带 `base_version`，服务端按 §3 合并，不用乐观锁拒绝（勾选取并集），只有 `stage` / `status` 的后退才 409。
+- `needs` = 这个任务此刻需要人的事（答问题 / 评审 / 受阻 / 失败），由节点上行，服务端只记录并展示。
+
+### Node（节点）
+
+```json
+{"id": "node-7f3a", "person_email": "b@x.com", "roles": ["助理", "开发", "评审"], "version": "0.23.0",
+ "machine": "bbc 的 MacBook Pro", "online": true, "last_seen": "…", "slots": 3, "open_tickets": 1}
+```
+
+### Policy（范围规则）
+
+```json
+{"scope_id": 3, "version": "b9bb662dd4ef", "mode": "observe",
+ "rules": [{"id": "r1", "name": "CI 失败就修", "enabled": true, "instruction": "…", "role": "开发"}],
+ "allowed_senders": ["a@x.com", "github:octocat"],
+ "workflow": {…同上…}, "interruption_budget": 8}
+```
+
+## 2. 端点
+
+| 方法 | 路径 | 请求 | 响应 | 说明 |
+|---|---|---|---|---|
+| POST | `/nodes/register` | `{invite_code, node_id, person_email, roles[], version, machine}` | 201 `{token, node, workspace:{id,name}, person:{email,name}, server_time}` | 邀请码由管理员按成员生成，一次性；`node_id` 由客户端生成并持久化（UUID 前 8 位）。同一 `node_id` 重复注册 = 换 token（旧 token 吊销）。 |
+| POST | `/nodes/heartbeat` | `{online, slots, open_tickets, roles[], version}` | `{ok, server_time, policy_versions:{"<scope_id>": "<version>"}}` | 每 30 s；2 分钟没心跳 = 离线，离线不自动领取（I-04）。 |
+| GET | `/tasks` | query `mine=1`（派给我 / 我领的）、`claimable=1`（本范围待领取）、`since=<cursor>` | `{tasks:[Task], claimable:[Task], cursor}` | `since` 为上次响应的 `cursor`；只返回之后有变化的。首次不带 → 全量。 |
+| GET | `/tasks/{id}` | — | `{task}` | |
+| POST | `/tasks/{id}/claim` | `{}` | 200 `{task}` / 409 `{error:"claimed", task}` | 服务端 CAS：`assignee_node IS NULL AND stage kind == todo`（I-05）；人要在范围允许名单内；前置未完成 → 422 `deps_open`。 |
+| PATCH | `/tasks/{id}` | `{base_version, stage?, status?, items:[{id, status, done_by, done_at, started_at}], result_summary?, updated_at}` | `{task, conflicts:[{item_id, server_status, client_status}]}` | 上行阶段 / 勾选 / 结果。合并见 §3。 |
+| POST | `/tasks/{id}/needs` | `{kind: "answer"|"review"|"blocked"|"failed"|"none", question?, ticket_ref?}` | `{task}` | 需要人；`none` 清除。服务端据此给范围负责人发「需要你」（Web 上琥珀 + 回到原处）。 |
+| POST | `/tasks/{id}/audit` | `{entries:[{at, kind, summary, credential_names:[…]}]}` | `{ok}` | 命令摘要和凭据名，不传命令全文。 |
+| POST | `/nodes/interruptions` | `{date:"2026-11-08", count: 3}` | `{ok}` | 当天打扰次数（本地日）。 |
+| GET | `/scopes/{id}/policy` | — | `Policy` | 带版本；客户端只在心跳里看到版本变化时拉。 |
+| GET | `/events` | query `since=<cursor>`，长轮询最多 25 s | `{events:[Event], cursor}` | 推送的替代：派单、打回 / 通过、取消、规则版本变化。没有事件时 25 s 后返回空数组。 |
+
+Event：`{"id": 55, "type": "task.assigned" | "task.updated" | "task.rejected" | "task.approved" | "task.cancelled" | "task.unassigned" | "policy.changed", "task_id": 128, "scope_id": 3, "payload": {…}, "at": "…"}`。`task.rejected` 的 payload 带 `{"text": "打回意见"}`。
+
+## 3. 同步规则（需求文档 §10.3）
+
+- **下行**：任务字段、工作流、清单、派单、规则版本。节点对每个组织任务在本地也建一行 `task`（`origin = "<server>"`, `origin_id = "<id>"`），工单只在本地。
+- **上行**：阶段、清单勾选、结果摘要、需要人、当天打扰次数、审计摘要。走 outbox（append-only，按序重放，发送成功才删，I-02）。
+- **合并**（服务端 PATCH 时）：任务字段以服务端为准（标题 / 原文 / 范围 / 截止 / 优先级 / 依赖 / 工作流不接受客户端修改）；清单勾选取**并集**（任一边 done 即 done）；同一项两边改成不同的非 done 状态且都在 `base_version` 之后 → 不裁决，返回 `conflicts`，客户端把它放进「需要你」；`stage` 只能前进（后退靠服务端的打回事件）；`status` 的结束态只能由服务端（通过 / 取消）或节点的 `dropped` 设置。
+- **离线**：本地照常；重连后先拉（`GET /tasks?since=`）再重放 outbox；重放时 `base_version` 用本地记录的最后已知版本。
+- **领取**：人领取（Web 或 TFA 的「待领取」分区）、TFA 自动领取（范围接单模式为自动 + 节点在线 + 能力匹配）、负责人派单（Web）。派单带授权：范围、能否改文件（`payload.edits`），节点据此选角色 / 建工单。
+
+## 4. 事件源（服务端入站）
+
+| 路径 | 校验 | 说明 |
+|---|---|---|
+| `POST /sources/github` | `X-Hub-Signature-256`（HMAC-SHA256，范围绑定的 secret） | issues / issue_comment / pull_request / pull_request_review_comment；`@主管`（可配置的 handle）或允许名单内的人 = explicit，否则 inferred 候选。回复 = 在同一 issue / PR 评论。 |
+| `POST /sources/http/<source_key>` | `Authorization: Bearer <source token>` | 通用入口：`{sender, text, thread?, scope?, reply_url?}`；回复 POST 到 `reply_url`（有的话）。 |
+| `POST /sources/feishu` | 事件订阅的 verification token / encrypt key；`url_verification` 回 challenge | `im.message.receive_v1`；`@主管` = explicit；回复用「回复消息」API（需要 app id / secret，配置项）。 |
+| `POST /sources/dingtalk` | `timestamp` + `sign`（HMAC-SHA256，机器人 appSecret） | 企业内部机器人 outgoing（@机器人即 explicit）；回复 POST 到消息里的 `sessionWebhook`。 |
+| 定时 | 服务端自己的调度（每分钟检查） | 范围上的定时任务 → 建组织任务（source=schedule）。 |
+
+回复一律 ≤100 词（中文按分词），一句话：结果 + 链接 / 位置 + 需要人做的事；进展不回复。
+
+## 5. 组织主管（headless Router）
+
+Source → Trigger → Thread（按来源的会话 / issue / PR 分组）→ Eval（确定性 gate：发送人是否在范围允许名单、强度 explicit / inferred；模型研判：每条启用规则恰好一次、方向不明确不接）→ Decision（accept / attach / ignore / would_accept / unavailable）→ Task（+ Mandate：强度、范围、规则版本、命中的规则）。
+
+- 一个 Thread 同时只跑一个 Eval；候选 15 分钟没研判完 → unavailable。
+- accept 的任务：explicit → 进「待领取」（或范围配置了默认负责人 / 节点 → 直接派）；inferred 在 `auto` 模式 → 进待领取并标「规则接单」，`observe` → 只记 would_accept 进观察记录。
+- 模型后端可配置：`ROUTER_MODEL_BACKEND = claude-cli | anthropic | fake`；`claude-cli` 用本机 `claude -p --output-format json --model <m>`（走订阅），`anthropic` 用 `ANTHROPIC_API_KEY` 调 Messages API；默认模型 `claude-sonnet-5-5`。
+- 回复回到原处：由 `outbox_reply` 表异步投递（失败退避，3 次后进「问题」）。
+
+## 6. 安全（见 TFA-Org/docs/security.md）
+
+节点 token 只存哈希、可吊销；邀请码一次性；webhook 全部验签；Web 表单 CSRF；口令用 werkzeug 哈希；本机部署只监听 127.0.0.1，上公网必须 HTTPS。
