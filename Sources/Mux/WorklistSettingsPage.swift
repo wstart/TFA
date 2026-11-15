@@ -160,8 +160,9 @@ enum WorklistSettingsText {
             return f.schedules == 0 ? "没有定时任务" : "\(f.schedules) 个定时任务 · 启用 \(f.schedulesEnabled) 个"
         case .other:
             let s = f.settings
+            let agentSuffix = s.codingAgent == .claude ? "" : " · \(s.codingAgent.label)"
             return "并发 \(s.slots) · worktree \(s.worktree ? "开" : "关") · 看门狗 \(s.watchdogEnabled ? "开" : "关")"
-                + " · \(s.modelBackend.label) · \(s.modelName)"
+                + " · \(s.modelBackend.label) · \(s.modelName)" + agentSuffix
         case .records:
             return f.decisions == 0 ? "还没有决定记录" : "\(f.decisions) 条决定记录"
         }

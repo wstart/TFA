@@ -116,7 +116,7 @@ public struct TmuxConnection: Sendable {
             // bare `tmux` isn't found on macOS remotes (the classic Homebrew-over-ssh PATH gap). Resolve
             // tmux against a PATH that explicitly includes the common Homebrew / local bin dirs via `env`.
             let remoteTmux = tmuxPath ?? "tmux"
-            args += [host, "--", "env", "PATH=\(Self.remotePATH)", remoteTmux, "-u", "-CC"]
+            args += ["--", host, "env", "PATH=\(Self.remotePATH)", remoteTmux, "-u", "-CC"]
             args += tmuxSubcommand
             return (ssh, args)
         }

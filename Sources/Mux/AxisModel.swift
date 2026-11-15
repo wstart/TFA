@@ -1,14 +1,26 @@
 import AppKit
 import Observation
+import SuperagentCore
 import SwiftUI
 
 /// The bundled `axis-claude` CLI (a small Claude-Code-style agent that talks to axis-model). It ships
 /// next to the app executable — `TFA.app/Contents/MacOS/axis-claude`, or `.build/<config>/` in dev.
 enum AxisClaude {
-    static var executablePath: String? {
+    /// Executable located alongside the running app binary (never points back to `~/.tfa/bin`).
+    static var bundledExecutableURL: URL? {
         guard let dir = Bundle.main.executableURL?.deletingLastPathComponent() else { return nil }
-        let path = dir.appendingPathComponent("axis-claude").path
-        return FileManager.default.isExecutableFile(atPath: path) ? path : nil
+        let url = dir.appendingPathComponent("axis-claude")
+        return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
+    }
+
+    static var executablePath: String? {
+        if let bundled = bundledExecutableURL { return bundled.path }
+        let fm = FileManager.default
+        let linked = SuperagentPaths.binDir.appendingPathComponent("axis-claude").path
+        if fm.isExecutableFile(atPath: linked) { return linked }
+        let candidates = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":").map { "\($0)/axis-claude" }
+        return candidates.first { fm.isExecutableFile(atPath: $0) }
     }
 
     /// Shell command that starts (or, with `resume`, continues the last conversation of) axis-claude.
@@ -140,30 +152,55 @@ final class AxisModelService {
 
     func start() {
         guard isInstalled, status == .stopped else { return }
+        guard FileManager.default.fileExists(atPath: Self.plistPath) else {
+            lastMessage = "尚未注册后台服务（缺少 LaunchAgent），请先执行安装脚本 ./install.sh"
+            return
+        }
         status = .starting; transitionDeadline = Date().addingTimeInterval(180)
         Task.detached {
-            if !Self.launchctl(["load", Self.plistPath]) {
-                // Already loaded: start it, but WITHOUT -k — never kill a server that is up.
-                _ = Self.launchctl(["kickstart", "gui/\(getuid())/com.local.mlxserver"])
+            let loaded = Self.launchctl(["load", Self.plistPath])
+            // Already loaded: start it, but WITHOUT -k — never kill a server that is up.
+            let kicked = loaded ? true : Self.launchctl(["kickstart", "gui/\(getuid())/com.local.mlxserver"])
+            if !kicked {
+                await MainActor.run {
+                    self.transitionDeadline = nil
+                    self.status = .stopped
+                    self.lastMessage = "启动失败：launchctl 未能拉起服务，请检查安装状态"
+                }
             }
         }
     }
 
     func stop() {
         guard isReachable else { return }
+        let previous = status
         status = .stopping; transitionDeadline = Date().addingTimeInterval(120)
         Task.detached {
             if !Self.launchctl(["unload", Self.plistPath]) {
-                await MainActor.run { self.lastMessage = "停止失败：launchctl unload 未成功" }
+                await MainActor.run {
+                    self.transitionDeadline = nil
+                    self.status = previous
+                    self.lastMessage = "停止失败：launchctl unload 未成功"
+                }
             }
         }
     }
 
     func restart() {
         guard isReachable else { return }
+        let previous = status
         status = .starting; transitionDeadline = Date().addingTimeInterval(180)
         restartPending = true; restartSawDown = false
-        Task.detached { _ = Self.launchctl(["kickstart", "-k", "gui/\(getuid())/com.local.mlxserver"]) }
+        Task.detached {
+            if !Self.launchctl(["kickstart", "-k", "gui/\(getuid())/com.local.mlxserver"]) {
+                await MainActor.run {
+                    self.transitionDeadline = nil
+                    self.restartPending = false
+                    self.status = previous
+                    self.lastMessage = "重启失败：launchctl kickstart 未成功"
+                }
+            }
+        }
     }
 
     /// Loading a model takes tens of seconds; the server answers when it's done.

@@ -6,16 +6,25 @@ let usage = """
 axis-claude \(axisVersion) — 终端编码助手（后端：本地 axis-model）
 
 用法：
-  axis-claude [选项]                进入交互模式
+  axis-claude [选项] [初始提示]      进入交互模式（给了初始提示就先跑第一轮，再留在对话里）
   axis-claude -p "<提示>" [选项]     非交互：执行一轮后输出结果并退出
 
 选项：
-  -p, --print [提示]        非交互模式（未给提示时从 stdin 读取）
-  -c, --continue            恢复当前目录最近一次对话
-      --resume <id>         恢复指定对话（~/.axis-claude/sessions 下的文件名）
-      --ask                 Write/Edit/Bash 执行前逐次询问（默认自动允许）
-  -h, --help                显示帮助
-  -v, --version             显示版本
+  -p, --print [提示]                   非交互模式（未给提示时从 stdin 读取）
+  -c, --continue                       恢复当前目录最近一次对话
+      --resume <id>                    恢复指定对话（~/.axis-claude/sessions 下的文件名）
+      --ask                            Write/Edit/Bash 执行前逐次询问（默认自动允许）
+      --permission-mode <mode>         权限模式：auto / bypassPermissions / dontAsk
+      --allowedTools <spec>            放行规则（如 'Bash(tfa *)'）
+      --disallowedTools <spec>         禁用工具（如 'Edit,Write,NotebookEdit'）
+      --tools <spec>                   仅启用指定工具（空串 "" 禁用全部工具）
+      --system-prompt <text>           覆盖默认 system prompt
+      --append-system-prompt <text>    追加 system prompt 文本
+      --append-system-prompt-file <p>  追加 system prompt 文件内容
+      --model <name>                   覆盖模型名（默认读取 AXIS_MODEL 或 axis_model）
+      --no-session-persistence         不把本次对话写入 ~/.axis-claude/sessions
+  -h, --help                           显示帮助
+  -v, --version                        显示版本
 
 环境变量：
   AXIS_BASE_URL / ANTHROPIC_BASE_URL     默认 http://127.0.0.1:1234
@@ -26,45 +35,28 @@ axis-claude \(axisVersion) — 终端编码助手（后端：本地 axis-model�
 交互命令：/help  /clear（新对话）  /resume [编号]（恢复本目录的历史对话）  /compact（压缩对话，释放上下文）  /exit
 """
 
-struct Options {
-    var printMode = false
-    var prompt: String?
-    var continueLast = false
-    var resumeID: String?
-    var autoApprove = true
+let options: CLIOptions
+do {
+    options = try CLIOptions.parse(Array(CommandLine.arguments.dropFirst()))
+} catch {
+    err("\(error)\n\n\(usage)\n")
+    exit(2)
 }
+if options.showHelp { out(usage + "\n"); exit(0) }
+if options.showVersion { out("axis-claude \(axisVersion)\n"); exit(0) }
 
-func parseOptions(_ args: [String]) -> Options {
-    var o = Options()
-    var i = 0
-    while i < args.count {
-        let a = args[i]
-        switch a {
-        case "-p", "--print":
-            o.printMode = true
-            if i + 1 < args.count, !args[i + 1].hasPrefix("-") { o.prompt = args[i + 1]; i += 1 }
-        case "-c", "--continue": o.continueLast = true
-        case "--resume":
-            guard i + 1 < args.count else { err("--resume 需要对话 id\n"); exit(2) }
-            o.resumeID = args[i + 1]; i += 1
-        case "--yes", "--dangerously-skip-permissions": o.autoApprove = true // 旧参数，现为默认
-        case "--ask": o.autoApprove = false
-        case "-h", "--help": out(usage + "\n"); exit(0)
-        case "-v", "--version": out("axis-claude \(axisVersion)\n"); exit(0)
-        default:
-            if o.printMode, o.prompt == nil, !a.hasPrefix("-") { o.prompt = a }
-            else { err("未知参数：\(a)\n\n\(usage)\n"); exit(2) }
-        }
-        i += 1
-    }
-    return o
-}
-
-let options = parseOptions(Array(CommandLine.arguments.dropFirst()))
 let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardizedFileURL
-let config = APIConfig.fromEnvironment()
+var config = APIConfig.fromEnvironment()
+if let m = options.model { config.model = m }
 let store = SessionStore(root: SessionStore.defaultRoot)
-let systemPrompt = SystemPrompt.build(cwd: cwd)
+let systemPrompt: String
+do {
+    systemPrompt = try SystemPrompt.resolve(cwd: cwd, options: options)
+} catch {
+    err("\(error)\n")
+    exit(2)
+}
+let activeTools = ToolPolicy.apply(to: Tools.all, options: options)
 
 var record = SessionRecord(id: SessionStore.newID(), cwd: cwd.path, createdAt: Date(), updatedAt: Date(), messages: [])
 if let id = options.resumeID {
@@ -77,20 +69,23 @@ if let id = options.resumeID {
 let ui = ConsoleUI(printMode: options.printMode)
 let reader = LineReader()
 let permission: PermissionCheck
-if options.autoApprove {
-    permission = { _, _ in .allow }
-} else if options.printMode {
-    permission = { _, summary in
-        err("已拒绝 \(summary)：--ask 模式下非交互运行无法询问\n")
-        return .deny(reason: "非交互模式下无法询问授权（--ask），操作被拒绝")
+switch options.permissionMode {
+case .autoApprove, .dontAsk:
+    permission = { _, _ in .allow } // dontAsk 与 --allowedTools 由 ToolPolicy 在完整参数上强制校验
+case .ask:
+    if options.printMode {
+        permission = { _, summary in
+            err("已拒绝 \(summary)：--ask 模式下非交互运行无法询问\n")
+            return .deny(reason: "非交互模式下无法询问授权（--ask），操作被拒绝")
+        }
+    } else {
+        permission = ui.permissionChecker(reader: reader)
     }
-} else {
-    permission = ui.permissionChecker(reader: reader)
 }
 
 func makeAgent(_ r: SessionRecord) -> Agent {
     let a = Agent(config: config, transport: HTTPTransport(config: config, sessionID: r.id),
-                  systemPrompt: systemPrompt, cwd: cwd, ui: ui, permission: permission)
+                  tools: activeTools, systemPrompt: systemPrompt, cwd: cwd, ui: ui, permission: permission)
     a.messages = r.messages
     // Save after every tool round, not only at the end of a turn: closing the terminal (or a crash)
     // mid-turn must not lose the record of edits that already happened.
@@ -102,6 +97,7 @@ var agent = makeAgent(record)
 
 @MainActor
 func persist(_ messages: [Message]? = nil) {
+    guard options.persistSession else { return }
     let messages = messages ?? agent.messages
     guard !messages.isEmpty else { return }
     record.messages = messages
@@ -163,11 +159,23 @@ if options.printMode {
     if let w = healthWarning { err(w + "\n") }
     switch await runTurn(prompt) {
     case .done(let text):
-        out(text.hasSuffix("\n") ? text : text + "\n")
+        if options.outputFormat == "json" {
+            let payload: [String: Any] = ["type": "result", "subtype": "success", "is_error": false, "result": text, "session_id": record.id]
+            let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])) ?? Data()
+            out(String(decoding: data, as: UTF8.self) + "\n")
+        } else {
+            out(text.hasSuffix("\n") ? text : text + "\n")
+        }
         exit(0)
     case .interrupted:
         err("已中断\n"); exit(130)
     case .failed(let e):
+        if options.outputFormat == "json" {
+            let payload: [String: Any] = ["type": "result", "subtype": "error_during_execution", "is_error": true, "result": "\(e)", "session_id": record.id]
+            let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])) ?? Data()
+            out(String(decoding: data, as: UTF8.self) + "\n")
+            exit(0)
+        }
         err("\(e)\n"); exit(1)
     }
 }
@@ -221,6 +229,19 @@ func resumePicker(_ preset: Int?) {
     record = list[n - 1]
     agent = makeAgent(record)
     out("已恢复：" + Style.bold(record.title) + Style.dim("（\(record.messages.count) 条消息）") + "\n")
+}
+
+// Kickoff prompt in interactive mode (e.g. Superagent worker first turn): run it immediately, then stay in REPL.
+if let kickoff = options.prompt?.trimmingCharacters(in: .whitespacesAndNewlines), !kickoff.isEmpty {
+    out("\n> " + kickoff + "\n")
+    switch await runTurn(kickoff) {
+    case .done:
+        if let line = usageLine(agent) { out(Style.dim(line) + "\n") }
+    case .interrupted:
+        out("\n" + Style.red("⎿ 已中断") + "\n")
+    case .failed(let e):
+        out("\n" + Style.red("✗ \(e)") + "\n")
+    }
 }
 
 var pendingExit = false

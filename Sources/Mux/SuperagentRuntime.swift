@@ -83,9 +83,10 @@ final class SuperagentRuntime {
     @ObservationIgnored var userTypedRecently: ((_ session: String) -> Bool)?
     /// 系统通知。`task` = 任务 × 阶段的通知带的任务号（点通知打开那张任务卡）；工单 / 主管的通知为 nil。
     @ObservationIgnored var postNotification: ((_ title: String, _ body: String, _ task: Int64?) -> Void)?
-    /// 执行终端里启动 agent 的命令行（kickoff = 第一条消息）。nil = Claude Code，按工单的角色。
+    /// 执行终端里启动 agent 的命令行（kickoff = 第一条消息）。nil = 按设置选 Claude Code 或 axis-claude。
     @ObservationIgnored var workerCommand: ((_ ticket: Ticket, _ kickoff: String) -> String)?
-    @ObservationIgnored var routerCommand: () -> String = SuperagentRuntime.claudeRouterCommand
+    /// 主管终端启动命令行；nil = 按设置选 Claude Code 或 axis-claude。
+    @ObservationIgnored var routerCommand: (() -> String)?
     /// 送达后等回显的时间（测试可调小）。
     @ObservationIgnored var echoWait: Double = 2.0
     /// agent 启动的最长等待。
@@ -181,14 +182,22 @@ final class SuperagentRuntime {
     }
 
     nonisolated static func installCLI() {
-        guard let exe = bundledCLI() else { return }
-        let fm = FileManager.default
         removeLegacyTaskSkill()
-        let link = SuperagentPaths.binDir.appendingPathComponent("tfa")
+        if let exe = bundledCLI() {
+            installSymlink(name: "tfa", target: exe)
+        }
+        if let axis = AxisClaude.bundledExecutableURL {
+            installSymlink(name: "axis-claude", target: axis)
+        }
+    }
+
+    nonisolated private static func installSymlink(name: String, target: URL) {
+        let fm = FileManager.default
+        let link = SuperagentPaths.binDir.appendingPathComponent(name)
         try? fm.createDirectory(at: SuperagentPaths.binDir, withIntermediateDirectories: true)
-        if let dest = try? fm.destinationOfSymbolicLink(atPath: link.path), dest == exe.path { return }
+        if let dest = try? fm.destinationOfSymbolicLink(atPath: link.path), dest == target.path { return }
         try? fm.removeItem(at: link)
-        try? fm.createSymbolicLink(at: link, withDestinationURL: exe)
+        try? fm.createSymbolicLink(at: link, withDestinationURL: target)
     }
 
     /// 旧看板留下的 `~/.claude/skills/tfa-task/` 和 `~/.tfa/bin/tfa-task`（注意事项 K-01）：名字和新的 `tfa task` 太像，
@@ -425,7 +434,7 @@ final class SuperagentRuntime {
 
     private func openRouterOnce(dir: String) async -> String? {
         let tmux = self.tmux
-        let command = routerCommand()
+        let command = routerCommand?() ?? defaultRouterCommand()
         // 30 秒内刚打过启动命令：shell 可能还没执行它，别再打一遍（会拼成一行）。
         let mayRetype = Date().timeIntervalSince(routerTypedAt) > 30
         routerTypedAt = Date()
@@ -805,6 +814,10 @@ final class SuperagentRuntime {
     }
 
     nonisolated static func interrupt(_ tmux: SuperagentTmux, _ target: String) {
+        if tmux.paneState(target)?.command.lowercased().contains("axis-claude") == true {
+            tmux.sendKey(target, "C-c")
+            return
+        }
         tmux.sendKey(target, "Escape")
         Thread.sleep(forTimeInterval: 0.3)
         tmux.sendKey(target, "Escape")
@@ -958,7 +971,21 @@ final class SuperagentRuntime {
     }
 
     private func command(_ t: Ticket, _ role: Role, _ kickoff: String) -> String {
-        workerCommand?(t, kickoff) ?? Self.claudeWorkerCommand(t, role: role, kickoff: kickoff)
+        workerCommand?(t, kickoff) ?? defaultWorkerCommand(t, role: role, kickoff: kickoff)
+    }
+
+    func defaultWorkerCommand(_ t: Ticket, role: Role, kickoff: String) -> String {
+        switch settings.codingAgent {
+        case .claude: return Self.claudeWorkerCommand(t, role: role, kickoff: kickoff)
+        case .axisClaude: return Self.axisWorkerCommand(t, role: role, kickoff: kickoff)
+        }
+    }
+
+    func defaultRouterCommand() -> String {
+        switch settings.codingAgent {
+        case .claude: return Self.claudeRouterCommand()
+        case .axisClaude: return Self.axisRouterCommand()
+        }
     }
 
     // MARK: - 命令行
@@ -986,6 +1013,23 @@ final class SuperagentRuntime {
     /// 禁用编辑类工具——物理上碰不到代码。
     nonisolated static func claudeRouterCommand() -> String {
         "\(envPrefix) TFA_ROLE=router claude --append-system-prompt-file \(SuperagentTmux.quote(SuperagentPaths.routerPrompt.path)) "
+            + "--permission-mode dontAsk --allowedTools 'Bash(tfa *)' --disallowedTools 'Edit,Write,NotebookEdit'"
+    }
+
+    /// 执行终端：内置 `axis-claude`（走本机 axis-model），附加角色执行者 prompt，首条消息跑完后留在交互 REPL 等后续跟进。
+    nonisolated static func axisWorkerCommand(_ t: Ticket, role: Role, kickoff: String,
+                                              executable: String? = AxisClaude.executablePath) -> String {
+        let exe = executable.map(SuperagentTmux.quote) ?? "axis-claude"
+        let who = role.standing ? "TFA_AGENT=\(SuperagentTmux.quote(role.name))" : "TFA_TICKET=\(t.id)"
+        let readOnly = role.edits ? "" : "--disallowedTools 'Edit,Write,NotebookEdit' "
+        return "\(envPrefix) \(who) \(exe) --dangerously-skip-permissions \(readOnly)"
+            + "--append-system-prompt-file \(SuperagentTmux.quote(SuperagentPaths.rolePrompt(role.name).path)) -- \(SuperagentTmux.quote(kickoff))"
+    }
+
+    /// 主管：内置 `axis-claude`，同样只放行 `Bash(tfa *)`、禁用编辑类工具。
+    nonisolated static func axisRouterCommand(executable: String? = AxisClaude.executablePath) -> String {
+        let exe = executable.map(SuperagentTmux.quote) ?? "axis-claude"
+        return "\(envPrefix) TFA_ROLE=router \(exe) --append-system-prompt-file \(SuperagentTmux.quote(SuperagentPaths.routerPrompt.path)) "
             + "--permission-mode dontAsk --allowedTools 'Bash(tfa *)' --disallowedTools 'Edit,Write,NotebookEdit'"
     }
 

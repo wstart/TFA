@@ -21,6 +21,8 @@ public final class TmuxController {
     public var onPaneRemoved: ((TmuxPaneID) -> Void)?
     /// The connection closed (tmux exited / detached / server died).
     public var onConnectionClosed: (() -> Void)?
+    /// The attached session was renamed externally (e.g. `tmux rename-session` from another client).
+    public var onSessionRenamed: ((_ oldName: String, _ newName: String) -> Void)?
     /// Raw login bytes (ssh password prompt / host-key / 2FA) seen BEFORE tmux control mode starts —
     /// the UI renders these in an interactive login terminal. Only fires for remote connections.
     public var onLoginData: ((Data) -> Void)?
@@ -154,6 +156,11 @@ public final class TmuxController {
             }
         case .sessionRenamed(let sid, let name):
             state.session(sid)?.name = name
+            if sid == (attachedSessionID ?? attachedSession?.id), connection.sessionName != name {
+                let old = connection.sessionName
+                connection.sessionName = name
+                onSessionRenamed?(old, name)
+            }
         case .sessionChanged(let sid, _):
             attachedSessionID = sid // our client switched/attached to this session
             scheduleRefresh()
@@ -438,6 +445,13 @@ public final class TmuxController {
     public func respawnPrimaryPane() {
         guard let pane = primaryPane?.id else { return }
         client.sendFireAndForget("respawn-pane -k -t \(pane)")
+    }
+
+    /// Restart the primary pane's command and await tmux's reply on the FIFO control stream, so any
+    /// output emitted by the previous shell before the respawn has already been delivered.
+    public func respawnPrimaryPaneAndWait() async {
+        guard let pane = primaryPane?.id else { return }
+        _ = try? await client.send("respawn-pane -k -t \(pane)")
     }
 
     /// Tell tmux this GUI client's grid size and try to OWN it (so the pane fills our view). Pins

@@ -121,6 +121,10 @@ final class ConnectionSession: Identifiable {
     /// Invoked on the main actor ONLY when the connection is finalized as gone (set by AppModel) —
     /// i.e. after reconnect was either impossible or exhausted. Drives sidebar removal + the toast.
     @ObservationIgnored var onClosed: (() -> Void)?
+    /// Invoked on the main actor when tmux reports an external `%session-renamed` on this terminal.
+    @ObservationIgnored var onSessionRenamed: ((_ oldGroupKey: String, _ newGroupKey: String) -> Void)?
+    /// Timestamp of the most recent `%output` chunk from the primary pane (used for shell-ready detection).
+    @ObservationIgnored private var lastOutputReceivedAt: Date?
 
     /// Interactive terminal for the ssh login phase (nil for local). Persists across reconnects.
     @ObservationIgnored private(set) var loginTerminal: LoginTerminal?
@@ -257,6 +261,7 @@ final class ConnectionSession: Identifiable {
             if !self.isViewing, !self.hasUnseenOutput { self.hasUnseenOutput = true }
             self.scanForAttention(data) // bell / OSC 9·777·99 → "needs you" (background only)
             self.scanShellMarks(data)   // OSC 133 → precise at-prompt/running + command exit codes
+            self.lastOutputReceivedAt = Date()
             self.noteOutputActivity()
         }
         controller.onPaneRemoved = { [weak self] paneID in
@@ -264,6 +269,15 @@ final class ConnectionSession: Identifiable {
         }
         controller.onConnectionClosed = { [weak self] in
             self?.handleUnderlyingClose()
+        }
+        controller.onSessionRenamed = { [weak self] oldName, _ in
+            guard let self else { return }
+            let oldKey: String
+            switch self.controller.connection.endpoint {
+            case .local: oldKey = oldName
+            case .ssh(let h, _): oldKey = "\(oldName)@\(h)"
+            }
+            self.onSessionRenamed?(oldKey, self.groupKey)
         }
         controller.onLoginData = { [weak self] data in
             self?.loginTerminal?.feed(data)
@@ -459,14 +473,16 @@ final class ConnectionSession: Identifiable {
             try await controller.connect()
             connectError = nil
             isClosed = false
-            applyEnvironment(freshCreate: freshCreate)
+            await applyEnvironment(freshCreate: freshCreate)
             hasEverConnected = true
             ProcessLog.append(stableID, ProcessEvent(at: Date(), kind: "connected"))
-            // Restored AI session: resume the real conversation once the fresh shell is up.
+            // Restored AI session / setup command: wait until the fresh shell actually reaches its
+            // prompt (via OSC 133 or output settle) instead of racing a fixed 600ms sleep.
             if freshCreate, let cmd = restoreCommand, !restoreCommandSent {
                 restoreCommandSent = true
                 Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 600_000_000) // let the new shell reach its prompt
+                    await self.waitForShellReady()
+                    guard self.state.connected, !self.intentionalClose else { return }
                     self.sendLine(cmd)
                 }
             }
@@ -475,14 +491,57 @@ final class ConnectionSession: Identifiable {
         }
     }
 
+    /// Pure readiness predicate for dispatching `restoreCommand` into a newly spawned shell:
+    /// 1. With TFA shell integration (OSC 133), `.atPrompt` is authoritative immediately.
+    /// 2. Without OSC 133, wait until the shell has printed something (its prompt / startup banner)
+    ///    AND output has stayed quiet for ≥ 350ms (with a 400ms minimum elapsed guard so a mid-rc
+    ///    pause doesn't fire early). Silent slow `.zshrc` startups (`quietSeconds == nil`) keep
+    ///    waiting until prompt output arrives or `maxWait` expires.
+    /// 3. Bounded by `maxWait` so an integration-less shell with an empty `PS1` never hangs forever.
+    nonisolated static func isShellReady(
+        shellPhase: ShellPhase,
+        elapsed: TimeInterval,
+        quietSeconds: TimeInterval?,
+        maxWait: TimeInterval = 4.0
+    ) -> Bool {
+        if case .atPrompt = shellPhase { return true }
+        if elapsed >= maxWait { return true }
+        if let quiet = quietSeconds, elapsed >= 0.40, quiet >= 0.35 {
+            return true
+        }
+        return false
+    }
+
+    /// Wait until the fresh shell in the primary pane is ready to accept input, bounded by `maxWait`.
+    private func waitForShellReady(maxWait: TimeInterval = 4.0) async {
+        let start = Date()
+        while state.connected && !intentionalClose && !Task.isCancelled {
+            let now = Date()
+            let elapsed = now.timeIntervalSince(start)
+            let quiet = lastOutputReceivedAt.map { now.timeIntervalSince($0) }
+            if Self.isShellReady(shellPhase: shellPhase, elapsed: elapsed, quietSeconds: quiet, maxWait: maxWait) {
+                // Give readline/zle one brief beat after printing `133;A` / prompt bytes to arm raw input.
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
     /// Inject this connection's per-session environment after attach. On a fresh create (first
     /// connect of a non-attach-only session) also respawn the initial shell so it picks them up; on
     /// reconnect / launch-resume we never respawn — that would kill whatever the user is running.
-    private func applyEnvironment(freshCreate: Bool) {
+    private func applyEnvironment(freshCreate: Bool) async {
         let env = baseConnection.environment
         guard !env.isEmpty else { return }
         controller.applySessionEnvironment(env)
-        if freshCreate { controller.respawnPrimaryPane() }
+        if freshCreate {
+            await controller.respawnPrimaryPaneAndWait()
+            // Discard any prompt/output state emitted by the pre-respawn shell before `respawn-pane -k`.
+            shellPhase = .unknown
+            shellScanner = ShellIntegrationScanner()
+            lastOutputReceivedAt = nil
+        }
     }
 
     // MARK: - Reconnection

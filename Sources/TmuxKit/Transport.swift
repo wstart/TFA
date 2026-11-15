@@ -37,12 +37,11 @@ public final class PtyProcessTransport: TmuxTransport {
     private var rows: Int
 
     private var pty: PTY?
-    /// The child's pid until it has been reaped; -1 afterwards, so a late `terminate()` (deinit)
-    /// can never signal a recycled pid. Guarded by `pidLock` (read from any thread, cleared by the
-    /// exit source on `ioQueue`).
-    private var pid: pid_t = -1
-    private let pidLock = NSLock()
-    private var exitSource: DispatchSourceProcess?
+    /// Tracks and reaps the spawned child independently of `PtyProcessTransport`'s own lifetime:
+    /// even if the caller drops the transport immediately after `terminate()`, the tracker stays
+    /// alive on `ioQueue` until `waitpid` collects the child, preventing zombie processes and
+    /// ensuring a late `terminate()` never signals a recycled pid.
+    private var child: ChildTracker?
     private var readSource: DispatchSourceRead?
     private let ioQueue = DispatchQueue(label: "tmux.pty.read")
     private let writeQueue = DispatchQueue(label: "tmux.pty.write")
@@ -101,20 +100,25 @@ public final class PtyProcessTransport: TmuxTransport {
 
         var childPid: pid_t = 0
         let rc = posix_spawn(&childPid, execPath, &fileActions, &attr, cargs, cenv)
-        guard rc == 0 else { throw TmuxError.spawnFailed(rc) }
-        pidLock.lock(); pid = childPid; pidLock.unlock()
+        guard rc == 0 else {
+            // Nothing will ever read this pty: release both ends now instead of leaking them.
+            pty.closeSlave()
+            pty.closeMaster()
+            self.pty = nil
+            throw TmuxError.spawnFailed(rc)
+        }
         pty.closeSlave() // parent only needs the master side
-
-        // Reap the child whenever it exits (no zombie left behind), then forget its pid.
-        let exit = DispatchSource.makeProcessSource(identifier: childPid, eventMask: .exit, queue: ioQueue)
-        exit.setEventHandler { [weak self] in self?.reap(blocking: true) }
-        exitSource = exit
-        exit.resume()
-        ioQueue.async { [weak self] in self?.reap(blocking: false) } // exited before the source armed
+        child = ChildTracker(pid: childPid, queue: ioQueue)
 
         let src = DispatchSource.makeReadSource(fileDescriptor: pty.master, queue: ioQueue)
         src.setEventHandler { [weak self] in self?.readAvailable() }
-        src.setCancelHandler { [weak self] in self?.finishClose() }
+        // The cancel handler holds the PTY strongly and closes the master itself: when the
+        // transport is deallocated (deinit → terminate → cancel) `self` is already nil here, and
+        // relying on `finishClose` alone leaked the master fd.
+        src.setCancelHandler { [weak self, pty] in
+            pty.closeMaster()
+            self?.finishClose()
+        }
         readSource = src
         src.resume()
     }
@@ -124,7 +128,7 @@ public final class PtyProcessTransport: TmuxTransport {
     private let readBuffer = UnsafeMutableRawPointer.allocate(byteCount: 1 << 16, alignment: 16)
 
     private func readAvailable() {
-        guard let pty = pty else { return }
+        guard let pty = pty, pty.isMasterOpen else { return }
         let n = read(pty.master, readBuffer, 1 << 16)
         if n > 0 {
             onData?(Data(bytes: readBuffer, count: n))
@@ -138,12 +142,12 @@ public final class PtyProcessTransport: TmuxTransport {
 
     public func write(_ data: Data) {
         writeQueue.async { [weak self] in
-            guard let self = self, let pty = self.pty else { return }
+            guard let self = self, let pty = self.pty, pty.isMasterOpen else { return }
             data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
                 guard let base = raw.baseAddress else { return }
                 var off = 0
                 let total = raw.count
-                while off < total {
+                while off < total && pty.isMasterOpen {
                     let w = Darwin.write(pty.master, base + off, total - off)
                     if w > 0 {
                         off += w
@@ -164,10 +168,7 @@ public final class PtyProcessTransport: TmuxTransport {
     }
 
     public func terminate() {
-        pidLock.lock()
-        let target = pid
-        pidLock.unlock()
-        if target > 0 { kill(target, SIGTERM) }
+        child?.signal(SIGTERM)
         readSource?.cancel()
     }
 
@@ -179,20 +180,6 @@ public final class PtyProcessTransport: TmuxTransport {
         }
     }
 
-    /// Collect the child's exit status (blocking only when the exit event already fired) and clear
-    /// the pid. Runs on `ioQueue`.
-    private func reap(blocking: Bool) {
-        pidLock.lock()
-        defer { pidLock.unlock() }
-        guard pid > 0 else { return }
-        var status: Int32 = 0
-        let r = waitpid(pid, &status, blocking ? 0 : WNOHANG)
-        if r == pid || (r == -1 && errno == ECHILD) {
-            pid = -1
-            exitSource?.cancel()
-        }
-    }
-
     deinit {
         terminate()
         readBuffer.deallocate()
@@ -201,7 +188,55 @@ public final class PtyProcessTransport: TmuxTransport {
     private func finishClose() {
         guard !didClose else { return }
         didClose = true
-        if let pty = pty { close(pty.master) }
+        if let pty = pty { pty.closeMaster() }
         onClose?()
+    }
+}
+
+/// Keeps a `DispatchSourceProcess` alive on `queue` until `waitpid` collects `pid`, then cancels
+/// the source and releases itself. Decouples zombie reaping from `PtyProcessTransport`'s lifetime.
+private final class ChildTracker {
+    private let lock = NSLock()
+    private var pid: pid_t
+    private var source: DispatchSourceProcess?
+
+    init(pid: pid_t, queue: DispatchQueue) {
+        self.pid = pid
+        let exit = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: queue)
+        self.source = exit
+        exit.setEventHandler {
+            self.reap(blocking: true)
+        }
+        exit.setCancelHandler {
+            _ = self
+        }
+        exit.resume()
+        // Handle the race where the child exited before `exit.resume()` armed the kqueue note.
+        queue.async {
+            self.reap(blocking: false)
+        }
+    }
+
+    func signal(_ sig: Int32) {
+        lock.lock()
+        let target = pid
+        lock.unlock()
+        if target > 0 { kill(target, sig) }
+    }
+
+    func reap(blocking: Bool) {
+        var toCancel: DispatchSourceProcess?
+        lock.lock()
+        if pid > 0 {
+            var status: Int32 = 0
+            let r = waitpid(pid, &status, blocking ? 0 : WNOHANG)
+            if r == pid || (r == -1 && errno == ECHILD) {
+                pid = -1
+                toCancel = source
+                source = nil
+            }
+        }
+        lock.unlock()
+        toCancel?.cancel()
     }
 }

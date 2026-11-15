@@ -328,6 +328,9 @@ final class AppModel {
                 guard let self, let conn else { return }
                 self.handleConnectionClosed(conn)
             }
+            conn.onSessionRenamed = { [weak self] oldKey, newKey in
+                self?.renameIdentity(from: oldKey, to: newKey)
+            }
             // Output-finished system notification — BACKGROUND terminals only (if you're viewing it,
             // you're already watching, so we don't interrupt). The in-app row effect fires for all.
             // Two gates (dsh lessons): a minimum burst duration, so a short prompt echo never pings;
@@ -557,11 +560,14 @@ final class AppModel {
         return conn.outputPhase == .streaming
     }
 
+    @ObservationIgnored private var schedulerTask: Task<Void, Never>?
+
     /// THE app heartbeat (决议 #5): one loop drives all periodic work in a guaranteed order —
     /// ① sample activity (tmux poll, skipped while occluded) → ② session snapshots. One timer instead
     /// of several: fewer wakeups.
     private func startScheduler() {
-        Task { @MainActor in
+        schedulerTask?.cancel()
+        schedulerTask = Task { @MainActor in
             var n = 0
             while !Task.isCancelled {
                 await activity.tick()
@@ -1646,6 +1652,7 @@ final class AppModel {
     /// Cleanly tear down every live connection on app quit.
     /// Detach only — never kill sessions here, so they can be resumed on next launch.
     func shutdown() {
+        schedulerTask?.cancel(); schedulerTask = nil
         superagent.stopLoop()
         snapshotMetadataNow() // freshen the roster (cwd/command) so a clean quit restores accurately
         tunnelRunner.stopAll() // terminate ssh -R children so they don't orphan

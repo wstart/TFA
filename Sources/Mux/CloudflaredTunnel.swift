@@ -140,21 +140,22 @@ final class CloudflaredRunner {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: bin)
         p.arguments = args
-        let onData: @Sendable (FileHandle) -> Void = { [weak self] fh in
-            let d = fh.availableData
-            if d.isEmpty { fh.readabilityHandler = nil; return }
-            guard let s = String(data: d, encoding: .utf8) else { return }
-            Task { @MainActor in self?.ingest(t.id, s) }
+        var drainRef: PipeLogDrain?
+        let drain = PipeLogDrain(attachTo: p) { [weak self] in
+            Task { @MainActor in
+                guard let self, let d = drainRef else { return }
+                for chunk in d.takePending() { self.ingest(t.id, chunk) }
+            }
         }
-        let errPipe = Pipe(); p.standardError = errPipe   // cloudflared 的日志(含公网地址)走 stderr
-        let outPipe = Pipe(); p.standardOutput = outPipe
-        errPipe.fileHandleForReading.readabilityHandler = onData
-        outPipe.fileHandleForReading.readabilityHandler = onData
+        drainRef = drain
         p.terminationHandler = { [weak self] proc in
-            errPipe.fileHandleForReading.readabilityHandler = nil
-            outPipe.fileHandleForReading.readabilityHandler = nil
+            drain.finish()
             let code = proc.terminationStatus
-            Task { @MainActor in self?.handleExit(t, status: code) }
+            Task { @MainActor in
+                guard let self else { return }
+                for chunk in drain.takePending() { self.ingest(t.id, chunk) }
+                self.handleExit(t, status: code)
+            }
         }
         do {
             try p.run()

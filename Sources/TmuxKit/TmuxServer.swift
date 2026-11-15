@@ -199,7 +199,7 @@ public enum TmuxServer {
             // `#{session_name}` would be read as a shell comment (a `#` starting a word), eating the
             // `-F` argument. Single-quoting the format keeps it intact through that re-parse. The
             // `env PATH=…` prefix makes `tmux` resolvable on macOS (Homebrew) remotes — see remotePATH.
-            argv += [host, "env PATH=\(TmuxConnection.remotePATH) tmux -u list-sessions -F '#{session_name}'"]
+            argv += ["--", host, "env PATH=\(TmuxConnection.remotePATH) tmux -u list-sessions -F '#{session_name}'"]
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")

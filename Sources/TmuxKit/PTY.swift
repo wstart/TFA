@@ -29,15 +29,49 @@ final class PTY {
     /// The slave device path (e.g. `/dev/ttys003`). Opening THIS in a session-leader child (after
     /// setsid) makes the pty its controlling terminal — required for ssh to read a password.
     var slaveName: String? {
-        guard let p = ptsname(master) else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        guard masterOpen, let p = ptsname(master) else { return nil }
         return String(cString: p)
     }
 
     func setWindowSize(cols: Int, rows: Int) {
+        lock.lock(); defer { lock.unlock() }
+        guard masterOpen else { return }
         var ws = winsize(ws_row: UInt16(max(1, rows)), ws_col: UInt16(max(1, cols)),
                          ws_xpixel: 0, ws_ypixel: 0)
         _ = ioctl(master, UInt(TIOCSWINSZ), &ws)
     }
 
-    func closeSlave() { close(slave) }
+    /// Close each end exactly once. The master is closed by the transport's read-source cancel
+    /// handler (dispatch requires the fd to stay open until then); `deinit` is the backstop for
+    /// paths that never got that far (spawn failure, never started), so no pty is ever leaked.
+    private let lock = NSLock()
+    private var masterOpen = true
+    private var slaveOpen = true
+
+    func closeSlave() {
+        lock.lock(); defer { lock.unlock() }
+        guard slaveOpen else { return }
+        slaveOpen = false
+        close(slave)
+    }
+
+    func closeMaster() {
+        lock.lock(); defer { lock.unlock() }
+        guard masterOpen else { return }
+        masterOpen = false
+        close(master)
+    }
+
+    /// False once the master is closed: writers check it so they never write into a closed (or
+    /// already recycled) fd number.
+    var isMasterOpen: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return masterOpen
+    }
+
+    deinit {
+        closeSlave()
+        closeMaster()
+    }
 }

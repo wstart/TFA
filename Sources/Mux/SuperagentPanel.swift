@@ -780,6 +780,10 @@ struct SettingsCard: View {
                 .controlSize(.small)
                 Toggle("", isOn: bind(\.acceptance)).labelsHidden().toggleStyle(.switch).controlSize(.small)
             }
+            SettingRow(title: "执行与主管 Agent", note: s.codingAgent == .claude ? "使用本机安装的 Claude Code 命令行" : "使用内置 axis-claude，连接本机 axis-model 服务") {
+                SegmentedChoice(selection: bind(\.codingAgent), options: CodingAgentKind.allCases.map { (value: $0, label: $0.label) })
+                    .accessibilityLabel("执行与主管 Agent")
+            }
             Hairline()
             // 看门狗（第 4 期）：模型定时看工作中的工单有没有偏离清单项；偏离先提醒执行者，宽限期过了仍偏离就把问题挂给你。
             SettingRow(title: "看门狗", note: "每隔一段时间请模型看一眼工作中的工单有没有偏离清单项；偏离先提醒执行者，\(Int(SuperagentEngine.watchdogGrace / 60)) 分钟内不改正就把问题挂给你") {
@@ -791,11 +795,11 @@ struct SettingsCard: View {
                     Stepper(value: bind(\.watchdogIntervalMinutes), in: 1...60) { Text("\(s.watchdogIntervalMinutes) 分钟").monospacedDigit() }
                 }
             }
-            SettingRow(title: "模型调用方式", note: s.modelBackend == .cli ? "本机的 claude 命令，走你的 Claude Code 登录" : "Anthropic Messages API，key 存在钥匙串") {
+            SettingRow(title: "模型调用方式", note: Self.backendNote(s.modelBackend)) {
                 SegmentedChoice(selection: bind(\.modelBackend), options: ModelBackendKind.allCases.map { (value: $0, label: $0.label) })
                     .accessibilityLabel("模型调用方式")
             }
-            SettingRow(title: "研判用的模型", note: "默认 \(SuperagentCore.Settings.defaultModel)") {
+            SettingRow(title: "研判用的模型", note: s.modelBackend == .axisModel ? "默认使用 axis-model 当前加载的模型（axis_model）" : "默认 \(SuperagentCore.Settings.defaultModel)") {
                 ModelNameField()
             }
             if s.modelBackend == .api {
@@ -803,6 +807,14 @@ struct SettingsCard: View {
             }
         }
         .saCard()
+    }
+
+    private static func backendNote(_ kind: ModelBackendKind) -> String {
+        switch kind {
+        case .cli: return "本机的 claude 命令，走你的 Claude Code 登录"
+        case .api: return "Anthropic Messages API，key 存在钥匙串"
+        case .axisModel: return "本机的 axis-model 服务（默认 http://127.0.0.1:1234）"
+        }
     }
 
     private func bind<T>(_ key: WritableKeyPath<SuperagentCore.Settings, T>) -> Binding<T> {

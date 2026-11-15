@@ -397,15 +397,28 @@ public struct Role: Equatable, Sendable, Codable, Identifiable {
     ]
 }
 
+/// 执行工单与「主管」终端使用的编码 Agent：`claude` = Claude Code；`axisClaude` = 内置的 `axis-claude`（走本机 axis-model）。
+public enum CodingAgentKind: String, CaseIterable, Sendable {
+    case claude, axisClaude
+
+    public var label: String {
+        switch self {
+        case .claude: return "Claude Code"
+        case .axisClaude: return "axis-claude"
+        }
+    }
+}
+
 /// 看门狗研判用哪种方式调模型（工作清单第 4 期）：`cli` = 本机的 `claude -p`（走用户的订阅）；
-/// `api` = Anthropic Messages API（key 存钥匙串）。
+/// `api` = Anthropic Messages API（key 存钥匙串）；`axisModel` = 本机的 `axis-model` 服务（127.0.0.1:1234）。
 public enum ModelBackendKind: String, CaseIterable, Sendable {
-    case cli, api
+    case cli, api, axisModel
 
     public var label: String {
         switch self {
         case .cli: return "本机 claude"
         case .api: return "Anthropic API"
+        case .axisModel: return "本机 axis-model"
         }
     }
 }
@@ -430,6 +443,8 @@ public struct Settings: Equatable, Sendable {
     public var modelBackend: ModelBackendKind = .cli
     /// 研判用的模型 id。
     public var modelName: String = Settings.defaultModel
+    /// 执行终端与主管终端用哪个编码 Agent。
+    public var codingAgent: CodingAgentKind = .claude
 
     public static let defaultModel = "claude-sonnet-5-5"
 

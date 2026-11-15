@@ -255,8 +255,8 @@ private struct TunnelSheet: View {
     }
 
     private var valid: Bool {
-        !serverIP.trimmingCharacters(in: .whitespaces).isEmpty
-            && !account.trimmingCharacters(in: .whitespaces).isEmpty
+        SSHTunnel.isValidEndpointToken(serverIP)
+            && SSHTunnel.isValidEndpointToken(account)
             && port(loginPort) != nil && port(remotePort) != nil && port(localPort) != nil
             && (existing != nil || !password.isEmpty) // 新建必须有密码
     }

@@ -20,6 +20,7 @@ enum ModelBackends {
         switch s.modelBackend {
         case .cli: return ClaudeCLIBackend(model: s.modelName)
         case .api: return AnthropicAPIBackend(model: s.modelName, apiKey: ModelAPIKeyStore.load())
+        case .axisModel: return AxisModelBackend(model: s.modelName)
         }
     }
 }
@@ -178,6 +179,138 @@ struct AnthropicAPIBackend: ModelBackend {
         let text = ((obj["content"] as? [[String: Any]]) ?? [])
             .compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined()
         guard !text.isEmpty else { throw ModelBackendError("Anthropic API 没有返回文本（stop_reason \(obj["stop_reason"] as? String ?? "?")）") }
+        return text
+    }
+}
+
+// MARK: - 本机 axis-model
+
+/// `POST /v1/messages`（默认 `http://127.0.0.1:1234`）：复用本机 axis-model 服务做看门狗研判。
+/// 兼容 SSE 流式响应（`axis-model` 默认 `stream: true`）与普通 JSON 响应。
+struct AxisModelBackend: ModelBackend {
+    var model: String
+    var baseURL: URL?
+    var authToken: String?
+    var session: URLSession = .shared
+    var timeout: Double = 120
+    var maxTokens = 1024
+
+    func complete(system: String, user: String) async throws -> String {
+        let env = ProcessInfo.processInfo.environment
+        let resolvedBase: URL = {
+            if let baseURL { return baseURL }
+            let raw = [env["AXIS_BASE_URL"], env["ANTHROPIC_BASE_URL"]]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty } ?? "http://127.0.0.1:1234"
+            return URL(string: raw) ?? URL(string: "http://127.0.0.1:1234")!
+        }()
+        let token = authToken
+            ?? [env["AXIS_AUTH_TOKEN"], env["ANTHROPIC_AUTH_TOKEN"]]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty }
+            ?? "dummy"
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveModel: String = {
+            if trimmedModel.isEmpty || trimmedModel == Settings.defaultModel {
+                if let envModel = env["AXIS_MODEL"]?.trimmingCharacters(in: .whitespacesAndNewlines), !envModel.isEmpty {
+                    return envModel
+                }
+                return "axis_model"
+            }
+            return trimmedModel
+        }()
+
+        let endpoint = resolvedBase.path.hasSuffix("/v1/messages")
+            ? resolvedBase
+            : resolvedBase.appendingPathComponent("v1/messages")
+        var req = URLRequest(url: endpoint, timeoutInterval: timeout)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("text/event-stream, application/json", forHTTPHeaderField: "Accept")
+        req.setValue(token, forHTTPHeaderField: "x-api-key")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        let body: [String: Any] = [
+            "model": effectiveModel,
+            "max_tokens": maxTokens,
+            "system": system,
+            "messages": [["role": "user", "content": user]],
+            "stream": true,
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: req)
+        } catch let u as URLError {
+            switch u.code {
+            case .cannotConnectToHost, .cannotFindHost, .notConnectedToInternet,
+                 .networkConnectionLost, .dnsLookupFailed, .timedOut:
+                throw ModelBackendError("无法连接 axis-model（\(resolvedBase.absoluteString)）— 请在「模型」面板启动服务并加载模型")
+            default:
+                throw ModelBackendError("连接 axis-model 失败：\(u.localizedDescription)")
+            }
+        } catch {
+            throw ModelBackendError("连接 axis-model 失败：\(error.localizedDescription)")
+        }
+
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let msg = (obj?["error"] as? [String: Any])?["message"] as? String
+                ?? String(decoding: data.prefix(300), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            throw ModelBackendError("axis-model HTTP \(status)：\(msg)")
+        }
+
+        return try Self.parseResponse(data)
+    }
+
+    static func parseResponse(_ data: Data) throws -> String {
+        let raw = String(decoding: data, as: UTF8.self)
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("{"), let obj = (try? JSONSerialization.jsonObject(with: Data(trimmed.utf8))) as? [String: Any] {
+            if let err = (obj["error"] as? [String: Any])?["message"] as? String {
+                throw ModelBackendError("axis-model 推理出错：\(err)")
+            }
+            let text = ((obj["content"] as? [[String: Any]]) ?? [])
+                .compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined()
+            guard !text.isEmpty else { throw ModelBackendError("axis-model 没有返回文本") }
+            return text
+        }
+
+        var text = ""
+        var sawEvent = false
+        for line in raw.components(separatedBy: "\n") {
+            let clean = line.hasSuffix("\r") ? String(line.dropLast()) : line
+            guard clean.hasPrefix("data:") else { continue }
+            let payload = clean.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            if payload.isEmpty || payload == "[DONE]" { continue }
+            guard let event = (try? JSONSerialization.jsonObject(with: Data(payload.utf8))) as? [String: Any],
+                  let type = event["type"] as? String else { continue }
+            sawEvent = true
+            switch type {
+            case "error":
+                let msg = (event["error"] as? [String: Any])?["message"] as? String ?? payload
+                throw ModelBackendError("axis-model 推理出错：\(msg)")
+            case "content_block_start":
+                if let block = event["content_block"] as? [String: Any],
+                   block["type"] as? String == "text",
+                   let t = block["text"] as? String {
+                    text += t
+                }
+            case "content_block_delta":
+                if let delta = event["delta"] as? [String: Any],
+                   delta["type"] as? String == "text_delta",
+                   let t = delta["text"] as? String {
+                    text += t
+                }
+            default:
+                break
+            }
+        }
+        guard sawEvent else { throw ModelBackendError("无法解析 axis-model 响应") }
+        guard !text.isEmpty else { throw ModelBackendError("axis-model 没有返回文本") }
         return text
     }
 }

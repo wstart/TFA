@@ -47,6 +47,105 @@ struct SSHTunnel: Identifiable, Codable, Hashable {
     var endpointLabel: String { "\(account)@\(serverIP):\(loginPort)" }
     /// `远程:remotePort ← 本地:localPort` — 一眼看清转发方向。
     var forwardLabel: String { "远程 :\(remotePort)  ←  本地 :\(localPort)" }
+
+    /// 校验 SSH 账号 / 主机字段：非空、不含空白或控制字符、且不以 `-` 开头（防止命令行选项注入）。
+    nonisolated static func isValidEndpointToken(_ raw: String) -> Bool {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, !s.hasPrefix("-") else { return false }
+        return !s.unicodeScalars.contains {
+            CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0)
+        }
+    }
+
+    var isValidConfig: Bool {
+        Self.isValidEndpointToken(account)
+            && Self.isValidEndpointToken(serverIP)
+            && (1...65535).contains(loginPort)
+            && (1...65535).contains(remotePort)
+            && (1...65535).contains(localPort)
+    }
+
+    /// 构造传给 `/usr/bin/ssh` 的参数列表，在目标主机前显式加 `--` 终止选项解析。
+    var sshArguments: [String] {
+        let acc = account.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ip = serverIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        let forward = gatewayPorts
+            ? "0.0.0.0:\(remotePort):localhost:\(localPort)"
+            : "\(remotePort):localhost:\(localPort)"
+        return [
+            "-N",                                              // 不执行远程命令,只做转发
+            "-R", forward,                                     // 反向转发
+            "-p", "\(loginPort)",
+            "-o", "ExitOnForwardFailure=yes",                  // 远程端口占用/绑定失败 → 立即退出(好报错+重连)
+            "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3", // 链路死了能察觉 → 退出 → 重连
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "NumberOfPasswordPrompts=1",
+            "--",
+            "\(acc)@\(ip)",
+        ]
+    }
+}
+
+/// 捕获子进程 stdout/stderr 流且保证退出前尾部输出零丢失：
+/// 增量读取（`availableData`）与退出时的 `readDataToEndOfFile()` 由同一把锁串行化，
+/// 并在 `terminationHandler` 切回主线程处理退出状态前一次性排空所有缓冲块。
+final class PipeLogDrain: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: [String] = []
+    private var finished = false
+    private let outPipe = Pipe()
+    private let errPipe = Pipe()
+    private let notify: @Sendable () -> Void
+
+    init(attachTo process: Process, notify: @escaping @Sendable () -> Void) {
+        self.notify = notify
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        outPipe.fileHandleForReading.readabilityHandler = { [weak self] fh in self?.readStep(fh) }
+        errPipe.fileHandleForReading.readabilityHandler = { [weak self] fh in self?.readStep(fh) }
+    }
+
+    private func readStep(_ fh: FileHandle) {
+        var shouldNotify = false
+        lock.lock()
+        if !finished {
+            let d = fh.availableData
+            if d.isEmpty {
+                fh.readabilityHandler = nil
+            } else {
+                pending.append(String(decoding: d, as: UTF8.self))
+                shouldNotify = true
+            }
+        }
+        lock.unlock()
+        if shouldNotify { notify() }
+    }
+
+    /// 摘除异步读取回调并同步读尽管道剩余字节到缓冲队列（在 `terminationHandler` 中调用）。
+    func finish() {
+        let outFH = outPipe.fileHandleForReading
+        let errFH = errPipe.fileHandleForReading
+        outFH.readabilityHandler = nil
+        errFH.readabilityHandler = nil
+        lock.lock()
+        if !finished {
+            finished = true
+            let dOut = outFH.readDataToEndOfFile()
+            if !dOut.isEmpty { pending.append(String(decoding: dOut, as: UTF8.self)) }
+            let dErr = errFH.readDataToEndOfFile()
+            if !dErr.isEmpty { pending.append(String(decoding: dErr, as: UTF8.self)) }
+        }
+        lock.unlock()
+    }
+
+    /// 取出当前已缓冲的全部输出块（保持写入顺序）。
+    func takePending() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        let out = pending
+        pending.removeAll()
+        return out
+    }
 }
 
 /// 一条隧道的运行态(驱动 UI 的状态点)。
@@ -141,20 +240,12 @@ final class TunnelRunner {
     // MARK: - internals
 
     private func spawn(_ t: SSHTunnel) {
-        // GatewayPorts on → bind 远程端口到所有网卡(外网可达,需服务器也允许);否则只绑 loopback。
-        let forward = t.gatewayPorts
-            ? "0.0.0.0:\(t.remotePort):localhost:\(t.localPort)"
-            : "\(t.remotePort):localhost:\(t.localPort)"
-        let args = [
-            "-N",                                              // 不执行远程命令,只做转发
-            "-R", forward,                                     // 反向转发
-            "-p", "\(t.loginPort)",
-            "-o", "ExitOnForwardFailure=yes",                  // 远程端口占用/绑定失败 → 立即退出(好报错+重连)
-            "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3", // 链路死了能察觉 → 退出 → 重连
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "NumberOfPasswordPrompts=1",
-            "\(t.account)@\(t.serverIP)",
-        ]
+        guard t.isValidConfig else {
+            appendLog(t.id, "✕ 配置无效：账号/服务器地址不能以 - 开头或含空白，端口须在 1–65535")
+            states[t.id] = .stopped
+            return
+        }
+        let args = t.sshArguments
         appendLog(t.id, "▶ 启动:ssh \(args.joined(separator: " "))")
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -164,22 +255,22 @@ final class TunnelRunner {
             for (k, v) in ask { env[k] = v } // SSH_ASKPASS + TFA_SSH_PASSWORD,无 tty 也能喂密码
         }
         p.environment = env
-        // 流式捕获 ssh 的 stderr/stdout 到日志(EOF 时摘掉 handler 避免空读风暴)。
-        let onData: @Sendable (FileHandle) -> Void = { [weak self] fh in
-            let d = fh.availableData
-            if d.isEmpty { fh.readabilityHandler = nil; return }
-            guard let s = String(data: d, encoding: .utf8) else { return }
-            Task { @MainActor in self?.ingest(t.id, s) }
+        var drainRef: PipeLogDrain?
+        let drain = PipeLogDrain(attachTo: p) { [weak self] in
+            Task { @MainActor in
+                guard let self, let d = drainRef else { return }
+                for chunk in d.takePending() { self.ingest(t.id, chunk) }
+            }
         }
-        let errPipe = Pipe(); p.standardError = errPipe
-        let outPipe = Pipe(); p.standardOutput = outPipe
-        errPipe.fileHandleForReading.readabilityHandler = onData
-        outPipe.fileHandleForReading.readabilityHandler = onData
+        drainRef = drain
         p.terminationHandler = { [weak self] proc in
-            errPipe.fileHandleForReading.readabilityHandler = nil
-            outPipe.fileHandleForReading.readabilityHandler = nil
+            drain.finish()
             let code = proc.terminationStatus
-            Task { @MainActor in self?.handleExit(t, status: code) }
+            Task { @MainActor in
+                guard let self else { return }
+                for chunk in drain.takePending() { self.ingest(t.id, chunk) }
+                self.handleExit(t, status: code)
+            }
         }
         do {
             try p.run()

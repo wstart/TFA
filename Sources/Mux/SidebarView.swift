@@ -101,8 +101,9 @@ struct SidebarView: View {
                 if !showEnded && filter.isEmpty {
                     WorklistRow()
                 }
-                // The「主管」(router) row is pinned above everything: it's where requests are made.
-                if !showEnded && filter.isEmpty && WorkspaceStore.shared.selected == nil {
+                // The「主管」(router) row is pinned above everything (including while a project is selected):
+                // `projectScoped` excludes the router from terminal lists so it only appears here.
+                if !showEnded && filter.isEmpty {
                     routerRow
                 }
                 // Ungrouped terminals live in a built-in「未分组」folder pinned above the group folders

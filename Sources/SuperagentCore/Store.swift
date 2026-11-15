@@ -720,6 +720,7 @@ public final class SuperagentStore {
         if let v = try kvInt("settings.watchdogIntervalMinutes") { s.watchdogIntervalMinutes = max(1, min(120, v)) }
         if let v = try kv("settings.modelBackend").flatMap(ModelBackendKind.init) { s.modelBackend = v }
         if let v = try kv("settings.modelName")?.trimmingCharacters(in: .whitespaces), !v.isEmpty { s.modelName = v }
+        if let v = try kv("settings.codingAgent").flatMap(CodingAgentKind.init) { s.codingAgent = v }
         return s
     }
 
@@ -734,6 +735,7 @@ public final class SuperagentStore {
             try setKV("settings.watchdogIntervalMinutes", String(s.watchdogIntervalMinutes))
             try setKV("settings.modelBackend", s.modelBackend.rawValue)
             try setKV("settings.modelName", s.modelName)
+            try setKV("settings.codingAgent", s.codingAgent.rawValue)
         }
     }
 
