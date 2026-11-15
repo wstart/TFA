@@ -264,6 +264,11 @@ extension SuperagentEngine {
                 // 没变：同一个人；或同一角色且它的工单还开着（工单结束了再分给同一角色 = 重新派一张）。
                 // 例外：没有工单的受阻项（前置被取消）重新分配 = 解开，哪怕还是给同一个人。
                 if to == old, !to.isAgent || openTicket != nil, !(i.status == .blocked && openTicket == nil) { continue }
+                // 链接项（4C）被人改派：断开链接，那一项不再跟随退回产生的任务，那个任务结束时也不回填。
+                for link in try liveLinks(taskID, ord: ord) {
+                    try store.detachHandback(toTaskID: link.toTaskID)
+                    notes.append("第 \(ord) 项不再跟随 A-\(link.toTaskID)")
+                }
                 if let ot = openTicket {
                     touched.insert(ot.id)
                     notes.append("改派：第 \(ord) 项 \(old.label) → \(to.label)（工单 #\(ot.id)）")
@@ -719,11 +724,11 @@ extension SuperagentEngine {
 
     /// `handback` 的任务映射（注意事项 C-08；设计评审 2026-11-08，4A）：属于任务 A 的工单退回请求 → **新任务** B
     /// （`source = .handback`，`sourceRef = "#<工单>"`，scope / 优先级 / 工作流同 A，一项 = 退回的请求）。
-    /// 退回绑定这张工单的一项（`ord`；省略时取它唯一没完成的项，剩两项以上要指明）：那一项不再归这张工单、标 blocked
-    /// （界面显示「→ B」），链接记进 kv（`Store.saveHandbackLink`）；工单名下没有别的项了就结束它（`endByHandback`），
+    /// 退回绑定这张工单的一项（`ord`；省略时取它唯一没完成的项，剩两项以上要指明）：那一项不再归这张工单、变成指向 B 的**链接项**
+    /// （4C：状态跟随 B，读视图派生；界面显示「→ B」），链接记进 kv（`Store.saveHandbackLink`）；工单名下没有别的项了就结束它（`endByHandback`），
     /// 有就继续做剩下的。它的项都已完成（没有可绑的）→ 只建新任务，清单项不动。
     /// A 和 B 之间只有这条链接，**不写 task_dep**：A 的其它项照常能交给 Agent（不触发 C-14），`advanceIfComplete` 本来就会等那一项。
-    /// B 完成 / 取消时回填 A 的那一项：`handbackTargetEnded`。返回 nil = 工单不属于任务（沿用候选路径）。
+    /// B 完成 / 取消时回填 A 的那一项：`handbackTargetEnded`；人把那一项改派走就断开链接（`assign`）。返回 nil = 工单不属于任务（沿用候选路径）。
     func handbackToTask(_ t: Ticket, request: String, reason: String, item ord: Int?, at: Double) throws -> HandbackResult? {
         guard let taskID = t.taskID, var task = try store.task(taskID) else { return nil }
         let items = try store.items(taskID)
@@ -759,9 +764,10 @@ extension SuperagentEngine {
                            + "谁来做由人在清单里决定；不要挂回 #\(t.id)。", at: at)
             return HandbackResult(ref: n.label, itemOrd: nil, ticketEnded: false, remaining: [])
         }
-        // 那一项等 B：不再归这张工单（它再回报不改它，C-07），标 blocked。
+        // 那一项变成链接项（4C）：不再归这张工单（它再回报不改它，C-07），状态跟随 B（读视图里派生，B 完成时回填）；不再标受阻。
         i.ticketID = nil
-        i.status = .blocked
+        i.status = .todo
+        i.startedAt = nil
         try store.saveItem(i)
         task.updatedAt = at
         try store.saveTask(task)
@@ -782,13 +788,15 @@ extension SuperagentEngine {
         return HandbackResult(ref: n.label, itemOrd: i.ord, ticketEnded: remaining.isEmpty, remaining: remaining)
     }
 
-    /// 退回产生的任务 B 结束了，回填原任务 A 的那一项（4A）。B 完成：那一项 done（`doneBy = A-<B>`），记「第 n 项由 A-<B> 完成」，
-    /// 再 `advanceIfComplete`；B 取消 / 放弃：那一项回到待分配（todo、未分配）。那一项已被人改派（不再是等 B 的 blocked）就不动。
+    /// 退回产生的任务 B 结束了，回填原任务 A 的那一项（4A / 4C）。B 完成：那一项 done（`doneBy = A-<B>`），记「第 n 项由 A-<B> 完成」，
+    /// 再 `advanceIfComplete`；B 取消 / 放弃：那一项回到待分配（todo、未分配）。那一项已被人改派（链接已断开）就不动。
     /// 调用方在事务里。
     private func handbackTargetEnded(_ b: WorkTask, at: Double) throws {
-        for link in try store.handbackLinks() where link.toTaskID == b.id {
+        let detached = try store.detachedHandbacks()
+        for link in try store.handbackLinks() where link.toTaskID == b.id && !detached.contains(b.id) {
+            // 旧数据里等 B 的项是 blocked（4A），新的是 todo（4C）：都认；有工单 = 已改派。
             guard var a = try store.task(link.fromTaskID), a.status == .open,
-                  var i = try store.items(a.id).first(where: { $0.ord == link.itemOrd && $0.status == .blocked && $0.ticketID == nil }) else { continue }
+                  var i = try store.items(a.id).first(where: { $0.ord == link.itemOrd && $0.status != .done && $0.ticketID == nil }) else { continue }
             if b.status == .done {
                 try finish(i, by: b.label, at: at)
                 try store.log(nil, "item", "第 \(i.ord) 项由 \(b.label) 完成：\(i.text)", at: at, task: a.id)
@@ -810,7 +818,8 @@ extension SuperagentEngine {
 
     public func taskView(_ id: Int64) throws -> TaskView {
         let t = try requireTask(id)
-        var v = try makeView(t, items: try store.items(id), tickets: try store.tickets(task: id), links: try store.handbackLinks(), handled: handbackHandled)
+        var v = try makeView(t, items: try store.items(id), tickets: try store.tickets(task: id), links: try store.handbackLinks(),
+                             detached: try store.detachedHandbacks(), target: linkTarget)
         v.syncConflicts = try store.orgConflicts(taskIDs: [id])[id] ?? [] // 组织同步（第 3 期）
         return v
     }
@@ -824,10 +833,12 @@ extension SuperagentEngine {
         let tickets = try store.tickets(taskIDs: ids)
         let conflicts = try store.orgConflicts(taskIDs: ids) // 组织同步（第 3 期）
         let links = try store.handbackLinks()
+        let detached = try store.detachedHandbacks()
         let byID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) }) // 打开的任务都在里面：退回产生的 B 开着就查得到
         return try tasks.map {
-            var v = try makeView($0, items: items[$0.id] ?? [], tickets: tickets[$0.id] ?? [], links: links) { b in
-                byID[b]?.isOpen == true && !(items[b] ?? []).contains { $0.assignee == .unassigned }
+            var v = try makeView($0, items: items[$0.id] ?? [], tickets: tickets[$0.id] ?? [], links: links, detached: detached) { b in
+                guard byID[b]?.isOpen == true else { return nil }
+                return (items[b] ?? []).contains { $0.assignee == .unassigned } ? .unassigned : .doing
             }
             v.syncConflicts = conflicts[$0.id] ?? []
             return v
@@ -843,40 +854,70 @@ extension SuperagentEngine {
         return FinishPreview(tickets: tickets, unfinishedOrds: try store.items(taskID).filter { $0.status != .done }.map(\.ord))
     }
 
-    /// §4.3：名下打开工单的 PersonAction ∪ {review}（当前阶段是 review）∪ {blocked}（清单项受阻且没有打开的工单，见 `stuck`）。
-    /// 组织任务的「待评审」不算需要你：通过 / 打回由组织负责人在 Web 上做（第 3 期）。
-    /// `links` = 全部退回链接（4A），`handled(b)` = 退回产生的任务 b 还开着且每一项都有人做。
-    private func makeView(_ t: WorkTask, items: [Item], tickets: [Ticket], links: [HandbackLink], handled: (Int64) throws -> Bool) throws -> TaskView {
+    /// §4.3：名下打开工单的 PersonAction ∪ {review}（当前阶段是 review）∪ {blocked}（清单项受阻且没有打开的工单，或链接项的新任务
+    /// 还没人做，见 `stuck`）。组织任务的「待评审」不算需要你：通过 / 打回由组织负责人在 Web 上做（第 3 期）。
+    /// `links` = 全部退回链接，`detached` = 被人改派断开的（按新任务号），`target(b)` = 退回产生的任务 b 的进度（结束了为 nil）。
+    private func makeView(_ t: WorkTask, items raw: [Item], tickets: [Ticket], links: [HandbackLink], detached: Set<Int64>,
+                          target: (Int64) throws -> LinkedItem.State?) throws -> TaskView {
         let views = try tickets.map(view)
         let handbacks = links.filter { $0.fromTaskID == t.id }
+        let linked = try Self.linkedItems(raw, handbacks: handbacks, detached: detached, target: target)
+        // 链接项的状态跟随新任务（4C）：读视图里换掉，界面 / CLI / 组织上行看到的都是它。
+        let items = raw.map { i -> Item in
+            guard let l = linked[i.ord] else { return i }
+            var j = i
+            j.status = l.state == .doing ? .doing : .todo
+            return j
+        }
         var needs = Set<PersonAction>()
         if t.isOpen {
             for v in views where v.ticket.isOpen { if let a = v.stage.needsPerson { needs.insert(a) } }
             if t.stageKind == .review, t.origin == nil { needs.insert(.review) }
             let open = Set(tickets.filter(\.isOpen).map(\.id))
-            if try !Self.stuck(items, open: open, handbacks: handbacks, handled: handled).isEmpty { needs.insert(.blocked) }
+            if !Self.stuck(items, open: open, linked: linked).isEmpty { needs.insert(.blocked) }
         }
         let reviewing = tickets.contains { $0.isOpen && $0.reviewOf != nil }
         let summary = reviewing ? nil : tickets.last(where: { $0.reviewOf != nil && $0.status == .done })?.reportSummary
         var v = TaskView(task: t, items: items, tickets: views, needsYou: needs.sorted(), reviewSummary: summary, reviewing: reviewing)
         v.handbacks = handbacks
         v.handbackOrigin = links.last { $0.toTaskID == t.id }
+        v.linked = linked
         return v
     }
 
-    /// 受阻且没有打开工单的项的序号 = 需要你（§4.3）。退回出去的项（4A）只在新任务还没人做时算——那是在等你去分配它；
-    /// 新任务有人做之后它只是在等新任务完成（界面只显示「→ B」），不再需要你。
-    static func stuck(_ items: [Item], open: Set<Int64>, handbacks: [HandbackLink], handled: (Int64) throws -> Bool) throws -> [Int] {
-        try items.filter { i in
-            guard i.status == .blocked, !(i.ticketID.map(open.contains) ?? false) else { return false }
-            guard let link = handbacks.last(where: { $0.itemOrd == i.ord }) else { return true }
-            return try !handled(link.toTaskID)
+    /// 链接项（4C）：每一项取它最后一条退回链接；链接没被改派断开、项没完成、项没挂工单、新任务还开着 → 链接项。
+    static func linkedItems(_ items: [Item], handbacks: [HandbackLink], detached: Set<Int64>,
+                            target: (Int64) throws -> LinkedItem.State?) throws -> [Int: LinkedItem] {
+        var out: [Int: LinkedItem] = [:]
+        for i in items where i.status != .done && i.ticketID == nil {
+            guard let link = handbacks.last(where: { $0.itemOrd == i.ord }), !detached.contains(link.toTaskID),
+                  let state = try target(link.toTaskID) else { continue }
+            out[i.ord] = LinkedItem(link: link, state: state)
+        }
+        return out
+    }
+
+    /// 需要你的项的序号（§4.3）：链接项只在新任务还没人做时算——那是在等你去分配它；新任务有人做之后它只是在等新任务完成。
+    /// 其它项：受阻且没有打开的工单。
+    static func stuck(_ items: [Item], open: Set<Int64>, linked: [Int: LinkedItem]) -> [Int] {
+        items.filter { i in
+            if let l = linked[i.ord] { return l.state == .unassigned }
+            return i.status == .blocked && !(i.ticketID.map(open.contains) ?? false)
         }.map(\.ord)
     }
 
-    /// 单个任务读视图用的 `handled`：退回产生的任务 b 还开着且没有未分配的项。
-    private func handbackHandled(_ b: Int64) throws -> Bool {
-        try store.task(b)?.isOpen == true && !store.items(b).contains { $0.assignee == .unassigned }
+    /// 单个任务读视图用的 `target`：退回产生的任务 b 还开着时，它还有没人做的项 → unassigned，否则 → doing；结束了 → nil。
+    private func linkTarget(_ b: Int64) throws -> LinkedItem.State? {
+        guard try store.task(b)?.isOpen == true else { return nil }
+        return try store.items(b).contains { $0.assignee == .unassigned } ? .unassigned : .doing
+    }
+
+    /// 任务 `taskID` 第 `ord` 项现行的链接（没断开、新任务还开着）。
+    func liveLinks(_ taskID: Int64, ord: Int) throws -> [HandbackLink] {
+        let detached = try store.detachedHandbacks()
+        return try store.handbackLinks().filter {
+            try $0.fromTaskID == taskID && $0.itemOrd == ord && !detached.contains($0.toTaskID) && store.task($0.toTaskID)?.isOpen == true
+        }
     }
 
     // MARK: - 通知与打扰（注意事项 G-01～G-03）
@@ -917,12 +958,12 @@ extension SuperagentEngine {
                 if detail[.review] == nil { detail[.review] = v.reviewSummary ?? Self.lastDelivery(v.tickets.map(\.ticket))?.reportSummary ?? "清单全部完成" }
             }
             let open = Set(v.tickets.filter(\.ticket.isOpen).map(\.id))
-            let stuck = try Self.stuck(v.items, open: open, handbacks: v.handbacks, handled: handbackHandled)
+            let stuck = Self.stuck(v.items, open: open, linked: v.linked)
             if !stuck.isEmpty {
                 causes.append("blocked:" + stuck.map(String.init).joined(separator: ","))
                 if detail[.blocked] == nil {
-                    // 退回出去的项（4A）：说清是哪个新任务在等人分配，而不只是「受阻」。
-                    let targets = try stuck.compactMap { ord in v.handbacks.last { $0.itemOrd == ord } }.filter { try store.task($0.toTaskID)?.isOpen == true }
+                    // 链接项（4C）：说清是哪个新任务在等人分配，而不只是「受阻」。
+                    let targets = stuck.compactMap { v.linked[$0]?.link }
                     detail[.blocked] = targets.count == stuck.count
                         ? "\(Self.ordLabel(stuck))已退回成任务 " + targets.map { "A-\($0.toTaskID)" }.joined(separator: "、") + "，等你定谁来做"
                         : "\(Self.ordLabel(stuck))受阻"

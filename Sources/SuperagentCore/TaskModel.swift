@@ -15,6 +15,19 @@ public struct HandbackLink: Equatable, Hashable, Sendable {
     }
 }
 
+/// 链接项（TODOS「退回的清单项变成链接项」，设计评审 2026-11-08 4C）：原任务 A 被退回的那一项指向新任务 B，状态跟随 B。
+public struct LinkedItem: Equatable, Sendable {
+    public enum State: String, Equatable, Sendable {
+        /// B 还有没定谁来做的项：等你去分配 B（A 算「需要你」）。
+        case unassigned
+        /// B 的项都有人做了：在等 B 完成。
+        case doing
+    }
+    public let link: HandbackLink
+    public let state: State
+    public init(link: HandbackLink, state: State) { self.link = link; self.state = state }
+}
+
 public enum TaskSource: String, CaseIterable, Sendable {
     case manual, router, rule, schedule, handback, org
 
@@ -292,6 +305,9 @@ public struct TaskView: Equatable, Sendable, Identifiable {
     public var handbacks: [HandbackLink] = []
     /// 这个任务本身是退回产生的：来自哪个任务的第几项、哪张工单（`toTaskID == task.id`）；不是退回产生的为 nil。
     public var handbackOrigin: HandbackLink?
+    /// 链接项（TODOS 4C）：退回成新任务、新任务还开着、没被人改派的项（按 `ord`）。这些项的 `status` 在读视图里已换成
+    /// 跟随新任务的状态（新任务还有没人做的项 → todo，否则 → doing；新任务完成时引擎把它勾掉）；不再有受阻态。
+    public var linked: [Int: LinkedItem] = [:]
 
     public init(task: WorkTask, items: [Item], tickets: [TicketView], needsYou: [PersonAction], reviewSummary: String? = nil, reviewing: Bool = false,
                 syncConflicts: [SyncConflict] = []) {

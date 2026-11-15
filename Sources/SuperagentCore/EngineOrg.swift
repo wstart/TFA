@@ -228,6 +228,15 @@ extension SuperagentEngine {
     /// 改动挂钩：有 origin 的任务 → 阶段 / 勾选 / 结果、需要人、活动摘要三样入队（同类未发送的合并）；没有 origin 的任务
     /// 和待领取的占位行直接返回。调用方在事务里。
     func orgChanged(_ taskID: Int64) throws {
+        // 链接项（4C）：退回产生的任务 B 变了，原任务 A 的那一项跟着变——A 是组织任务时也要上行。
+        let detached = try store.detachedHandbacks()
+        for link in try store.handbackLinks() where link.toTaskID == taskID && link.fromTaskID != taskID && !detached.contains(taskID) {
+            try enqueueOrg(link.fromTaskID)
+        }
+        try enqueueOrg(taskID)
+    }
+
+    private func enqueueOrg(_ taskID: Int64) throws {
         guard let t = try store.task(taskID), t.origin != nil, t.syncState != "claimable" else { return }
         let at = now()
         for kind in ["patch", "needs", "audit"] { try store.enqueueOutbox(taskID, kind: kind, at: at) }
@@ -244,7 +253,8 @@ extension SuperagentEngine {
     public func orgPatch(for taskID: Int64) throws -> OrgPatch? {
         guard let t = try store.task(taskID), t.origin != nil, let state = try store.orgState(taskID) else { return nil }
         let map = Dictionary(uniqueKeysWithValues: try store.orgItems(taskID).map { ($0.itemID, $0) })
-        let items = try store.items(taskID).compactMap { i -> OrgPatchItem? in
+        // 读视图的项：链接项（4C）的状态已换成跟随退回产生的任务。
+        let items = try taskView(taskID).items.compactMap { i -> OrgPatchItem? in
             guard let m = map[i.id], m.conflictServer == nil else { return nil }
             return OrgPatchItem(id: m.originItemID, ord: i.ord, status: i.status.rawValue, doneBy: i.doneBy,
                                 doneAt: i.doneAt.map(OrgTime.string), startedAt: i.startedAt.map(OrgTime.string))

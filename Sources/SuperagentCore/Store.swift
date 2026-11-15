@@ -697,6 +697,18 @@ public final class SuperagentStore {
         try setKV("task.handback.\(l.toTaskID)", "\(l.fromTaskID):\(l.itemOrd):\(l.ticketID)")
     }
 
+    /// 被人改派走的退回链接（链接项 4C）：那一项不再跟随新任务，新任务结束时也不回填。存 kv `task.handbackDetached.<新任务>`，
+    /// 链接本身留作历史（`handbackLinks` 的 LIKE 'task.handback.%' 不会匹配这个键）。
+    public func detachedHandbacks() throws -> Set<Int64> {
+        Set(try db.query("SELECT key FROM kv WHERE key LIKE 'task.handbackDetached.%'").compactMap {
+            Int64($0.text(0).dropFirst("task.handbackDetached.".count))
+        })
+    }
+
+    func detachHandback(toTaskID: Int64) throws {
+        try setKV("task.handbackDetached.\(toTaskID)", "1")
+    }
+
     public func settings() throws -> Settings {
         var s = Settings()
         if let v = try kvInt("settings.slots") { s.slots = max(1, min(8, v)) }

@@ -83,7 +83,7 @@ extension Views {
 
         s += "\n【原文】\n\(t.request)\n"
         if !t.note.isEmpty { s += "\n【路由备注】\(t.note)\n" }
-        s += "\n【清单】\(v.doneCount)/\(v.totalCount)：\n" + v.items.map { itemLine($0, handbacks: v.handbacks) + "\n" }.joined()
+        s += "\n【清单】\(v.doneCount)/\(v.totalCount)：\n" + v.items.map { itemLine($0, handbacks: v.handbacks, linked: v.linked) + "\n" }.joined()
         if !v.tickets.isEmpty {
             s += "\n【工单】\(v.tickets.count) 张：\n"
             for tv in v.tickets {
@@ -105,7 +105,9 @@ extension Views {
 
     /// `3. 改为分段加锁，跑回归 · 开发 · #12 · 工作中`：`Item.line` 之后是执行者、工单号、状态词；没分配的项只标「待分配」。
     /// 退回出去、在等新任务的项（4A）状态词写 `→ A-13`。
-    static func itemLine(_ i: Item, handbacks: [HandbackLink] = []) -> String {
+    static func itemLine(_ i: Item, handbacks: [HandbackLink] = [], linked: [Int: LinkedItem] = [:]) -> String {
+        // 链接项（4C）：执行者就是它指向的任务，状态跟着它走。
+        if let l = linked[i.ord] { return i.line + " · → A-\(l.link.toTaskID) · " + (l.state == .unassigned ? "待分配" : "进行中") }
         guard i.assignee != .unassigned else { return i.line + " · 待分配" }
         var s = i.line + " · " + i.assignee.label
         if let id = i.ticketID { s += " · #\(id)" }

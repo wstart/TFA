@@ -104,9 +104,10 @@ extension TaskView {
         tickets.first { $0.ticket.isOpen && $0.stage.needsPerson == a }
     }
 
-    /// 清单项的状态词：待做 / 工作中 / 完成 / 受阻 / 排队 / 待你 / 待分配；被退回成新任务的项写「→ A-13」（4A）。`attention` = 该用琥珀（待你、受阻）。
+    /// 清单项的状态词：待做 / 工作中 / 完成 / 受阻 / 排队 / 待你 / 待分配；链接项（退回成新任务，4C）写「→ A-13 · 待分配 / 进行中」，
+    /// 状态跟随 A-13。`attention` = 该用琥珀（待你、受阻）。
     func statusWord(_ item: Item) -> (text: String, attention: Bool) {
-        if let link = handback(of: item) { return ("→ A-\(link.toTaskID)", false) }
+        if let l = linked[item.ord] { return ("→ A-\(l.link.toTaskID) · \(l.state == .unassigned ? "待分配" : "进行中")", false) }
         switch item.status {
         case .done: return ("完成", false)
         case .doing: return ("工作中", false)
@@ -165,18 +166,17 @@ extension TaskView {
         }
     }
 
-    /// 退回（设计评审 2026-11-08，4A）：第一件需要你的事是受阻，而受阻的那一项已被工单退回成了新任务 → 条改说退回。
-    /// 有打开的工单正报着受阻（它剩下的项）时条先说它的回报——补充 / 重试在那里；退回的那项在清单里仍写「→ A-13」。
+    /// 退回（4A / 4C）：第一件需要你的事是受阻，而它来自一个链接项——新任务还没人做 → 条改说退回、指向新任务。
+    /// 有打开的工单正报着受阻（它剩下的项）时条先说它的回报——补充 / 重试在那里；链接项在清单里仍写「→ A-13」。
     var handbackNeed: HandbackLink? {
         guard needsYou.first == .blocked, syncConflicts.isEmpty, ticket(needing: .blocked) == nil else { return nil }
-        for i in items where i.status == .blocked && i.ticketID == nil { if let link = handback(of: i) { return link } }
+        for i in items { if let l = linked[i.ord], l.state == .unassigned { return l.link } }
         return nil
     }
 
-    /// 这一项被退回成了哪个任务（同一项退回过几次取最后一条）；做完了的项不算（新任务完成时引擎回填，它就是普通的完成）。
+    /// 这一项是不是链接项、指向哪个任务（4C）：退回成了新任务、新任务还开着、没被人改派走。做完的、新任务已结束的都不算。
     func handback(of item: Item) -> HandbackLink? {
-        guard item.status != .done else { return nil }
-        return handbacks.last { $0.itemOrd == item.ord }
+        linked[item.ord]?.link
     }
 
     /// 头卡的元信息一行（设计评审 2026-11-08，Pass 4）：「来源 主管 · 范围 payment-service · 负责人 你 · 截止 周四 · 优先级 高」。

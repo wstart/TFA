@@ -603,13 +603,17 @@ enum WorklistRowText {
         if let r = reports.max(by: { ($0.ticket.reportAt ?? 0) < ($1.ticket.reportAt ?? 0) }) {
             return Line(text: "工单 #\(r.id) 回报：\(r.ticket.reportSummary)", at: r.ticket.reportAt ?? r.ticket.updatedAt)
         }
-        let doing = tv.items.filter { $0.status == .doing }
+        let doing = tv.items.filter { $0.status == .doing && tv.linked[$0.ord] == nil }
         if !doing.isEmpty {
             return Line(text: byAssignee(doing.map { ($0.assignee, $0.ord) }) { "\($0)在做\($1)" },
                         at: doing.compactMap(\.startedAt).max() ?? tv.task.updatedAt)
         }
         if let o = tv.handbackOrigin { return Line(text: handback(o), at: tv.task.updatedAt) }
-        let agents = tv.items.filter { $0.status == .todo && $0.assignee != .you && $0.assignee != .unassigned }
+        // 链接项（4C）：跟着退回产生的任务走。
+        if let l = tv.linked.values.sorted(by: { $0.link.itemOrd < $1.link.itemOrd }).first {
+            return Line(text: "第 \(l.link.itemOrd) 项跟着 A-\(l.link.toTaskID)" + (l.state == .unassigned ? "，它还没定谁来做" : "，它在做"), at: tv.task.updatedAt)
+        }
+        let agents = tv.items.filter { $0.status == .todo && $0.assignee != .you && $0.assignee != .unassigned && tv.linked[$0.ord] == nil }
         if !agents.isEmpty {
             let queued = agents.contains { $0.ticketID.flatMap { tv.ticket($0) }?.stage == .working(queued: true) }
             return Line(text: byAssignee(agents.map { ($0.assignee, $0.ord) }) { queued ? "\($0)排队中 · \($1)" : "\($0)还没开始做\($1)" },

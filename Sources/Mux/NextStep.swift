@@ -153,6 +153,11 @@ struct NextStep: Equatable {
         if let mine = v.items.first(where: { $0.assignee == .you && $0.status != .done }) {
             return NextStep(tone: .quiet, eyebrow: "现在 · 轮到你", title: "轮到你：第 \(mine.ord) 项「\(mine.text)」", body: "做完在清单里勾掉。")
         }
+        // 链接项（4C）：只剩在等退回产生的任务。
+        if let l = v.linked.values.sorted(by: { $0.link.itemOrd < $1.link.itemOrd }).first {
+            return NextStep(tone: .quiet, eyebrow: "现在 · 不用你管", title: "第 \(l.link.itemOrd) 项在等 A-\(l.link.toTaskID) 完成",
+                            body: "A-\(l.link.toTaskID) 完成时这一项自动勾掉。")
+        }
         return NextStep(tone: .quiet, eyebrow: "现在 · 不用你管", title: "清单项都在推进", body: "")
     }
 

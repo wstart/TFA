@@ -487,18 +487,20 @@ private struct ItemRow: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 5) {
-                    Text(item.assignee.label)
-                    if let id = item.ticketID {
+                    if handback == nil { // 链接项（4C）的执行者就是它指向的任务，不再写原来的角色
+                        Text(item.assignee.label)
+                        if let id = item.ticketID {
+                            Text("·").accessibilityHidden(true)
+                            Button("工单 #\(id)") { appModel.goToTicket(id) }
+                                .buttonStyle(.plain).help("前往工单 #\(id) 的终端")
+                        }
                         Text("·").accessibilityHidden(true)
-                        Button("工单 #\(id)") { appModel.goToTicket(id) }
-                            .buttonStyle(.plain).help("前往工单 #\(id) 的终端")
                     }
-                    Text("·").accessibilityHidden(true)
                     if let handback {
                         Button(word.text) { appModel.openWorklist(task: handback.toTaskID) }
                             .buttonStyle(.plain)
-                            .help("这项被工单 #\(handback.ticketID) 退回，成了任务 A-\(handback.toTaskID)；打开它")
-                            .accessibilityLabel("打开任务 A-\(handback.toTaskID)")
+                            .help("这项被工单 #\(handback.ticketID) 退回，成了任务 A-\(handback.toTaskID)，状态跟着它走、它完成这项就完成；打开它")
+                            .accessibilityLabel("跟随任务 A-\(handback.toTaskID)，\(word.text)，打开它")
                     } else {
                         Text(word.text).foregroundStyle(word.attention ? Theme.Status.attention : Theme.textTertiary)
                     }
