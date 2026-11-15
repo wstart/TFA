@@ -207,16 +207,34 @@ public enum SuperagentPrompts {
         """
     }
 
-    /// 生成 `tfa-role-<slug>.md`：承载角色执行者 system prompt，供 `agy --agent=<slug>` 直接加载。
+    /// `agy` 自定义角色的工具白名单（均为 `agy` 组件注册表内建名；MCP 工具由 `agy` 自动挂载；刻意不含交互式 `ask_question`，
+    /// 使执行者按契约通过 `tfa report --state blocked --ask` 提问）。只读角色物理移除 `write_file` 与 `edit_file`。
+    public static func agyWorkerTools(edits: Bool) -> [String] {
+        var tools = ["read_file"]
+        if edits { tools += ["write_file", "edit_file"] }
+        tools += [
+            "run_command", "manage_task", "search_web",
+            "send_message", "schedule",
+            "invoke_subagent", "define_subagent", "manage_subagents",
+            "run_workflow",
+        ]
+        return tools
+    }
+
+    /// 生成 `tfa-role-<slug>.md`：承载角色执行者 system prompt 与显式工具白名单，供 `agy --agent=<slug>` 直接加载。
+    /// 注意：`agy` 自定义 Agent 若省略 `tools:` 会退化为无 `run_command` / `write_file` / `edit_file` 的受限子集，必须显式声明。
     public static func agyWorkerMarkdown(role: Role, acceptance: Bool) -> String {
         let agentName = agyRoleAgentName(role.name)
         let summary = "TFA 角色「\(role.name)」：\(role.scope)"
+        let toolLines = agyWorkerTools(edits: role.edits).map { "  - \($0)" }.joined(separator: "\n")
         return """
         ---
         name: \(agentName)
         description: \(yamlString(summary))
         mainAgent: true
         subagent: true
+        tools:
+        \(toolLines)
         ---
 
         \(worker(role: role, acceptance: acceptance))

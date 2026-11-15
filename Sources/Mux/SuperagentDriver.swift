@@ -1,4 +1,5 @@
 import Foundation
+import SuperagentCore
 import TmuxKit
 
 /// 一个工单 / 主管会话里跑 agent 的那个窗格此刻的状态（Superagent 的 Pass 每轮取一次快照）。
@@ -21,6 +22,18 @@ struct SuperagentPane: Equatable, Sendable {
     var isPlainShell: Bool { Self.isShell(command) }
     static func isShell(_ command: String) -> Bool { plainShells.contains(command.lowercased()) }
     static let plainShells: Set<String> = ["zsh", "bash", "fish", "sh", "dash", "tcsh", "csh", "ksh", "-zsh", "-bash", "login"]
+
+    /// 常驻角色窗格当前跑的进程是否匹配设置的 `codingAgent`（切换 Claude / axis-claude / Antigravity 后用于识别旧空闲会话）。
+    func matches(codingAgent: CodingAgentKind) -> Bool {
+        let lower = command.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let isAgy = lower == "agy" || lower.hasPrefix("agy ") || lower.hasSuffix("/agy")
+        let isAxis = lower.contains("axis-claude")
+        switch codingAgent {
+        case .antigravity: return isAgy
+        case .axisClaude: return isAxis
+        case .claude: return !isAgy && !isAxis
+        }
+    }
 }
 
 /// Superagent 用到的 tmux / git 操作。全部是一次性子进程（不需要 `-CC` 连接，对没 attach 的会话也有效），
@@ -153,11 +166,34 @@ struct SuperagentTmux: Sendable {
         return (String(f[0]), Int(f[1]) ?? 0)
     }
 
-    /// Claude Code 对新目录弹出的「信任此文件夹」对话框，且说的正是 `dir`（TFA 自己建的工单目录）。
+    /// Claude Code / Antigravity CLI 对新目录弹出的「信任此文件夹」对话框，且说的正是 `dir`（TFA 自己建的工单或角色目录）。
     static func showsTrustDialog(_ screen: String, for dir: String) -> Bool {
-        guard screen.contains("trust this folder") || screen.contains("Do you trust") else { return false }
+        guard screen.contains("trust this folder") || screen.contains("Trust this folder")
+            || screen.contains("Do you trust") || screen.contains("contents of this project") else { return false }
         let real = URL(fileURLWithPath: dir).resolvingSymlinksInPath().path
         return screen.contains(dir) || screen.contains(real) || screen.contains("/private" + dir)
+    }
+
+    /// 确认目录信任框所需的按键序列：
+    /// - Antigravity CLI 默认光标在第一项 `> Yes, I trust this folder`，只需 `Enter`（若发 `Down` 会移到 `No, exit` 导致秒退）；
+    /// - 旧版 Claude Code 默认光标在 `No, exit`，需 `Down` + `Enter`。
+    static func trustDialogKeys(_ screen: String, for dir: String) -> [String]? {
+        guard showsTrustDialog(screen, for: dir) else { return nil }
+        for rawLine in screen.split(separator: "\n") {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix(">") || trimmed.hasPrefix("❯") {
+                let lower = trimmed.lowercased()
+                if lower.contains("yes") { return ["Enter"] }
+                if lower.contains("no") { return ["Down", "Enter"] }
+            }
+        }
+        let lowerScreen = screen.lowercased()
+        if let yesIdx = lowerScreen.range(of: "yes,")?.lowerBound ?? lowerScreen.range(of: "yes ")?.lowerBound,
+           let noIdx = lowerScreen.range(of: "no,")?.lowerBound ?? lowerScreen.range(of: "no ")?.lowerBound,
+           yesIdx < noIdx {
+            return ["Enter"]
+        }
+        return ["Down", "Enter"]
     }
 
     /// The agent is showing a dialog (folder trust, permission prompt, a picker): typed text + Enter

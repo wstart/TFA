@@ -270,7 +270,7 @@ final class SuperagentRuntime {
     func setMode(_ m: AcceptMode) { act { try $0.setMode(m) } }
     func setSchedules(_ s: [Schedule]) { act { try $0.setSchedules(s) } }
     func saveSettings(_ s: Settings) {
-        let needsPromptSync = s.acceptance != settings.acceptance || (s.codingAgent == .antigravity && settings.codingAgent != .antigravity)
+        let needsPromptSync = s.acceptance != settings.acceptance || s.codingAgent != settings.codingAgent
         act { try $0.store.saveSettings(s) }
         let roles = roles
         if needsPromptSync { Task.detached(priority: .utility) { SuperagentPrompts.install(acceptance: s.acceptance, roles: roles) } }
@@ -450,7 +450,7 @@ final class SuperagentRuntime {
             let acceptance = settings.acceptance, roles = roles
             await Task.detached(priority: .userInitiated) { _ = SuperagentPrompts.install(acceptance: acceptance, roles: roles) }.value
         }
-        let command = routerCommand?() ?? defaultRouterCommand()
+        let command = routerCommand?() ?? defaultRouterCommand(trustedDir: dir)
         let mayRetype = Date().timeIntervalSince(routerTypedAt) > 30
         let made = await Task.detached(priority: .userInitiated) { Self.makeRouter(tmux, dir: dir, command: command, mayRetype: mayRetype) }.value
         switch made {
@@ -474,7 +474,7 @@ final class SuperagentRuntime {
                 let acceptance = self.settings.acceptance, roles = self.roles
                 await Task.detached(priority: .userInitiated) { _ = SuperagentPrompts.install(acceptance: acceptance, roles: roles) }.value
             }
-            let command = self.routerCommand?() ?? self.defaultRouterCommand()
+            let command = self.routerCommand?() ?? self.defaultRouterCommand(trustedDir: dir)
             let remade = await Task.detached(priority: .userInitiated) { () -> Result<String, Error> in
                 for p in (tmux.snapshot() ?? []) where p.isRouter {
                     tmux.run(["kill-session", "-t", "=\(p.session)"])
@@ -669,7 +669,11 @@ final class SuperagentRuntime {
             let task = t.taskID.map { "（任务 A-\($0)）" } ?? ""
             kickoff = "[TFA #\(id)] 你负责工单 #\(id)「\(t.title)」\(task)。先运行 tfa read ticket 读取请求原文和全部消息，然后开始。"
         }
-        let commandLine = command(t, role, kickoff)
+        let customCmd = workerCommand?(t, kickoff)
+        let codingAgent = settings.codingAgent
+        let makeCommand: @Sendable (String) -> String = { preparedDir in
+            customCmd ?? Self.defaultWorkerCommand(for: codingAgent, t, role: role, kickoff: kickoff, trustedDir: preparedDir)
+        }
         let wait = launchWait
         let taken = Set(snap.map(\.session))
         let sentAt = clock()
@@ -680,7 +684,7 @@ final class SuperagentRuntime {
             retypedAt[key] = clock()
         }
         let result = await Task.detached(priority: .userInitiated) {
-            Self.launch(tmux, ticket: t, existing: existing, taken: taken, root: root, commandLine: commandLine, wait: wait, mayRetype: mayRetype)
+            Self.launch(tmux, ticket: t, existing: existing, taken: taken, root: root, makeCommand: makeCommand, wait: wait, mayRetype: mayRetype)
         }.value
         switch result {
         case .success(let r):
@@ -702,7 +706,16 @@ final class SuperagentRuntime {
         // 快照可能是这一轮开头的：同一轮里前一张单也许刚建了这个角色的终端。
         let tmux = self.tmux
         let live = await Task.detached(priority: .userInitiated) { tmux.snapshot() }.value ?? snap
-        let existing = live.first { $0.agent == role.name }
+        var existing = live.first { $0.agent == role.name }
+        var taken = Set(live.map(\.session))
+        // 若用户在设置里切换了执行 Agent（如 Claude ↔ Antigravity），而常驻角色空闲会话里仍跑着旧 Agent，
+        // 在接新单前回收旧会话并用新 Agent 重建，确保所有角色统一运行在当前设置的 Agent 上。
+        if let pane = existing, !pane.isPlainShell, workerCommand == nil, a.reason == "accepted",
+           !pane.matches(codingAgent: settings.codingAgent) {
+            await Task.detached(priority: .userInitiated) { _ = tmux.run(["kill-session", "-t", "=\(pane.session)"]) }.value
+            taken.remove(pane.session)
+            existing = nil
+        }
         let kickoff: String
         if let task = t.taskID, t.request.count > 1500 {
             // 同每单一个终端的角色：请求文本太长只打一行（注意事项 D-07）。
@@ -737,7 +750,11 @@ final class SuperagentRuntime {
             return .done
         }
         // 还没有这个角色的终端（或里面的 agent 退出了）：按角色定义生成。
-        let commandLine = command(t, role, kickoff)
+        let customCmd = workerCommand?(t, kickoff)
+        let codingAgent = settings.codingAgent
+        let makeCommand: @Sendable (String) -> String = { preparedDir in
+            customCmd ?? Self.defaultWorkerCommand(for: codingAgent, t, role: role, kickoff: kickoff, trustedDir: preparedDir)
+        }
         let wait = launchWait
         let key = existing?.pane ?? ""
         let mayRetype = key.isEmpty || clock() - (retypedAt[key] ?? 0) > 30
@@ -746,9 +763,11 @@ final class SuperagentRuntime {
             retypedAt[key] = clock()
         }
         let name = role.name
+        let snapExisting = existing
+        let snapTaken = taken
         let result = await Task.detached(priority: .userInitiated) {
-            Self.launch(tmux, ticket: t, existing: existing, taken: Set(live.map(\.session)), root: URL(fileURLWithPath: dir),
-                        commandLine: commandLine, wait: wait, mayRetype: mayRetype, agent: name)
+            Self.launch(tmux, ticket: t, existing: snapExisting, taken: snapTaken, root: URL(fileURLWithPath: dir),
+                        makeCommand: makeCommand, wait: wait, mayRetype: mayRetype, agent: name)
         }.value
         switch result {
         case .success(let r):
@@ -883,7 +902,7 @@ final class SuperagentRuntime {
     /// 准备目录 → 找到或建执行终端 → 前台是 shell 就打入 agent 命令并等它起来。
     /// `agent` = 常驻角色的名字：终端以角色命名、打上 `@tfa_agent`，目录就是 `root`（角色自己的目录）。
     nonisolated static func launch(_ tmux: SuperagentTmux, ticket t: Ticket, existing: SuperagentPane?, taken: Set<String>,
-                                   root: URL, commandLine: String, wait: Double, mayRetype: Bool = true,
+                                   root: URL, makeCommand: (String) -> String, wait: Double, mayRetype: Bool = true,
                                    agent: String? = nil) -> Result<Launched, Error> {
         do {
             var dir = t.dir, branch = t.branch
@@ -894,6 +913,7 @@ final class SuperagentRuntime {
                 (dir, branch) = try SuperagentTmux.prepareDirectory(repo: t.repo, ticket: t.id, worktree: t.worktree, root: root,
                                                                     fresh: t.dir.isEmpty)
             }
+            let commandLine = makeCommand(dir)
             var session = existing?.session ?? ""
             var target = existing?.pane ?? ""
             var created = false
@@ -917,13 +937,14 @@ final class SuperagentRuntime {
                     startedAt = Date()
                 }
                 guard let since = startedAt else { continue }
-                // Claude Code 对 TFA 新建的工单目录会先问「是否信任此文件夹」（默认选项是退出）。这个目录是
-                // 人要求改的仓库的 worktree，执行终端本就是全部放行：只确认说的正是这个目录的信任框。
+                // Claude Code / Antigravity CLI 对新建工单目录可能弹「是否信任此文件夹」：只确认说的正是 `dir` 的信任框，
+                // 并按当前光标项发送对应按键（agy 默认光标在 Yes 直接 Enter；旧版 Claude Code 默认在 No 需 Down + Enter）。
                 let screen = tmux.capture(target, lines: 40)
-                if SuperagentTmux.showsTrustDialog(screen, for: dir) {
-                    tmux.sendKey(target, "Down")
-                    Thread.sleep(forTimeInterval: 0.2)
-                    tmux.sendKey(target, "Enter")
+                if let keys = SuperagentTmux.trustDialogKeys(screen, for: dir) {
+                    for (idx, key) in keys.enumerated() {
+                        if idx > 0 { Thread.sleep(forTimeInterval: 0.2) }
+                        tmux.sendKey(target, key)
+                    }
                     Thread.sleep(forTimeInterval: 1)
                     continue
                 }
@@ -1025,23 +1046,24 @@ final class SuperagentRuntime {
         role(for: t).standing ? snap.first { $0.agent == t.role } : snap.first { $0.ticket == t.id }
     }
 
-    private func command(_ t: Ticket, _ role: Role, _ kickoff: String) -> String {
-        workerCommand?(t, kickoff) ?? defaultWorkerCommand(t, role: role, kickoff: kickoff)
+    func defaultWorkerCommand(_ t: Ticket, role: Role, kickoff: String, trustedDir: String? = nil) -> String {
+        Self.defaultWorkerCommand(for: settings.codingAgent, t, role: role, kickoff: kickoff, trustedDir: trustedDir)
     }
 
-    func defaultWorkerCommand(_ t: Ticket, role: Role, kickoff: String) -> String {
-        switch settings.codingAgent {
-        case .claude: return Self.claudeWorkerCommand(t, role: role, kickoff: kickoff)
-        case .axisClaude: return Self.axisWorkerCommand(t, role: role, kickoff: kickoff)
-        case .antigravity: return Self.agyWorkerCommand(t, role: role, kickoff: kickoff)
+    nonisolated static func defaultWorkerCommand(for kind: CodingAgentKind, _ t: Ticket, role: Role, kickoff: String,
+                                                 trustedDir: String? = nil) -> String {
+        switch kind {
+        case .claude: return claudeWorkerCommand(t, role: role, kickoff: kickoff)
+        case .axisClaude: return axisWorkerCommand(t, role: role, kickoff: kickoff)
+        case .antigravity: return agyWorkerCommand(t, role: role, kickoff: kickoff, trustedDir: trustedDir)
         }
     }
 
-    func defaultRouterCommand() -> String {
+    func defaultRouterCommand(trustedDir: String? = nil) -> String {
         switch settings.codingAgent {
         case .claude: return Self.claudeRouterCommand()
         case .axisClaude: return Self.axisRouterCommand()
-        case .antigravity: return Self.agyRouterCommand()
+        case .antigravity: return Self.agyRouterCommand(trustedDir: trustedDir)
         }
     }
 
@@ -1090,32 +1112,71 @@ final class SuperagentRuntime {
             + "--permission-mode dontAsk --allowedTools 'Bash(tfa *)' --disallowedTools 'Edit,Write,NotebookEdit'"
     }
 
-    /// 执行终端：Antigravity CLI（`agy`），通过 `~/.gemini/config/agents/tfa-role-<slug>.md` 加载角色执行者 prompt，
-    /// `-i=<kickoff>` 跑完首轮工单后停留在交互 TUI 里接收后续跟进。只读角色走 `--mode=plan` 并在权限层硬拒绝 `write_file(*)`。
+    /// 执行终端：Antigravity CLI（`agy`），通过 `~/.gemini/config/agents/tfa-role-<slug>.md` 加载角色执行者 prompt 与工具白名单，
+    /// `-i=<kickoff>` 跑完首轮工单后停留在交互 TUI 里接收后续跟进。
+    /// 注意：不能传 `--mode=plan`（会剥掉 `run_command` 导致无法运行 `tfa`）；只读角色由 `.md` frontmatter 物理移除
+    /// `write_file` / `edit_file`，并在 `--settings.permissions.deny` 双重硬拒绝写入；`trustedWorkspaces` 预授权工单/角色目录避免弹信任框。
     nonisolated static func agyWorkerCommand(_ t: Ticket, role: Role, kickoff: String,
+                                             trustedDir: String? = nil,
                                              executable: String? = AgentPlatform.antigravity.executablePath) -> String {
         let exe = executable.map(SuperagentTmux.quote) ?? "agy"
         let who = role.standing ? "TFA_AGENT=\(SuperagentTmux.quote(role.name))" : "TFA_TICKET=\(t.id)"
         let agentName = SuperagentPrompts.agyRoleAgentName(role.name)
-        if role.edits {
-            let settingsJSON = "{\"allowNonWorkspaceAccess\":true,\"artifactReviewPolicy\":\"always-proceed\"}"
-            return "\(envPrefix) \(who) \(exe) --agent=\(SuperagentTmux.quote(agentName)) --dangerously-skip-permissions "
-                + "--settings=\(SuperagentTmux.quote(settingsJSON)) -i=\(SuperagentTmux.quote(kickoff))"
-        } else {
-            let settingsJSON = "{\"toolPermission\":\"always-proceed\",\"allowNonWorkspaceAccess\":true,"
-                + "\"artifactReviewPolicy\":\"always-proceed\",\"permissions\":{\"deny\":[\"write_file(*)\"]}}"
-            return "\(envPrefix) \(who) \(exe) --agent=\(SuperagentTmux.quote(agentName)) --mode=plan "
-                + "--settings=\(SuperagentTmux.quote(settingsJSON)) -i=\(SuperagentTmux.quote(kickoff))"
+        var settings: [String: Any] = [
+            "toolPermission": "always-proceed",
+            "allowNonWorkspaceAccess": true,
+            "artifactReviewPolicy": "always-proceed",
+        ]
+        if !role.edits {
+            settings["permissions"] = ["deny": ["write_file(*)", "edit_file(*)"]]
         }
+        let dirs = agyTrustedDirs([trustedDir, t.dir, t.repo])
+        if !dirs.isEmpty { settings["trustedWorkspaces"] = dirs }
+        let settingsJSON = encodeSettingsJSON(settings)
+        return "\(envPrefix) \(who) \(exe) --agent=\(SuperagentTmux.quote(agentName)) --dangerously-skip-permissions "
+            + "--settings=\(SuperagentTmux.quote(settingsJSON)) -i=\(SuperagentTmux.quote(kickoff))"
     }
 
-    /// 主管：Antigravity CLI（`agy`），加载只暴露 `run_command` 的 `tfa-router` Agent，放行 `tfa` 命令并硬拒绝文件写入。
-    nonisolated static func agyRouterCommand(executable: String? = AgentPlatform.antigravity.executablePath) -> String {
+    /// 主管：Antigravity CLI（`agy`），加载只暴露 `run_command` 的 `tfa-router` Agent，放行 `command(tfa)` 并硬拒绝文件写入。
+    nonisolated static func agyRouterCommand(trustedDir: String? = nil,
+                                             executable: String? = AgentPlatform.antigravity.executablePath) -> String {
         let exe = executable.map(SuperagentTmux.quote) ?? "agy"
-        let settingsJSON = "{\"toolPermission\":\"request-review\",\"allowNonWorkspaceAccess\":true,"
-            + "\"artifactReviewPolicy\":\"always-proceed\","
-            + "\"permissions\":{\"allow\":[\"command(tfa)\",\"unsandboxed(tfa)\"],\"deny\":[\"write_file(*)\"]}}"
+        var settings: [String: Any] = [
+            "toolPermission": "request-review",
+            "allowNonWorkspaceAccess": true,
+            "artifactReviewPolicy": "always-proceed",
+            "permissions": [
+                "allow": ["command(tfa)"],
+                "deny": ["write_file(*)", "edit_file(*)"],
+            ],
+        ]
+        let dirs = agyTrustedDirs([trustedDir])
+        if !dirs.isEmpty { settings["trustedWorkspaces"] = dirs }
+        let settingsJSON = encodeSettingsJSON(settings)
         return "\(envPrefix) TFA_ROLE=router \(exe) --agent=\(SuperagentPrompts.agyRouterAgentName) --settings=\(SuperagentTmux.quote(settingsJSON))"
+    }
+
+    nonisolated private static func agyTrustedDirs(_ raw: [String?]) -> [String] {
+        var out: [String] = []
+        func add(_ p: String) {
+            guard !p.isEmpty, !out.contains(p) else { return }
+            out.append(p)
+        }
+        for item in raw {
+            guard let p = item?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty else { continue }
+            add(p)
+            let resolved = URL(fileURLWithPath: p).resolvingSymlinksInPath().path
+            add(resolved)
+        }
+        return out
+    }
+
+    nonisolated private static func encodeSettingsJSON(_ dict: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys, .withoutEscapingSlashes]),
+              let s = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return s
     }
 
     // MARK: - 看门狗（工作清单第 4 期；候选、判定和两步升级在引擎的 Watchdog.swift）
