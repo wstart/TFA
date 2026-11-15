@@ -81,6 +81,10 @@ struct RouterCard: View {
                         .font(Theme.Font.rowSubtitle).foregroundStyle(Theme.textSecondary).lineLimit(1)
                 }
                 Spacer()
+                if session != nil {
+                    Button("重启主管") { appModel.restartRouter() }
+                        .help("按当前设置的 Agent 重新启动主管终端")
+                }
                 Button(session == nil ? "启动主管" : "打开主管") { appModel.openRouter() }
                     .buttonStyle(.borderedProminent)
             }
@@ -781,8 +785,15 @@ struct SettingsCard: View {
                 Toggle("", isOn: bind(\.acceptance)).labelsHidden().toggleStyle(.switch).controlSize(.small)
             }
             SettingRow(title: "执行与主管 Agent", note: Self.agentNote(s.codingAgent)) {
-                SegmentedChoice(selection: bind(\.codingAgent), options: CodingAgentKind.allCases.map { (value: $0, label: $0.label) })
-                    .accessibilityLabel("执行与主管 Agent")
+                HStack(spacing: Theme.Space.sm) {
+                    if appModel.superagent.routerSession != nil {
+                        Button("重启主管") { appModel.restartRouter() }
+                            .controlSize(.small)
+                            .help("关闭当前主管终端并用所选 Agent 重新启动")
+                    }
+                    SegmentedChoice(selection: bind(\.codingAgent), options: CodingAgentKind.allCases.map { (value: $0, label: $0.label) })
+                        .accessibilityLabel("执行与主管 Agent")
+                }
             }
             Hairline()
             // 看门狗（第 4 期）：模型定时看工作中的工单有没有偏离清单项；偏离先提醒执行者，宽限期过了仍偏离就把问题挂给你。

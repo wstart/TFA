@@ -451,12 +451,11 @@ final class SuperagentRuntime {
             await Task.detached(priority: .userInitiated) { _ = SuperagentPrompts.install(acceptance: acceptance, roles: roles) }.value
         }
         let command = routerCommand?() ?? defaultRouterCommand()
-        // 30 秒内刚打过启动命令：shell 可能还没执行它，别再打一遍（会拼成一行）。
         let mayRetype = Date().timeIntervalSince(routerTypedAt) > 30
-        routerTypedAt = Date()
         let made = await Task.detached(priority: .userInitiated) { Self.makeRouter(tmux, dir: dir, command: command, mayRetype: mayRetype) }.value
         switch made {
-        case .success(let name):
+        case .success(let (name, launched)):
+            if launched { routerTypedAt = Date() }
             if routerSession != name { routerSession = name }
             onSessionCreated?(name, true)
             return name
@@ -464,6 +463,43 @@ final class SuperagentRuntime {
             actionError = "\(e)"
             return nil
         }
+    }
+
+    /// 重启「主管」终端：关掉旧的主管 tmux 会话并用当前配置的 `codingAgent` 重新拉起（切换 Claude / axis-claude / Antigravity 后立即生效）。
+    func restartRouter(dir: String) async -> String? {
+        if let inFlight = routerOpening { _ = await inFlight.value }
+        let task = Task { @MainActor () -> String? in
+            let tmux = self.tmux
+            if self.routerCommand == nil, self.settings.codingAgent == .antigravity {
+                let acceptance = self.settings.acceptance, roles = self.roles
+                await Task.detached(priority: .userInitiated) { _ = SuperagentPrompts.install(acceptance: acceptance, roles: roles) }.value
+            }
+            let command = self.routerCommand?() ?? self.defaultRouterCommand()
+            let remade = await Task.detached(priority: .userInitiated) { () -> Result<String, Error> in
+                for p in (tmux.snapshot() ?? []) where p.isRouter {
+                    tmux.run(["kill-session", "-t", "=\(p.session)"])
+                }
+                let snap = tmux.snapshot() ?? []
+                let name = SuperagentTmux.sessionName("主管", taken: Set(snap.map(\.session)))
+                do {
+                    _ = try tmux.newSession(name: name, dir: dir, router: true, command: command)
+                    return .success(name)
+                } catch { return .failure(error) }
+            }.value
+            switch remade {
+            case .success(let name):
+                self.routerTypedAt = Date()
+                self.routerSession = name
+                self.onSessionCreated?(name, true)
+                return name
+            case .failure(let e):
+                self.actionError = "\(e)"
+                return nil
+            }
+        }
+        routerOpening = task
+        defer { routerOpening = nil }
+        return await task.value
     }
 
     // MARK: - Pass
@@ -802,17 +838,20 @@ final class SuperagentRuntime {
 
     // 阻塞的 tmux 步骤（在后台线程上跑）。
 
-    nonisolated static func makeRouter(_ tmux: SuperagentTmux, dir: String, command: String, mayRetype: Bool) -> Result<String, Error> {
+    nonisolated static func makeRouter(_ tmux: SuperagentTmux, dir: String, command: String, mayRetype: Bool) -> Result<(String, Bool), Error> {
         let snap = tmux.snapshot() ?? []
         if let existing = snap.first(where: \.isRouter) {
-            // 主管终端还在，但 Claude Code 已经退出（回到 shell）：重新启动它。
-            if existing.isPlainShell, mayRetype { tmux.type(existing.pane, "cd \(SuperagentTmux.quote(dir)) && \(command)") }
-            return .success(existing.session)
+            // 主管终端还在，但里面的 Agent 已经退出（回到 shell）：重新启动当前配置的 Agent。
+            if existing.isPlainShell, mayRetype {
+                tmux.type(existing.pane, "cd \(SuperagentTmux.quote(dir)) && \(command)")
+                return .success((existing.session, true))
+            }
+            return .success((existing.session, false))
         }
         let name = SuperagentTmux.sessionName("主管", taken: Set(snap.map(\.session)))
         do {
             _ = try tmux.newSession(name: name, dir: dir, router: true, command: command)
-            return .success(name)
+            return .success((name, true))
         } catch { return .failure(error) }
     }
 

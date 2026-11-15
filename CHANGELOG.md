@@ -30,7 +30,7 @@
 - 安装 `tfa` 命令行时顺手删掉旧看板留下的 `~/.claude/skills/tfa-task/`（进废纸篓）和 `~/.tfa/bin/tfa-task`，免得 Agent 把旧 skill 当成新的 `tfa task` 子命令。
 
 ### 修复
-- **重启后主窗口偶发不自动弹出**：macOS 15+ 下单实例 `Window("TFA", id: "main")` 与 `WindowGroup` 并存或上次关窗隐藏（`orderOut`）退出后，重新启动可能不创建主窗口导致调度与 CLI 同步未触发；现启动完成与菜单栏唤起时兜底 `openWindow(id: "main")`，同时把 `reload()` 提前到安装角色 prompt 之前确保自定义角色完整同步。
+- **重启后主窗口偶发不自动弹出与主管切换体验**：macOS 15+ 下单实例 `Window("TFA", id: "main")` 与 `WindowGroup` 并存或上次关窗隐藏（`orderOut`）退出后，重新启动可能不创建主窗口导致调度与 CLI 同步未触发；现启动完成与菜单栏唤起时兜底 `openWindow(id: "main")`，并把 `reload()` 提前到安装角色 prompt 之前确保自定义角色完整同步。侧栏点选「主管」在退回 shell 后会自动按当前配置的 Agent 重新拉起，新增「重启主管」一键切换。
 - **PTY 文件描述符与子进程泄漏**：`PTY` 与 `PtyProcessTransport` 补齐显式关闭与析构兜底——`posix_spawn` 失败时立即关闭 master/slave 描述符，读写循环在取消关闭后不再访问失效 fd，子进程退出回收（`waitpid`）与 transport 实例生命周期解耦，避免立即释放连接时泄漏 pty 或残留僵尸进程。
 - **恢复会话首条命令过早发送**：不再在连接后硬编码盲等 600ms 就打入恢复命令；新建会话注入环境变量时先等 `respawn-pane -k` 完成并清空前序状态，再结合 OSC 133 提示符标记与输出静默窗口判定 shell 就绪后再发送命令。
 - **SSH 参数注入防护与隧道日志尾部防丢**：`TmuxConnection`、`TmuxServer` 与 `SSHTunnel` 调用 `/usr/bin/ssh` 时均在目标主机前显式插入 `--`，并在配置层拦截空白与 `-` 开头字段；`SSHTunnel` 与 `CloudflaredTunnel` 改用加锁串行的 `PipeLogDrain`，保证进程秒退时的末尾报错完整进入界面日志。

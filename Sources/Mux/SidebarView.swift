@@ -88,7 +88,14 @@ struct SidebarView: View {
                 // screen — so don't keep a terminal row highlighted (avoids a confusing double-selection).
                 // selectedConnectionID is preserved underneath, so returning to a terminal restores it.
                 get: { toolPaneOpen ? nil : model.selectedConnectionID },
-                set: { if let id = $0 { model.activateTerminal(id) } } // robust to re-selecting the same row while a tool pane is open
+                set: {
+                    guard let id = $0 else { return }
+                    if id == appModel.routerConnection?.id {
+                        model.openRouter() // 主管终端若已退回 shell，点它时顺手按当前配置拉起 Agent
+                    } else {
+                        model.activateTerminal(id)
+                    }
+                }
             )) {
                 // 已断开 tab: bulk actions first, where they're seen before scrolling the records.
                 if showEnded && endedCount > 0 {
@@ -273,6 +280,7 @@ struct SidebarView: View {
             RouterRow(conn: conn, isSelected: conn.id == appModel.selectedConnectionID, toolPaneOpen: toolPaneOpen)
                 .tag(conn.id)
                 .contextMenu {
+                    Button("重启主管") { appModel.restartRouter() }
                     Button("打开主管面板") { appModel.openSuperagent() }
                     Divider()
                     SessionMenuItems(conn: conn)

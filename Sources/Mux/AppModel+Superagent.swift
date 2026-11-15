@@ -70,12 +70,27 @@ extension AppModel {
         set { UserDefaults.standard.set(newValue, forKey: Self.routerDirKey) }
     }
 
-    /// 打开主管终端（没有就建一个；里面的 Claude Code 退出了就重新启动），并切过去。
+    /// 打开主管终端（没有就建一个；里面的 Agent 退出了就重新启动），并切过去。
     func openRouter() {
         if let conn = routerConnection { activateTerminal(conn.id) }
         let dir = routerDirectory
         Task { @MainActor in
             guard let name = await superagent.openRouter(dir: dir) else { return }
+            adoptSuperagentSession(name, isRouter: true)
+            if let conn = localConnection(named: name) { activateTerminal(conn.id) }
+        }
+    }
+
+    /// 重启主管终端：关掉旧的主管会话并用当前设置的执行与主管 Agent（如 Antigravity）重新启动，再切过去。
+    func restartRouter() {
+        let dir = routerDirectory
+        if let old = routerConnection {
+            sessionStore.remove(tfaID: old.stableID)
+            old.disconnect()
+            connections.removeAll { $0.id == old.id }
+        }
+        Task { @MainActor in
+            guard let name = await superagent.restartRouter(dir: dir) else { return }
             adoptSuperagentSession(name, isRouter: true)
             if let conn = localConnection(named: name) { activateTerminal(conn.id) }
         }
