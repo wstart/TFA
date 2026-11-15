@@ -926,13 +926,17 @@ struct TaskNeedActions: View {
         }
     }
 
-    /// 有报告就打开报告，否则跳到工单的终端。
+    /// 有分支就在任务卡上展开改动（内嵌 diff）；没有分支时有报告就打开报告，否则跳到工单的终端。
     private func viewChanges(_ t: TicketView) -> some View {
         let report = t.ticket.reportPath ?? ""
-        return plain("看改动") {
-            if report.isEmpty { appModel.goToTicket(t.id) } else { NSWorkspace.shared.open(URL(fileURLWithPath: report)) }
+        let branch = t.ticket.branch
+        let showing = appModel.worklistDiffTicketID == t.id && appModel.worklistTaskID == view.id
+        return plain(showing ? "收起改动" : "看改动") {
+            if !branch.isEmpty { appModel.showTaskDiff(task: view.id, ticket: t.id) }
+            else if report.isEmpty { appModel.goToTicket(t.id) } else { NSWorkspace.shared.open(URL(fileURLWithPath: report)) }
         }
-        .help(report.isEmpty ? "前往工单 #\(t.id) 的终端看改动" + (t.ticket.branch.isEmpty ? "" : "（分支 \(t.ticket.branch)）") : "打开报告 \(report)")
+        .help(!branch.isEmpty ? "在任务卡上看工单 #\(t.id) 的改动（分支 \(branch)）"
+              : report.isEmpty ? "前往工单 #\(t.id) 的终端看改动" : "打开报告 \(report)")
     }
 
     @ViewBuilder private func plain(_ title: String, action: @escaping () -> Void) -> some View {

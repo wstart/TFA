@@ -59,6 +59,7 @@ struct TaskCard: View {
                         Rectangle().fill(Theme.border).frame(width: 1).accessibilityHidden(true)
                         ScrollView {
                             VStack(alignment: .leading, spacing: 26) {
+                                diffSection
                                 detailColumn
                                 bottomActions
                             }
@@ -72,6 +73,7 @@ struct TaskCard: View {
                     VStack(alignment: .leading, spacing: 0) {
                         header
                         VStack(alignment: .leading, spacing: 28) {
+                            diffSection
                             detailColumn
                             checklistColumn
                             if !events.isEmpty { activityColumn }
@@ -186,6 +188,25 @@ struct TaskCard: View {
             Text(t.title).font(.system(size: 24, weight: .semibold)).foregroundStyle(Theme.textPrimary)
                 .lineLimit(2).textSelection(.enabled).help(t.title)
             StateTag(text: tag.text, tint: tag.tint)
+        }
+    }
+
+    // MARK: 改动（内嵌 diff，TODOS「任务卡内嵌 diff」）
+
+    /// 「看改动」展开的工单属于这张卡就显示改动区；没展开但有带分支的开发工单时，留一行轻的入口。
+    @ViewBuilder private var diffSection: some View {
+        let diffable = TaskDiff.tickets(view)
+        if let id = appModel.worklistDiffTicketID, view.ticket(id) != nil {
+            TaskDiffSection(view: view, ticketID: id)
+        } else if let last = diffable.last {
+            HStack(spacing: 8) {
+                Text("改动").font(.system(size: 12, weight: .semibold)).tracking(1).foregroundStyle(Theme.textTertiary)
+                Button(diffable.count > 1 ? "看工单 #\(last.id) 等 \(diffable.count) 张的改动" : "看工单 #\(last.id) 的改动") {
+                    appModel.showTaskDiff(task: view.id, ticket: last.id)
+                }
+                .buttonStyle(.plain).font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
+                .help("在卡上按文件看分支 \(last.ticket.branch) 相对分叉点的改动")
+            }
         }
     }
 

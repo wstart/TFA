@@ -35,6 +35,8 @@ final class AppModel {
     var worklistSelected = false
     var worklistTaskID: Int64?
     var worklistShowsSettings = false
+    /// 任务卡上展开改动的工单（「看改动」，`showTaskDiff`）；nil = 不展开。换任务时清掉。
+    var worklistDiffTicketID: Int64?
     /// 设置子页当前的段（设计评审 2026-11-08，2A）；`openWorklistSettings` 不给段就保持上次的。
     var worklistSettingsSegment: WorklistSettingsSegment = .router
     /// The task-level follow-up being written (打回任务) — the sheet is hosted at the root.
@@ -435,6 +437,7 @@ final class AppModel {
     func openWorklist(task: Int64? = nil, settings: Bool = false) {
         guard worklistAvailable else { return openSuperagent() }
         clearToolPanes(); worklistSelected = true
+        if worklistTaskID != task { worklistDiffTicketID = nil }
         worklistTaskID = task
         worklistShowsSettings = settings
         leaveTerminals()
