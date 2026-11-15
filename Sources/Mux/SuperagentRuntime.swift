@@ -131,8 +131,8 @@ final class SuperagentRuntime {
         }
         migrateTasks()
         reader = (try? SuperagentStore(url: engine!.store.url)).map { SuperagentEngine(store: $0) }
-        if installTools { installSupport() }
         reload()
+        if installTools { installSupport() }
         loaded = true
         let name = SuperagentPaths.changedNotification
         notify_register_dispatch(name, &notifyToken, DispatchQueue.main) { [weak self] (_: Int32) in
@@ -188,6 +188,9 @@ final class SuperagentRuntime {
         }
         if let axis = AxisClaude.bundledExecutableURL {
             installSymlink(name: "axis-claude", target: axis)
+        }
+        if let agy = AgentPlatform.antigravity.executablePath {
+            installSymlink(name: "agy", target: URL(fileURLWithPath: agy))
         }
     }
 
@@ -267,15 +270,24 @@ final class SuperagentRuntime {
     func setMode(_ m: AcceptMode) { act { try $0.setMode(m) } }
     func setSchedules(_ s: [Schedule]) { act { try $0.setSchedules(s) } }
     func saveSettings(_ s: Settings) {
-        let acceptanceChanged = s.acceptance != settings.acceptance
+        let needsPromptSync = s.acceptance != settings.acceptance || (s.codingAgent == .antigravity && settings.codingAgent != .antigravity)
         act { try $0.store.saveSettings(s) }
         let roles = roles
-        if acceptanceChanged { Task.detached(priority: .utility) { SuperagentPrompts.install(acceptance: s.acceptance, roles: roles) } }
+        if needsPromptSync { Task.detached(priority: .utility) { SuperagentPrompts.install(acceptance: s.acceptance, roles: roles) } }
     }
 
     /// 新建 / 更新 / 删除角色（面板）。
-    func setRole(_ r: Role) { act { _ = try $0.setRole(r) } }
-    func deleteRole(_ name: String) { act { try $0.deleteRole(name) } }
+    func setRole(_ r: Role) {
+        let acceptance = settings.acceptance
+        if act({ _ = try $0.setRole(r) }) {
+            Task.detached(priority: .utility) { _ = try? SuperagentPrompts.installRole(r, acceptance: acceptance) }
+        }
+    }
+    func deleteRole(_ name: String) {
+        if act({ try $0.deleteRole(name) }) {
+            Task.detached(priority: .utility) { SuperagentPrompts.removeRole(name) }
+        }
+    }
 
     // MARK: 工作清单（界面 → 引擎）
 
@@ -434,6 +446,10 @@ final class SuperagentRuntime {
 
     private func openRouterOnce(dir: String) async -> String? {
         let tmux = self.tmux
+        if routerCommand == nil, settings.codingAgent == .antigravity {
+            let acceptance = settings.acceptance, roles = roles
+            await Task.detached(priority: .userInitiated) { _ = SuperagentPrompts.install(acceptance: acceptance, roles: roles) }.value
+        }
         let command = routerCommand?() ?? defaultRouterCommand()
         // 30 秒内刚打过启动命令：shell 可能还没执行它，别再打一遍（会拼成一行）。
         let mayRetype = Date().timeIntervalSince(routerTypedAt) > 30
@@ -978,6 +994,7 @@ final class SuperagentRuntime {
         switch settings.codingAgent {
         case .claude: return Self.claudeWorkerCommand(t, role: role, kickoff: kickoff)
         case .axisClaude: return Self.axisWorkerCommand(t, role: role, kickoff: kickoff)
+        case .antigravity: return Self.agyWorkerCommand(t, role: role, kickoff: kickoff)
         }
     }
 
@@ -985,6 +1002,7 @@ final class SuperagentRuntime {
         switch settings.codingAgent {
         case .claude: return Self.claudeRouterCommand()
         case .axisClaude: return Self.axisRouterCommand()
+        case .antigravity: return Self.agyRouterCommand()
         }
     }
 
@@ -1031,6 +1049,34 @@ final class SuperagentRuntime {
         let exe = executable.map(SuperagentTmux.quote) ?? "axis-claude"
         return "\(envPrefix) TFA_ROLE=router \(exe) --append-system-prompt-file \(SuperagentTmux.quote(SuperagentPaths.routerPrompt.path)) "
             + "--permission-mode dontAsk --allowedTools 'Bash(tfa *)' --disallowedTools 'Edit,Write,NotebookEdit'"
+    }
+
+    /// 执行终端：Antigravity CLI（`agy`），通过 `~/.gemini/config/agents/tfa-role-<slug>.md` 加载角色执行者 prompt，
+    /// `-i=<kickoff>` 跑完首轮工单后停留在交互 TUI 里接收后续跟进。只读角色走 `--mode=plan` 并在权限层硬拒绝 `write_file(*)`。
+    nonisolated static func agyWorkerCommand(_ t: Ticket, role: Role, kickoff: String,
+                                             executable: String? = AgentPlatform.antigravity.executablePath) -> String {
+        let exe = executable.map(SuperagentTmux.quote) ?? "agy"
+        let who = role.standing ? "TFA_AGENT=\(SuperagentTmux.quote(role.name))" : "TFA_TICKET=\(t.id)"
+        let agentName = SuperagentPrompts.agyRoleAgentName(role.name)
+        if role.edits {
+            let settingsJSON = "{\"allowNonWorkspaceAccess\":true,\"artifactReviewPolicy\":\"always-proceed\"}"
+            return "\(envPrefix) \(who) \(exe) --agent=\(SuperagentTmux.quote(agentName)) --dangerously-skip-permissions "
+                + "--settings=\(SuperagentTmux.quote(settingsJSON)) -i=\(SuperagentTmux.quote(kickoff))"
+        } else {
+            let settingsJSON = "{\"toolPermission\":\"always-proceed\",\"allowNonWorkspaceAccess\":true,"
+                + "\"artifactReviewPolicy\":\"always-proceed\",\"permissions\":{\"deny\":[\"write_file(*)\"]}}"
+            return "\(envPrefix) \(who) \(exe) --agent=\(SuperagentTmux.quote(agentName)) --mode=plan "
+                + "--settings=\(SuperagentTmux.quote(settingsJSON)) -i=\(SuperagentTmux.quote(kickoff))"
+        }
+    }
+
+    /// 主管：Antigravity CLI（`agy`），加载只暴露 `run_command` 的 `tfa-router` Agent，放行 `tfa` 命令并硬拒绝文件写入。
+    nonisolated static func agyRouterCommand(executable: String? = AgentPlatform.antigravity.executablePath) -> String {
+        let exe = executable.map(SuperagentTmux.quote) ?? "agy"
+        let settingsJSON = "{\"toolPermission\":\"request-review\",\"allowNonWorkspaceAccess\":true,"
+            + "\"artifactReviewPolicy\":\"always-proceed\","
+            + "\"permissions\":{\"allow\":[\"command(tfa)\",\"unsandboxed(tfa)\"],\"deny\":[\"write_file(*)\"]}}"
+        return "\(envPrefix) TFA_ROLE=router \(exe) --agent=\(SuperagentPrompts.agyRouterAgentName) --settings=\(SuperagentTmux.quote(settingsJSON))"
     }
 
     // MARK: - 看门狗（工作清单第 4 期；候选、判定和两步升级在引擎的 Watchdog.swift）

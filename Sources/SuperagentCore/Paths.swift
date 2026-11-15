@@ -21,6 +21,24 @@ public enum SuperagentPaths {
     /// 每个工单的 git worktree 放在这里：`<repo名>-<工单号>`。
     public static var worktreesDir: URL { home.appendingPathComponent("worktrees", isDirectory: true) }
 
+    /// Antigravity CLI（`agy`）全局自定义 Agent 目录：默认 `~/.gemini/config/agents`。
+    /// 指定了 `AGY_CONFIG_DIR` 时写进 `<AGY_CONFIG_DIR>/agents`；指定了私有 `TFA_HOME`（测试 / 隔离实例）时写进 `<TFA_HOME>/agy-agents`，不污染真实用户目录。
+    public static var agyAgentsDir: URL { agyAgentsDir(environment: ProcessInfo.processInfo.environment) }
+    public static func agyAgentsDir(environment: [String: String]) -> URL {
+        if let custom = environment["AGY_CONFIG_DIR"], !custom.isEmpty {
+            return URL(fileURLWithPath: (custom as NSString).expandingTildeInPath, isDirectory: true)
+                .appendingPathComponent("agents", isDirectory: true)
+        }
+        if let tfaHome = environment["TFA_HOME"], !tfaHome.isEmpty {
+            return URL(fileURLWithPath: tfaHome, isDirectory: true)
+                .appendingPathComponent("agy-agents", isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini/config/agents", isDirectory: true)
+    }
+    public static var agyRouterAgent: URL { agyAgentsDir.appendingPathComponent("tfa-router.md") }
+    public static func agyRoleAgent(_ agentName: String) -> URL { agyAgentsDir.appendingPathComponent("\(agentName).md") }
+
     /// CLI 提交后发出的 Darwin 通知名，App 收到后立刻跑一轮 Pass（否则等 2 秒心跳）。
     /// 名字带上 home 路径的稳定哈希（`hashValue` 每个进程不同，不能用），私有实例互不干扰。
     public static var changedNotification: String {

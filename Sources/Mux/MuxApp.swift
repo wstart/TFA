@@ -11,21 +11,8 @@ struct MuxApp: App {
         // A single-instance `Window`, not a `WindowGroup`: every terminal is ONE SwiftTerm NSView, which
         // can live in only one window. A second main window (⌘N, or macOS restoring two) would steal the
         // views, leaving the other window's terminals blank and swallowing keystrokes.
-        Window("TFA", id: "main") {
-            RootView()
-                .environment(appModel)
-                .frame(minWidth: 900, minHeight: 560)
-                .onAppear {
-                    delegate.appModel = appModel
-                    NSApplication.shared.setActivationPolicy(.regular)
-                    NSApplication.shared.appearance = NSAppearance(named: .aqua) // DESIGN.md is a light system → pin light chrome (titlebar/menus) regardless of system dark mode
-                    NSApplication.shared.activate(ignoringOtherApps: true)
-                    NotificationManager.requestAuthorization()
-                    appModel.start()
-                    DispatchQueue.main.async { delegate.adoptMainWindow() } // 关窗驻留菜单栏(决议 #3)
-                }
-        }
-        .commands {
+        Window("TFA", id: "main") { mainContent }
+            .commands {
             // Replace the default File ▸ Close (⌘W) so the SINGLE ⌘W in the app means "detach the
             // selected terminal", with no ambiguous second ⌘W binding fighting the window-close item.
             CommandGroup(replacing: .saveItem) {
@@ -103,6 +90,21 @@ struct MuxApp: App {
                 .environment(appModel)
         }
     }
+
+    private var mainContent: some View {
+        RootView()
+            .environment(appModel)
+            .frame(minWidth: 900, minHeight: 560)
+            .onAppear {
+                delegate.appModel = appModel
+                NSApplication.shared.setActivationPolicy(.regular)
+                NSApplication.shared.appearance = NSAppearance(named: .aqua) // DESIGN.md is a light system → pin light chrome (titlebar/menus) regardless of system dark mode
+                NSApplication.shared.activate(ignoringOtherApps: true)
+                NotificationManager.requestAuthorization()
+                appModel.start()
+                DispatchQueue.main.async { delegate.adoptMainWindow() } // 关窗驻留菜单栏(决议 #3)
+            }
+    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
@@ -158,7 +160,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
     @objc private func showMainWindow() {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        mainWindow?.makeKeyAndOrderFront(nil)
+        if let mainWindow {
+            mainWindow.makeKeyAndOrderFront(nil)
+        } else {
+            EnvironmentValues().openWindow(id: "main")
+        }
     }
 
     /// Clicking the Dock icon (when still regular) with the window hidden brings it back.
@@ -181,6 +187,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated { NotificationManager.install(delegate: self) }
+        // Ensure the single-instance "main" window always materializes on launch even if macOS saved
+        // scene state when the window was hidden (`orderOut`) or suppressed alongside `WindowGroup(for:)`.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.mainWindow == nil,
+                  !NSApp.windows.contains(where: { $0.title == "TFA" && $0.canBecomeMain }) else { return }
+            EnvironmentValues().openWindow(id: "main")
+        }
         // A raw SIGTERM (`pkill TFA`, a crash-reporter kill) or SIGINT does NOT run
         // applicationWillTerminate — so our spawned `tmux -CC` children (each a setsid session
         // leader holding a pty) would orphan to launchd and accumulate across restarts until the

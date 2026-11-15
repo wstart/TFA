@@ -34,9 +34,27 @@ final class SkillsStore {
         let fm = FileManager.default
         var roots: [SkillNode] = []
         scanError = nil
-        let directories = platform == .codex
-            ? [(skillsDir, "Codex"), (fm.homeDirectoryForCurrentUser.appendingPathComponent(".agents/skills"), "共享")]
-            : [(skillsDir, "Claude Code")]
+        let directories: [(URL, String)] = {
+            switch platform {
+            case .claude:
+                return [(skillsDir, "Claude Code")]
+            case .codex:
+                return [(skillsDir, "Codex"), (fm.homeDirectoryForCurrentUser.appendingPathComponent(".agents/skills"), "共享")]
+            case .antigravity:
+                var list: [(URL, String)] = [(skillsDir, "Antigravity")]
+                let pluginsDir = platform.pluginsDirectory
+                if let plugins = try? fm.contentsOfDirectory(at: pluginsDir, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles) {
+                    for plugin in plugins.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                        let pSkills = plugin.appendingPathComponent("skills", isDirectory: true)
+                        if fm.fileExists(atPath: pSkills.path) {
+                            list.append((pSkills, "插件 · \(plugin.lastPathComponent)"))
+                        }
+                    }
+                }
+                list.append((fm.homeDirectoryForCurrentUser.appendingPathComponent(".agents/skills"), "共享"))
+                return list
+            }
+        }()
         var seen: Set<String> = []
         for (directory, source) in directories {
         guard fm.fileExists(atPath: directory.path) else { continue }
@@ -123,7 +141,7 @@ final class SkillsStore {
                 name = String(t.dropFirst(5)).trimmingCharacters(in: .whitespaces)
             } else if t.hasPrefix("description:") {
                 let v = String(t.dropFirst(12)).trimmingCharacters(in: .whitespaces)
-                if v.isEmpty || v == "|" || v == ">" {           // block scalar → take next line
+                if v.isEmpty || v == "|" || v == "|-" || v == "|+" || v == ">" || v == ">-" || v == ">+" { // block scalar → take next line
                     if i + 1 < lines.count { desc = lines[i + 1].trimmingCharacters(in: .whitespaces) }
                 } else { desc = v }
             }

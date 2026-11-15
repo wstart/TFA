@@ -25,22 +25,51 @@ struct NewSessionSheet: View {
         if taken.contains(trimmed) { return "已有同名会话" }
         return nil
     }
-    private var launchesAxisClaude: Bool { appModel.newSessionLaunchesAxisClaude }
-    private var canCreate: Bool { !trimmed.isEmpty && nameError == nil && (!launchesAxisClaude || AxisClaude.executablePath != nil) }
+    private var launchKind: AppModel.NewSessionLaunchKind { appModel.newSessionLaunchKind }
+    private var launchAvailable: Bool {
+        switch launchKind {
+        case .shell: return true
+        case .axisClaude: return AxisClaude.executablePath != nil
+        case .antigravity: return AgentPlatform.antigravity.executablePath != nil
+        }
+    }
+    private var canCreate: Bool { !trimmed.isEmpty && nameError == nil && launchAvailable }
+
+    private var badgeKind: TerminalKind {
+        switch launchKind {
+        case .shell: return .shell
+        case .axisClaude: return .axisClaude
+        case .antigravity: return .antigravity
+        }
+    }
+    private var headerTitle: String {
+        switch launchKind {
+        case .shell: return "启动终端"
+        case .axisClaude: return "启动 axis-claude"
+        case .antigravity: return "启动 Antigravity"
+        }
+    }
+    private var headerSubtitle: String {
+        switch launchKind {
+        case .shell: return "一个真实的 tmux 会话——关掉 TFA 也不会丢。"
+        case .axisClaude: return "用本机 axis-model 读写代码、执行命令的编程助手。"
+        case .antigravity: return "用 Google Antigravity (agy) 读写代码、执行命令的编程助手。"
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
             HStack(alignment: .top, spacing: Theme.Space.md) {
-                KindBadge(kind: launchesAxisClaude ? .axisClaude : .shell)
+                KindBadge(kind: badgeKind)
                 VStack(alignment: .leading, spacing: Theme.Space.xxs) {
-                    Text(launchesAxisClaude ? "启动 axis-claude" : "启动终端").font(Theme.Font.headerTitle)
-                    Text(launchesAxisClaude ? "用本机 axis-model 读写代码、执行命令的编程助手。"
-                                            : "一个真实的 tmux 会话——关掉 TFA 也不会丢。")
+                    Text(headerTitle).font(Theme.Font.headerTitle)
+                    Text(headerSubtitle)
                         .font(Theme.Font.headerMeta)
                         .foregroundStyle(Theme.textTertiary)
                 }
             }
-            if launchesAxisClaude { axisStatus }
+            if launchKind == .axisClaude { axisStatus }
+            if launchKind == .antigravity { agyStatus }
 
             VStack(alignment: .leading, spacing: Theme.Space.xs) {
                 Text("名字").font(.caption).foregroundStyle(.secondary)
@@ -91,7 +120,7 @@ struct NewSessionSheet: View {
             taken = appModel.takenLocalSessionNames()
             nameFocused = true
         }
-        .task { if launchesAxisClaude { await axis.refresh() } }
+        .task { if launchKind == .axisClaude { await axis.refresh() } }
     }
 
     /// axis-model state as a small status capsule (dot + text) — creatable either way: axis-claude
@@ -102,6 +131,20 @@ struct NewSessionSheet: View {
             if axis.status == .running { return (Theme.Status.positive, "axis-model 运行中 · \(axis.currentModelName)") }
             return (Theme.Status.attention, "axis-model \(axis.status.label) · 可在侧栏「模型」面板启动")
         }()
+        statusCapsule(tint: tint, text: text)
+    }
+
+    @ViewBuilder private var agyStatus: some View {
+        let (tint, text): (Color, String) = {
+            if let path = AgentPlatform.antigravity.executablePath {
+                return (Theme.Status.positive, "agy 已就绪 · \((path as NSString).abbreviatingWithTildeInPath)")
+            }
+            return (Theme.Status.error, "未找到 agy 命令 · 请先安装 Antigravity CLI")
+        }()
+        statusCapsule(tint: tint, text: text)
+    }
+
+    private func statusCapsule(tint: Color, text: String) -> some View {
         HStack(spacing: Theme.Space.sm) {
             Circle().fill(tint).frame(width: 7, height: 7)
             Text(text).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1).truncationMode(.middle)
@@ -130,8 +173,14 @@ struct NewSessionSheet: View {
 
     private func create() {
         guard canCreate else { return }
-        appModel.createLocalSession(name: trimmed, startDirectory: folder,
-                                    command: launchesAxisClaude ? AxisClaude.command(resume: false) : nil)
+        let cmd: String? = {
+            switch launchKind {
+            case .shell: return nil
+            case .axisClaude: return AxisClaude.command(resume: false)
+            case .antigravity: return AgentPlatform.agyCommand(resume: false)
+            }
+        }()
+        appModel.createLocalSession(name: trimmed, startDirectory: folder, command: cmd)
         dismiss()
     }
 }

@@ -98,7 +98,7 @@ struct RouterCard: View {
                 .help(session == nil ? "主管终端的起始目录，也是新工单的默认目录" : "主管下次启动时生效")
                 Spacer(minLength: 0)
             }
-            Text("在主管终端里说需求，它拆成工单派给执行终端；执行终端用 Claude Code（全部放行），"
+            Text("在主管终端里说需求，它拆成工单派给执行终端；执行终端用 \(sa.settings.codingAgent.label)（全部放行），"
                  + (sa.settings.worktree ? "每个工单一个 git worktree。" : "直接在请求的目录里工作。"))
                 .font(.caption).foregroundStyle(Theme.textTertiary).fixedSize(horizontal: false, vertical: true)
         }
@@ -780,7 +780,7 @@ struct SettingsCard: View {
                 .controlSize(.small)
                 Toggle("", isOn: bind(\.acceptance)).labelsHidden().toggleStyle(.switch).controlSize(.small)
             }
-            SettingRow(title: "执行与主管 Agent", note: s.codingAgent == .claude ? "使用本机安装的 Claude Code 命令行" : "使用内置 axis-claude，连接本机 axis-model 服务") {
+            SettingRow(title: "执行与主管 Agent", note: Self.agentNote(s.codingAgent)) {
                 SegmentedChoice(selection: bind(\.codingAgent), options: CodingAgentKind.allCases.map { (value: $0, label: $0.label) })
                     .accessibilityLabel("执行与主管 Agent")
             }
@@ -799,7 +799,7 @@ struct SettingsCard: View {
                 SegmentedChoice(selection: bind(\.modelBackend), options: ModelBackendKind.allCases.map { (value: $0, label: $0.label) })
                     .accessibilityLabel("模型调用方式")
             }
-            SettingRow(title: "研判用的模型", note: s.modelBackend == .axisModel ? "默认使用 axis-model 当前加载的模型（axis_model）" : "默认 \(SuperagentCore.Settings.defaultModel)") {
+            SettingRow(title: "研判用的模型", note: Self.modelNameNote(s.modelBackend)) {
                 ModelNameField()
             }
             if s.modelBackend == .api {
@@ -809,11 +809,28 @@ struct SettingsCard: View {
         .saCard()
     }
 
+    private static func agentNote(_ kind: CodingAgentKind) -> String {
+        switch kind {
+        case .claude: return "使用本机安装的 Claude Code 命令行"
+        case .axisClaude: return "使用内置 axis-claude，连接本机 axis-model 服务"
+        case .antigravity: return "使用本机安装的 Antigravity (agy) 命令行，自动同步角色配置"
+        }
+    }
+
     private static func backendNote(_ kind: ModelBackendKind) -> String {
         switch kind {
         case .cli: return "本机的 claude 命令，走你的 Claude Code 登录"
+        case .agy: return "本机的 agy 命令，走你的 Antigravity 登录"
         case .api: return "Anthropic Messages API，key 存在钥匙串"
         case .axisModel: return "本机的 axis-model 服务（默认 http://127.0.0.1:1234）"
+        }
+    }
+
+    private static func modelNameNote(_ kind: ModelBackendKind) -> String {
+        switch kind {
+        case .axisModel: return "默认使用 axis-model 当前加载的模型（axis_model）"
+        case .agy: return "默认使用 agy 当前默认模型；也可指定如 gemini-4-carbon-high"
+        case .cli, .api: return "默认 \(SuperagentCore.Settings.defaultModel)"
         }
     }
 

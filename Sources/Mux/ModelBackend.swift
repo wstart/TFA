@@ -19,10 +19,79 @@ enum ModelBackends {
     static func make(_ s: Settings) -> ModelBackend {
         switch s.modelBackend {
         case .cli: return ClaudeCLIBackend(model: s.modelName)
+        case .agy: return AgyCLIBackend(model: s.modelName)
         case .api: return AnthropicAPIBackend(model: s.modelName, apiKey: ModelAPIKeyStore.load())
         case .axisModel: return AxisModelBackend(model: s.modelName)
         }
     }
+}
+
+// MARK: - 本机 agy
+
+/// `agy --disable-slash-commands --settings=... --output-format=json [-model=<m>] -p=<prompt>`：
+/// 复用本机 Antigravity CLI 登录态完成无头研判，并用权限 deny 禁用写文件 / 命令 / MCP 等副作用工具。
+struct AgyCLIBackend: ModelBackend {
+    var model: String
+    /// 可执行文件；nil = 在 PATH 和常见位置里找。
+    var executable: String?
+    var timeout: Double = 180
+
+    private static let readOnlySettings = "{\"permissions\":{\"deny\":[\"write_file(*)\",\"command(*)\",\"mcp(*)\"]}}"
+
+    func complete(system: String, user: String) async throws -> String {
+        guard let exe = executable ?? Self.locate() else {
+            throw ModelBackendError("找不到 agy 命令：装好 Antigravity CLI（curl -fsSL https://antigravity.google/cli/install.sh | bash），或在设置里切换模型调用方式")
+        }
+        let prompt = system.isEmpty ? user : "\(system)\n\n---\n\n\(user)"
+        var args = ["--disable-slash-commands", "--settings=\(Self.readOnlySettings)", "--output-format=json"]
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedModel.isEmpty, trimmedModel != Settings.defaultModel {
+            args.append("--model=\(trimmedModel)")
+        }
+        args.append("-p=\(prompt)")
+        let r = try await Self.run(exe, args, timeout: timeout)
+        if r.status != 0 {
+            let err = (r.err.isEmpty ? r.out : r.err).trimmingCharacters(in: .whitespacesAndNewlines)
+            throw ModelBackendError("agy 退出码 \(r.status)：\(String(err.prefix(300)))")
+        }
+        return try Self.parseOutput(r.out)
+    }
+
+    static func parseOutput(_ out: String) throws -> String {
+        let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let obj = try? JSONSerialization.jsonObject(with: Data(trimmed.utf8)), let dict = obj as? [String: Any] {
+            return try extractResult(dict)
+        }
+        // 若 stdout 前面夹了非致命 warning 行，尝试取最后一行 JSON 对象解析。
+        if let lastBraceLine = trimmed.split(separator: "\n").last(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("{") }),
+           let obj = try? JSONSerialization.jsonObject(with: Data(lastBraceLine.utf8)),
+           let dict = obj as? [String: Any] {
+            return try extractResult(dict)
+        }
+        return trimmed
+    }
+
+    private static func extractResult(_ d: [String: Any]) throws -> String {
+        let status = (d["status"] as? String) ?? ""
+        let isError = (d["is_error"] as? Bool == true) || (!status.isEmpty && status.uppercased() != "SUCCESS")
+        let text = (d["response"] as? String) ?? (d["result"] as? String) ?? ""
+        if isError {
+            let errText = (d["error"] as? String) ?? text
+            throw ModelBackendError("agy 报错：\(errText.isEmpty ? (status.isEmpty ? "未知" : status) : String(errText.prefix(300)))")
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ModelBackendError("agy 没有返回内容（\(status.isEmpty ? "?" : status)）")
+        }
+        return text
+    }
+
+    static func locate() -> String? { AgentPlatform.antigravity.executablePath }
+
+    static func run(_ exe: String, _ args: [String], timeout: Double) async throws -> (status: Int32, out: String, err: String) {
+        try await ClaudeCLIBackend.run(exe, args, timeout: timeout, label: "agy")
+    }
+
+    static func terminateAll() { ClaudeCLIBackend.terminateAll() }
 }
 
 // MARK: - 本机 claude
@@ -77,15 +146,17 @@ struct ClaudeCLIBackend: ModelBackend {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    /// 跑一个子进程到结束（超时就结束它），在后台队列上等。环境里去掉 TFA_* 和 CLAUDECODE：别让 claude 以为自己是某张工单的执行者。
-    static func run(_ exe: String, _ args: [String], timeout: Double) async throws -> (status: Int32, out: String, err: String) {
+    /// 跑一个子进程到结束（超时就结束它），在后台队列上等。环境里去掉 TFA_*、CLAUDECODE 与 ANTIGRAVITY_*：别让子进程以为自己是某张工单或外层 Agent 会话的子执行者。
+    static func run(_ exe: String, _ args: [String], timeout: Double, label: String = "claude") async throws -> (status: Int32, out: String, err: String) {
         try await withCheckedThrowingContinuation { cont in
             DispatchQueue.global(qos: .utility).async {
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: exe)
                 p.arguments = args
                 var env = ProcessInfo.processInfo.environment
-                for k in env.keys where k.hasPrefix("TFA_") || k == "CLAUDECODE" { env[k] = nil }
+                for k in env.keys where k.hasPrefix("TFA_") || k == "CLAUDECODE" || k.hasPrefix("ANTIGRAVITY_") {
+                    env[k] = nil
+                }
                 p.environment = env
                 let out = Pipe(), err = Pipe()
                 p.standardOutput = out
@@ -109,7 +180,7 @@ struct ClaudeCLIBackend: ModelBackend {
                 group.wait()
                 timer.cancel()
                 running.remove(p)
-                if timedOut.isSet { return cont.resume(throwing: ModelBackendError("claude 超过 \(Int(timeout)) 秒没有回复，已结束它")) }
+                if timedOut.isSet { return cont.resume(throwing: ModelBackendError("\(label) 超过 \(Int(timeout)) 秒没有回复，已结束它")) }
                 cont.resume(returning: (p.terminationStatus, String(decoding: outData, as: UTF8.self), String(decoding: errBox.data, as: UTF8.self)))
             }
         }

@@ -397,26 +397,29 @@ public struct Role: Equatable, Sendable, Codable, Identifiable {
     ]
 }
 
-/// 执行工单与「主管」终端使用的编码 Agent：`claude` = Claude Code；`axisClaude` = 内置的 `axis-claude`（走本机 axis-model）。
+/// 执行工单与「主管」终端使用的编码 Agent：`claude` = Claude Code；`axisClaude` = 内置的 `axis-claude`（走本机 axis-model）；
+/// `antigravity` = 本机的 `agy`（Google Antigravity CLI）。
 public enum CodingAgentKind: String, CaseIterable, Sendable {
-    case claude, axisClaude
+    case claude, axisClaude, antigravity
 
     public var label: String {
         switch self {
         case .claude: return "Claude Code"
         case .axisClaude: return "axis-claude"
+        case .antigravity: return "Antigravity"
         }
     }
 }
 
-/// 看门狗研判用哪种方式调模型（工作清单第 4 期）：`cli` = 本机的 `claude -p`（走用户的订阅）；
+/// 看门狗研判用哪种方式调模型（工作清单第 4 期）：`cli` = 本机的 `claude -p`（走用户的订阅）；`agy` = 本机的 `agy -p`（走 Antigravity 登录）；
 /// `api` = Anthropic Messages API（key 存钥匙串）；`axisModel` = 本机的 `axis-model` 服务（127.0.0.1:1234）。
 public enum ModelBackendKind: String, CaseIterable, Sendable {
-    case cli, api, axisModel
+    case cli, agy, api, axisModel
 
     public var label: String {
         switch self {
         case .cli: return "本机 claude"
+        case .agy: return "本机 agy"
         case .api: return "Anthropic API"
         case .axisModel: return "本机 axis-model"
         }

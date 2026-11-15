@@ -106,11 +106,21 @@ final class AppModel {
     /// (claude / vim / less), which has no scrollback of its own.
     var historyViewer: ConnectionSession?
 
+    /// What the「新建会话」sheet launches inside the fresh tmux session.
+    enum NewSessionLaunchKind: Equatable {
+        case shell
+        case axisClaude
+        case antigravity
+    }
+
     /// Drives the「新建会话」sheet — a LOCAL new terminal is named + folder-bound there before it's
     /// created (instead of auto-spawning mux-N).
     var isShowingNewSession = false
-    /// What the「新建会话」sheet launches: a plain shell, or axis-claude inside it.
-    var newSessionLaunchesAxisClaude = false
+    var newSessionLaunchKind: NewSessionLaunchKind = .shell
+    var newSessionLaunchesAxisClaude: Bool {
+        get { newSessionLaunchKind == .axisClaude }
+        set { newSessionLaunchKind = newValue ? .axisClaude : .shell }
+    }
 
     /// Whether the playful per-keystroke typing-combo effect is shown. Persisted; toggled in Settings.
     var typingEffectsEnabled: Bool = (UserDefaults.standard.object(forKey: "typingEffectsEnabled") as? Bool) ?? false {
@@ -206,17 +216,21 @@ final class AppModel {
 
     /// New terminal on the CURRENTLY-SELECTED host (rebuild.md #2): local → a fresh local session;
     /// ssh → a fresh session on that host (reusing the host's authenticated ssh master).
-    func newTerminal(axisClaude: Bool = false) {
+    func newTerminal(launch: NewSessionLaunchKind = .shell) {
         switch currentHost {
         case .local:
             // Local terminals are named + folder-bound in the「新建会话」sheet before they're created.
-            newSessionLaunchesAxisClaude = axisClaude
+            newSessionLaunchKind = launch
             isShowingNewSession = true
         case .ssh(let host, let args):
             open(TmuxConnection(endpoint: .ssh(host: host, sshArgs: args),
                                 sessionName: nextSSHName(host: host),
                                 password: hostPasswords[host]))
         }
+    }
+
+    func newTerminal(axisClaude: Bool) {
+        newTerminal(launch: axisClaude ? .axisClaude : .shell)
     }
 
     /// Create a LOCAL session with a user-chosen name, starting in `startDirectory` (`new-session -c`).
@@ -677,7 +691,7 @@ final class AppModel {
     /// as something else just falls back to scrollback replay instead of `claude --continue`.
     private func isAITerminal(command: String, cwd: String?) -> Bool {
         let c = command.lowercased()
-        return c.contains("claude") || c.contains("codex") || Self.isClaudeVersionTitle(c)
+        return c.contains("claude") || c.contains("codex") || AgentPlatform.isAgyCommand(c) || Self.isClaudeVersionTitle(c)
     }
 
     /// Claude Code retitles its process to its bare VERSION (e.g. `2.1.289`), so tmux's

@@ -138,13 +138,14 @@ public enum SuperagentPrompts {
         return s
     }
 
-    /// 把 router.md 和各角色的 prompt 写进 `SuperagentPaths.promptsDir`，内容没变就不写。成功返回 true。
+    /// 把 router.md 和各角色的 prompt 写进 `SuperagentPaths.promptsDir`（并同步 Antigravity 自定义 Agent），内容没变就不写。成功返回 true。
     @discardableResult
     public static func install(acceptance: Bool, roles: [Role] = Role.builtins) -> Bool {
         do {
             try FileManager.default.createDirectory(at: SuperagentPaths.promptsDir, withIntermediateDirectories: true)
             try write(router, to: SuperagentPaths.routerPrompt)
             for r in roles { try write(worker(role: r, acceptance: acceptance), to: SuperagentPaths.rolePrompt(r.name)) }
+            try installAgyAgents(acceptance: acceptance, roles: roles)
             return true
         } catch {
             return false
@@ -157,7 +158,97 @@ public enum SuperagentPrompts {
         try FileManager.default.createDirectory(at: SuperagentPaths.promptsDir, withIntermediateDirectories: true)
         let url = SuperagentPaths.rolePrompt(role.name)
         try write(worker(role: role, acceptance: acceptance), to: url)
+        _ = try? installAgyRole(role, acceptance: acceptance)
         return url
+    }
+
+    /// 删除角色时顺手清理对应的 prompt 与 Antigravity 自定义 Agent 文件。
+    public static func removeRole(_ roleName: String) {
+        let fm = FileManager.default
+        try? fm.removeItem(at: SuperagentPaths.rolePrompt(roleName))
+        try? fm.removeItem(at: SuperagentPaths.agyRoleAgent(agyRoleAgentName(roleName)))
+    }
+
+    // MARK: - Antigravity CLI (`agy`) Custom Agents
+
+    public static let agyRouterAgentName = "tfa-router"
+
+    /// 将任意角色名映射成稳定、纯 ASCII 的 `agy --agent` 标识符（内置角色用可读英文名，自定义角色用稳定 slug / FNV-1a 哈希）。
+    public static func agyRoleAgentName(_ roleName: String) -> String {
+        switch roleName {
+        case Role.assistant: return "tfa-role-assistant"
+        case Role.developer: return "tfa-role-developer"
+        case Role.reviewer: return "tfa-role-reviewer"
+        default:
+            let lower = roleName.lowercased()
+            let isASCII = !lower.isEmpty && lower.utf8.allSatisfy {
+                ($0 >= 0x61 && $0 <= 0x7a) || ($0 >= 0x30 && $0 <= 0x39) || $0 == 0x2d
+            } && !lower.hasPrefix("-") && !lower.hasSuffix("-")
+            if isASCII { return "tfa-role-\(lower)" }
+            var h: UInt64 = 14695981039346656037
+            for b in roleName.utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
+            return "tfa-role-" + String(h, radix: 16)
+        }
+    }
+
+    /// 生成 `tfa-router.md`：限制主 Agent 仅暴露 `run_command` 工具，附带完整主管路由规则。
+    public static func agyRouterMarkdown() -> String {
+        """
+        ---
+        name: \(agyRouterAgentName)
+        description: \(yamlString("TFA 主管：负责任务拆分、工单路由与清单编排，仅通过命令行运行 tfa"))
+        mainAgent: true
+        subagent: false
+        tools:
+          - run_command
+        ---
+
+        \(router)
+        """
+    }
+
+    /// 生成 `tfa-role-<slug>.md`：承载角色执行者 system prompt，供 `agy --agent=<slug>` 直接加载。
+    public static func agyWorkerMarkdown(role: Role, acceptance: Bool) -> String {
+        let agentName = agyRoleAgentName(role.name)
+        let summary = "TFA 角色「\(role.name)」：\(role.scope)"
+        return """
+        ---
+        name: \(agentName)
+        description: \(yamlString(summary))
+        mainAgent: true
+        subagent: true
+        ---
+
+        \(worker(role: role, acceptance: acceptance))
+        """
+    }
+
+    public static func installAgyAgents(acceptance: Bool, roles: [Role] = Role.builtins) throws {
+        let dir = SuperagentPaths.agyAgentsDir
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try write(agyRouterMarkdown(), to: SuperagentPaths.agyRouterAgent)
+        for r in roles {
+            _ = try installAgyRole(r, acceptance: acceptance)
+        }
+    }
+
+    @discardableResult
+    public static func installAgyRole(_ role: Role, acceptance: Bool) throws -> URL {
+        let dir = SuperagentPaths.agyAgentsDir
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = SuperagentPaths.agyRoleAgent(agyRoleAgentName(role.name))
+        try write(agyWorkerMarkdown(role: role, acceptance: acceptance), to: url)
+        return url
+    }
+
+    /// JSON 字符串字面量同时是合法的 YAML 1.2 双引号标量，避免用户自定义的 `scope` 含冒号、引号或换行破坏 frontmatter。
+    private static func yamlString(_ s: String) -> String {
+        let singleLine = s.replacingOccurrences(of: "\r\n", with: " ").replacingOccurrences(of: "\n", with: " ")
+        if let data = try? JSONSerialization.data(withJSONObject: [singleLine], options: [.withoutEscapingSlashes]),
+           let encoded = String(data: data, encoding: .utf8), encoded.count >= 2 {
+            return String(encoded.dropFirst().dropLast())
+        }
+        return "\"\(singleLine.replacingOccurrences(of: "\"", with: "\\\""))\""
     }
 
     private static func write(_ text: String, to url: URL) throws {

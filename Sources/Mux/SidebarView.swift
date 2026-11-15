@@ -507,7 +507,9 @@ private struct SidebarHeader: View {
             // against the LOCAL model only.
             Menu {
                 Button { appModel.newTerminal() } label: { Label("启动终端", systemImage: "terminal") }
-                Button { appModel.newTerminal(axisClaude: true) } label: { Label("启动 axis-claude", systemImage: "cpu") }
+                Button { appModel.newTerminal(launch: .antigravity) } label: { Label("启动 Antigravity (agy)", systemImage: "sparkles") }
+                    .disabled(appModel.currentHost != .local)
+                Button { appModel.newTerminal(launch: .axisClaude) } label: { Label("启动 axis-claude", systemImage: "cpu") }
                     .disabled(appModel.currentHost != .local)
                 Divider()
                 Button { onNewGroup() } label: { Label("新建分组…", systemImage: "folder.badge.plus") }

@@ -168,7 +168,8 @@ struct SuperagentTmux: Sendable {
         return dialogMarkers.contains { tail.contains($0) }
     }
     static let dialogMarkers = ["Enter to confirm", "Esc to cancel", "Do you want to proceed", "Do you want to make this edit",
-                                "Do you trust", "trust this folder"]
+                                "Do you trust", "trust this folder", "Trust this folder",
+                                "Choose your color scheme", "Terms of Service & Data Use", "↑/↓ Navigate"]
 
     /// 在已有名字之外取一个可用的会话名（tmux 会话名不能含 `.` 和 `:`）。
     static func sessionName(_ base: String, taken: Set<String>) -> String {
