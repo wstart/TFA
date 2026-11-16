@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import AppKit
+import SwiftUI
 import TmuxKit
 
 /// Top-level app state.
@@ -120,6 +121,44 @@ final class AppModel {
     var newSessionLaunchesAxisClaude: Bool {
         get { newSessionLaunchKind == .axisClaude }
         set { newSessionLaunchKind = newValue ? .axisClaude : .shell }
+    }
+
+    /// Appearance mode: follow macOS system dark/light, or pin to paper-light or calm-dark.
+    enum AppearanceMode: String, CaseIterable, Identifiable {
+        case system = "system"
+        case light = "light"
+        case dark = "dark"
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .system: return "跟随系统"
+            case .light: return "纸面浅色"
+            case .dark: return "静谧深色"
+            }
+        }
+    }
+
+    var appearanceMode: AppearanceMode = AppearanceMode(rawValue: UserDefaults.standard.string(forKey: "appearanceMode") ?? "") ?? .system {
+        didSet {
+            UserDefaults.standard.set(appearanceMode.rawValue, forKey: "appearanceMode")
+            applyAppearance()
+        }
+    }
+
+    var preferredColorScheme: ColorScheme? {
+        switch appearanceMode {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+
+    func applyAppearance() {
+        switch appearanceMode {
+        case .system: NSApplication.shared.appearance = nil
+        case .light: NSApplication.shared.appearance = NSAppearance(named: .aqua)
+        case .dark: NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
+        }
     }
 
     /// Whether the playful per-keystroke typing-combo effect is shown. Persisted; toggled in Settings.
@@ -419,7 +458,8 @@ final class AppModel {
     /// pane + re-show the terminal explicitly.
     func activateTerminal(_ id: UUID) {
         if selectedConnectionID == id {
-            let onTool = axisSelected || labSelected || skillsSelected || claudeMdSelected || tunnelsSelected || groupNoteSelected
+            let onTool = axisSelected || labSelected || skillsSelected || claudeMdSelected
+                || tunnelsSelected || groupNoteSelected || superagentSelected || worklistSelected
             clearToolPanes()
             if onTool, let c = connection(id) { c.markViewed() } // returning to it counts as viewed again
             ensureConnected(id)

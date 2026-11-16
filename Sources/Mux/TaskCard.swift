@@ -29,6 +29,7 @@ struct TaskCard: View {
     @State private var confirmCancel = false
     @State private var confirmDrop = false
     @State private var showDeps = false
+    @State private var showActivity = false
     /// 乐观更新的勾选（`Item.id` → 勾了没）：先翻状态再调引擎，失败回滚（注意事项 F-18）。
     @State private var pending: [Int64: Bool] = [:]
     @FocusState private var newItemFocused: Bool
@@ -45,45 +46,18 @@ struct TaskCard: View {
 
     var body: some View {
         let sa = appModel.superagent
-        GeometryReader { geo in
-            if let cols = TaskCardLayout.columns(width: geo.size.width) {
-                VStack(alignment: .leading, spacing: 0) {
-                    header
-                    Hairline()
-                    HStack(alignment: .top, spacing: 0) {
-                        ScrollView { activityColumn.padding(.leading, 32).padding(.trailing, 24).padding(.vertical, 24) }
-                            .frame(width: cols.activity)
-                        Rectangle().fill(Theme.border).frame(width: 1).accessibilityHidden(true)
-                        ScrollView { checklistColumn.padding(.horizontal, 24).padding(.vertical, 24) }
-                            .frame(width: cols.checklist)
-                        Rectangle().fill(Theme.border).frame(width: 1).accessibilityHidden(true)
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 26) {
-                                diffSection
-                                detailColumn
-                                bottomActions
-                            }
-                            .padding(.horizontal, 40).padding(.vertical, 24)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                }
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        header
-                        VStack(alignment: .leading, spacing: 28) {
-                            diffSection
-                            detailColumn
-                            checklistColumn
-                            if !events.isEmpty { activityColumn }
-                            bottomActions
-                        }
-                        .padding(.horizontal, 32).padding(.bottom, 32)
-                        .frame(maxWidth: 760, alignment: .leading)
-                    }
-                }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                header
+                checklistColumn
+                diffSection
+                detailColumn
+                footerSection
             }
+            .padding(.horizontal, 32)
+            .padding(.vertical, 24)
+            .frame(maxWidth: 780, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onAppear { events = sa.taskEvents(view.id) }
         .onChange(of: view) { _, new in
@@ -145,9 +119,19 @@ struct TaskCard: View {
     private var header: some View {
         let sa = appModel.superagent
         let rest = view.task.isOpen ? Array(view.needsYou.dropFirst()) : []
-        return VStack(alignment: .leading, spacing: 16) {
+        let meta = view.metaLine(includeScope: !editable)
+        return VStack(alignment: .leading, spacing: 12) {
             errorBanner
             titleRow
+            FlowLayout(spacing: Theme.Space.sm) {
+                Text(meta)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(.vertical, 4)
+                    .help(view.task.scope)
+                    .accessibilityLabel("元信息：\(meta)")
+                if hasChips { metaChips }
+            }
             NextStepBanner(view: view, assign: assign)
             if !rest.isEmpty || sa.actionEchoes[view.id] != nil {
                 VStack(alignment: .leading, spacing: 4) {
@@ -156,24 +140,23 @@ struct TaskCard: View {
                             view.ticket(needing: need).map { "\(need.label)（工单 #\($0.id)）" } ?? need.label
                         }.joined(separator: "、"))
                     }
-                    if let echo = sa.actionEchoes[view.id] { Text(echo) } // 动作之后的回声（3A）
+                    if let echo = sa.actionEchoes[view.id] { Text(echo) }
                 }
                 .font(.caption).foregroundStyle(Theme.textTertiary).lineLimit(1)
             }
         }
-        .padding(.horizontal, 32).padding(.top, 24).padding(.bottom, 22)
     }
 
-    // MARK: 标题 + 阶段步进 + 元信息 + 原文
+    // MARK: 标题 + 阶段步进
 
     private var titleRow: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 20) {
+            HStack(alignment: .center, spacing: 16) {
                 titleText
                 Spacer(minLength: 0)
                 StageStepper(stages: view.task.stages, current: view.task.stageIndex)
             }
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 titleText
                 StageStepper(stages: view.task.stages, current: view.task.stageIndex)
             }
@@ -183,63 +166,58 @@ struct TaskCard: View {
     private var titleText: some View {
         let t = view.task
         let tag = view.stateTag
-        return HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(t.label).font(.system(size: 13, design: .monospaced)).foregroundStyle(Theme.textTertiary)
-            Text(t.title).font(.system(size: 24, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(t.label).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.textTertiary)
+            Text(t.title).font(.system(size: 20, weight: .semibold)).foregroundStyle(Theme.textPrimary)
                 .lineLimit(2).textSelection(.enabled).help(t.title)
             StateTag(text: tag.text, tint: tag.tint)
         }
     }
 
-    // MARK: 改动（内嵌 diff，TODOS「任务卡内嵌 diff」）
+    // MARK: 改动（内嵌 diff）
 
-    /// 「看改动」展开的工单属于这张卡就显示改动区；没展开但有带分支的开发工单时，留一行轻的入口。
     @ViewBuilder private var diffSection: some View {
         let diffable = TaskDiff.tickets(view)
         if let id = appModel.worklistDiffTicketID, view.ticket(id) != nil {
             TaskDiffSection(view: view, ticketID: id)
         } else if let last = diffable.last {
             HStack(spacing: 8) {
-                Text("改动").font(.system(size: 12, weight: .semibold)).tracking(1).foregroundStyle(Theme.textTertiary)
-                Button(diffable.count > 1 ? "看工单 #\(last.id) 等 \(diffable.count) 张的改动" : "看工单 #\(last.id) 的改动") {
+                Image(systemName: "arrow.triangle.branch").font(.system(size: 12)).foregroundStyle(Theme.textTertiary)
+                Button(diffable.count > 1 ? "查看工单 #\(last.id) 等 \(diffable.count) 张的代码改动" : "查看工单 #\(last.id) 的代码改动") {
                     appModel.showTaskDiff(task: view.id, ticket: last.id)
                 }
-                .buttonStyle(.plain).font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
-                .help("在卡上按文件看分支 \(last.ticket.branch) 相对分叉点的改动")
+                .buttonStyle(.plain).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textSecondary)
+                .help("按文件查看分支 \(last.ticket.branch) 相对分叉点的改动")
+                Spacer()
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
         }
     }
 
-    // MARK: 右列：元信息 + 原文 / 结果（长文先收起）
+    // MARK: 原文与结果（有内容才渲染卡片）
 
-    private var detailColumn: some View {
-        let meta = view.metaLine(includeScope: !editable)
-        return VStack(alignment: .leading, spacing: 26) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(meta).font(.system(size: 13)).foregroundStyle(Theme.textTertiary)
-                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                    .help(view.task.scope)
-                    .accessibilityLabel("元信息：\(meta)")
-                if hasChips { FlowLayout(spacing: Theme.Space.md) { metaChips } }
-            }
-            textSections
-            OrgSyncRow(view: view) // 同步行（第 3 期）：只有组织任务显示
-        }
-        .frame(maxWidth: 760, alignment: .leading)
-    }
-
-    /// 完成了先看结果，没完成先看原文；打开着又带结果的是上一轮的结果。空的不占位。
-    @ViewBuilder private var textSections: some View {
+    @ViewBuilder private var detailColumn: some View {
         let t = view.task
         let request = t.request != t.title ? t.request : ""
         let sections: [(label: String, text: String)] = t.status == .done
-            ? [("结果", t.resultSummary), ("原文", request)]
-            : [("原文", request), ("上一轮结果", t.resultSummary)]
-        ForEach(sections.filter { !$0.text.isEmpty }, id: \.label) { section in
-            VStack(alignment: .leading, spacing: 10) {
-                SectionLabel(title: section.label)
-                LongText(label: "", text: section.text)
+            ? [("结果", t.resultSummary), ("需求原文", request)]
+            : [("需求原文", request), ("上一轮结果", t.resultSummary)]
+        let nonEmpty = sections.filter { !$0.text.isEmpty }
+        if !nonEmpty.isEmpty || t.origin != nil {
+            VStack(alignment: .leading, spacing: 18) {
+                ForEach(Array(nonEmpty.enumerated()), id: \.element.label) { idx, section in
+                    if idx > 0 { Hairline() }
+                    VStack(alignment: .leading, spacing: 8) {
+                        SectionLabel(title: section.label)
+                        LongText(label: "", text: section.text)
+                    }
+                }
+                OrgSyncRow(view: view)
             }
+            .saCard()
         }
     }
 
@@ -289,31 +267,46 @@ struct TaskCard: View {
         return (open + closed).sorted { $0.id > $1.id }
     }
 
-    // MARK: 中列：工作清单（F-09）
+    // MARK: 工作清单卡片（全宽清晰呈现，不再挤在 280pt 窄栏里）
 
     private var checklistColumn: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                SectionLabel(title: "清单")
-                Text("\(view.doneCount) / \(view.totalCount)").font(.system(size: 12)).monospacedDigit().foregroundStyle(Theme.textTertiary)
-                    .accessibilityLabel("完成 \(view.doneCount) 项，共 \(view.totalCount) 项")
-                Spacer(minLength: 0)
-                if editable {
-                    Button("谁来做…", action: assign)
-                        .buttonStyle(.plain).font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
-                        .frame(minHeight: 28).accessibilityLabel("谁来做")
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .center, spacing: 10) {
+                    SectionLabel(title: "清单")
+                    Text("\(view.doneCount) / \(view.totalCount)")
+                        .font(.system(size: 12)).monospacedDigit().foregroundStyle(Theme.textTertiary)
+                        .accessibilityLabel("完成 \(view.doneCount) 项，共 \(view.totalCount) 项")
+                    Spacer(minLength: 0)
+                    if editable {
+                        Button("分配 / 谁来做…", action: assign)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .accessibilityLabel("谁来做")
+                    }
                 }
+                ProgressLine(done: view.doneCount, total: view.totalCount)
             }
-            ProgressLine(done: view.doneCount, total: view.totalCount)
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
+
+            Hairline()
+
             VStack(spacing: 0) {
-                ForEach(view.items) { item in
+                ForEach(Array(view.items.enumerated()), id: \.element.id) { idx, item in
+                    if idx > 0 { Hairline() }
                     ItemRow(view: view, item: item, status: shownStatus(item), editable: editable,
                             toggle: { toggle(item) }, edit: { editing = item }, remove: { removing = item })
-                    Rectangle().fill(Theme.border.opacity(0.6)).frame(height: 1).accessibilityHidden(true)
+                        .padding(.horizontal, 18)
                 }
-                if editable { addField }
+                if editable {
+                    if !view.items.isEmpty { Hairline() }
+                    addField.padding(.horizontal, 18)
+                }
             }
         }
+        .saCard(padding: 0)
     }
 
     /// 一直在的「加一项」：回车加进去，焦点留在这里接着加。
@@ -356,34 +349,68 @@ struct TaskCard: View {
         }
     }
 
-    // MARK: 左列：活动（时间线，新的在上；要人管的事件琥珀点，交付 / 完成绿点）
+    // MARK: 底部折叠活动记录与操作
 
-    private var activityColumn: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            SectionLabel(title: "活动")
-            if events.isEmpty {
-                Text("还没有活动。").font(.system(size: 13)).foregroundStyle(Theme.textTertiary)
-            } else {
-                VStack(alignment: .leading, spacing: 18) {
+    private var footerSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                if !events.isEmpty {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) { showActivity.toggle() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
+                                .rotationEffect(.degrees(showActivity ? 90 : 0))
+                            Text("活动记录 · \(events.count) 条")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .foregroundStyle(Theme.textSecondary)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                Spacer()
+                if abandoned {
+                    Button("已放弃？") { confirmDrop = true }
+                        .buttonStyle(.plain).font(.caption).foregroundStyle(Theme.textTertiary)
+                        .help("Agent 放弃了全部清单项：确认后任务标为已放弃")
+                        .accessibilityLabel("标为已放弃")
+                }
+                if view.task.isOpen {
+                    Button("取消任务…") { confirmCancel = true }
+                        .buttonStyle(.plain).font(.caption).foregroundStyle(Theme.textTertiary)
+                        .help("名下正在跑的工单会被中断")
+                        .accessibilityLabel("取消任务")
+                }
+            }
+
+            if showActivity, !events.isEmpty {
+                VStack(alignment: .leading, spacing: 14) {
                     ForEach(events.reversed(), id: \.id) { e in
                         let tone = ActivityTone.of(e.kind, text: e.text)
-                        HStack(alignment: .top, spacing: 11) {
+                        HStack(alignment: .top, spacing: 10) {
                             TimelineDot(tone: tone).padding(.top, 4)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(Self.time(e.at)).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textTertiary)
-                                Text(e.text).font(.system(size: 13, weight: tone == .attention ? .medium : .regular))
-                                    .foregroundStyle(tone == .attention ? Theme.textPrimary : Theme.textSecondary)
-                                    .lineLimit(4).help(e.text)
-                                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                            }
+                            Text(Self.time(e.at))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Theme.textTertiary)
+                                .frame(width: 68, alignment: .leading)
+                                .padding(.top, 1)
+                            Text(e.text)
+                                .font(.system(size: 13, weight: tone == .attention ? .medium : .regular))
+                                .foregroundStyle(tone == .attention ? Theme.textPrimary : Theme.textSecondary)
+                                .lineLimit(4)
+                                .help(e.text)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
-                .background(alignment: .leading) { // 竖线穿过圆点中心
-                    Rectangle().fill(Theme.border).frame(width: 1).padding(.vertical, 6).offset(x: 4).accessibilityHidden(true)
-                }
+                .saCard()
+                .transition(.opacity)
             }
         }
+        .padding(.top, 4)
     }
 
     private static let clock: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f }()
@@ -392,28 +419,6 @@ struct TaskCard: View {
     private static func time(_ at: Double) -> String {
         let d = Date(timeIntervalSince1970: at)
         return (Calendar.current.isDateInToday(d) ? clock : dated).string(from: d)
-    }
-
-    // MARK: 底部动作：只剩「取消任务…」（Pass 4）
-
-    private var bottomActions: some View {
-        HStack(spacing: Theme.Space.md) {
-            Spacer()
-            if abandoned {
-                Button("已放弃？") { confirmDrop = true }
-                    .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)
-                    .help("Agent 放弃了全部清单项：确认后任务标为已放弃")
-                    .accessibilityLabel("标为已放弃")
-            }
-            if view.task.isOpen {
-                Button("取消任务…") { confirmCancel = true }
-                    .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)
-                    .help("名下正在跑的工单会被中断")
-                    .accessibilityLabel("取消任务")
-            }
-        }
-        .controlSize(.large)
-        .frame(minHeight: 28)
     }
 }
 
@@ -475,40 +480,56 @@ private struct ItemRow: View {
         shown.status = status
         let word = view.statusWord(shown)
         let handback = view.handback(of: shown)
-        return HStack(alignment: .top, spacing: 10) {
-            Text("\(item.ord)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textTertiary)
-                .frame(width: 14, alignment: .trailing).padding(.top, 3)
+        return HStack(alignment: .center, spacing: 10) {
+            Text("\(item.ord)")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Theme.textTertiary)
+                .frame(width: 16, alignment: .trailing)
             checkbox
-            VStack(alignment: .leading, spacing: 4) {
-                Text(item.text).font(.system(size: 14))
-                    .foregroundStyle(status == .done ? Theme.textTertiary : Theme.textPrimary)
-                    .strikethrough(status == .done, color: Theme.Colors.mist)
-                    .lineLimit(3).help(item.text)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 5) {
-                    if handback == nil { // 链接项（4C）的执行者就是它指向的任务，不再写原来的角色
-                        Text(item.assignee.label)
-                        if let id = item.ticketID {
-                            Text("·").accessibilityHidden(true)
-                            Button("工单 #\(id)") { appModel.goToTicket(id) }
-                                .buttonStyle(.plain).help("前往工单 #\(id) 的终端")
-                        }
-                        Text("·").accessibilityHidden(true)
-                    }
-                    if let handback {
-                        Button(word.text) { appModel.openWorklist(task: handback.toTaskID) }
+            Text(item.text)
+                .font(.system(size: 14))
+                .foregroundStyle(status == .done ? Theme.textTertiary : Theme.textPrimary)
+                .strikethrough(status == .done, color: Theme.Colors.mist)
+                .lineLimit(2)
+                .help(item.text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 6) {
+                if handback == nil {
+                    AssigneeChip(assignee: item.assignee)
+                    if let id = item.ticketID {
+                        Button("#\(id)") { appModel.goToTicket(id) }
                             .buttonStyle(.plain)
-                            .help("这项被工单 #\(handback.ticketID) 退回，成了任务 A-\(handback.toTaskID)，状态跟着它走、它完成这项就完成；打开它")
-                            .accessibilityLabel("跟随任务 A-\(handback.toTaskID)，\(word.text)，打开它")
-                    } else {
-                        Text(word.text).foregroundStyle(word.attention ? Theme.Status.attention : Theme.textTertiary)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Theme.textSecondary)
+                            .padding(.horizontal, 6)
+                            .frame(height: 22)
+                            .background(Theme.chrome, in: RoundedRectangle(cornerRadius: 5))
+                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Theme.border, lineWidth: 1))
+                            .help("前往工单 #\(id) 的终端")
                     }
                 }
-                .font(.system(size: 12)).foregroundStyle(Theme.textTertiary).lineLimit(1)
+                if let handback {
+                    Button(word.text) { appModel.openWorklist(task: handback.toTaskID) }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 7)
+                        .frame(height: 22)
+                        .background(Theme.chrome, in: RoundedRectangle(cornerRadius: 5))
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Theme.border, lineWidth: 1))
+                        .help("这项被工单 #\(handback.ticketID) 退回，成了任务 A-\(handback.toTaskID)；点击打开")
+                        .accessibilityLabel("跟随任务 A-\(handback.toTaskID)，\(word.text)，打开它")
+                } else if word.attention || status == .doing {
+                    Text(word.text)
+                        .font(.system(size: 11, weight: word.attention ? .semibold : .regular))
+                        .foregroundStyle(word.attention ? Theme.Status.attention : Theme.textTertiary)
+                }
             }
+            .fixedSize()
         }
-        .padding(.vertical, 14)
+        .padding(.vertical, 12)
         .contentShape(Rectangle())
         .contextMenu {
             if editable {

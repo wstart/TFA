@@ -60,36 +60,36 @@ struct AttentionButton: View {
     @Environment(AppModel.self) private var model
     @State private var store = WorkspaceStore.shared
     @State private var showAttention = false
+
     var body: some View {
-        // No timer: needsAttention / connectError are @Observable, so this re-renders when they change.
-        // Tasks that need you + tickets outside any task + terminals; a task counts once (注意事项 F-14).
         let count = model.connections.filter { $0.needsAttention || $0.connectError != nil }.count
             + model.superagent.tasksNeedingYou.count + model.superagent.needsYouOutsideTasks.count
-        Button { showAttention = true } label: {
-            Image(systemName: count > 0 ? "tray.full" : "tray")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(count > 0 ? Theme.Status.attention : Theme.textTertiary)
-                .frame(width: 24, height: 32)
-                .overlay(alignment: .topTrailing) {
-                    if count > 0 {
+        Group {
+            if count > 0 {
+                Button { showAttention = true } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bell.fill")
+                            .font(.system(size: 11, weight: .semibold))
                         Text("\(count)")
-                            .font(.system(size: 9, weight: .bold).monospacedDigit())
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 4)
-                            .frame(minWidth: 14, minHeight: 14)
-                            .background(Theme.Status.attention, in: Capsule())
-                            // A cream ring separates the badge from the tray glyph and the「+」beside it.
-                            .overlay(Capsule().stroke(Theme.chrome, lineWidth: 1.5))
-                            .offset(x: 3, y: 1)
+                            .font(.system(size: 11, weight: .bold).monospacedDigit())
                     }
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 8)
+                    .frame(height: 28)
+                    .background(Theme.Status.attention, in: Capsule())
+                    .contentShape(Capsule())
                 }
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .help("待处理：\(count) 项需要你")
+                .accessibilityLabel("待处理 \(count)")
+            } else {
+                Color.clear.frame(width: 0, height: 0)
+            }
         }
-        .buttonStyle(.plain)
-        .help(count > 0 ? "待处理：\(count) 项需要你" : "待处理：暂无")
-        .accessibilityLabel("待处理 \(count)")
         .onChange(of: store.selectedID) {
-            guard !model.axisSelected && !model.skillsSelected && !model.claudeMdSelected else { return }
+            guard !model.axisSelected && !model.skillsSelected && !model.claudeMdSelected
+                && !model.worklistSelected && !model.superagentSelected
+                && !model.tunnelsSelected && !model.labSelected else { return }
             if let connection = model.connections.first(where: { store.includes($0) }) {
                 model.goToTerminal(connection.id)
             } else { model.selectedConnectionID = nil }

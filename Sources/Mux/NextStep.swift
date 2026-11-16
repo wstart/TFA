@@ -202,33 +202,34 @@ struct NextStepBanner: View {
 
     private func loud(_ step: NextStep) -> some View {
         ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 28) {
-                words(step).frame(minWidth: 380, alignment: .leading)
+            HStack(alignment: .center, spacing: 20) {
+                words(step).frame(minWidth: 320, alignment: .leading)
                 Spacer(minLength: 0)
                 actions(step).fixedSize()
             }
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 words(step)
                 actions(step)
             }
         }
-        .padding(.vertical, 22)
-        .padding(.horizontal, 26)
+        .padding(.vertical, 16)
+        .padding(.horizontal, 20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Theme.brand))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.lg).fill(BannerInk.cardFill))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.lg).stroke(BannerInk.cardStroke, lineWidth: 1))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("下一步：\(step.title)")
     }
 
     private func words(_ step: NextStep) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Circle().fill(step.tone == .needsYou ? BannerInk.amberDot : Theme.Colors.mist).frame(width: 7, height: 7)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                Circle().fill(step.tone == .needsYou ? BannerInk.amberDot : BannerInk.mutedText).frame(width: 6, height: 6)
                     .accessibilityHidden(true)
-                Text(step.eyebrow).font(.system(size: 12, weight: .semibold)).tracking(0.6)
-                    .foregroundStyle(step.tone == .needsYou ? BannerInk.amberText : Theme.Colors.mist)
+                Text(step.eyebrow).font(.system(size: 11, weight: .semibold)).tracking(0.4)
+                    .foregroundStyle(step.tone == .needsYou ? BannerInk.amberText : BannerInk.mutedText)
             }
-            Text(step.title).font(.system(size: 19, weight: .semibold)).foregroundStyle(Theme.canvas)
+            Text(step.title).font(.system(size: 16, weight: .semibold)).foregroundStyle(BannerInk.titleText)
                 .lineLimit(2).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             if !step.body.isEmpty {
                 Text(step.body).font(.system(size: 13)).foregroundStyle(BannerInk.bodyText)
@@ -287,51 +288,54 @@ struct NextStepBanner: View {
         sa.noteEcho(view.id, q.target == view.id ? "已交给\(q.role)（\(WorklistText.ords(q.ords))）" : "已把 A-\(q.target) 交给\(q.role)")
     }
 
-    // MARK: 浅色：不用你管
+    // MARK: 浅色静默条：不用你管时只占紧凑一行，不抢占视觉重心
 
     private func quiet(_ step: NextStep) -> some View {
-        HStack(alignment: .center, spacing: 28) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    Circle().fill(Theme.brand).frame(width: 7, height: 7).accessibilityHidden(true)
-                    Text(step.eyebrow).font(.system(size: 12, weight: .semibold)).tracking(0.6).foregroundStyle(Theme.textTertiary)
-                }
-                Text(step.title).font(.system(size: 17, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-                    .lineLimit(2).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+        HStack(alignment: .center, spacing: 12) {
+            Circle().fill(Theme.Status.positive).frame(width: 7, height: 7).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(step.title).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1).textSelection(.enabled)
                 if !step.body.isEmpty {
-                    Text(step.body).font(.system(size: 13)).foregroundStyle(Theme.textTertiary)
-                        .lineLimit(2).fixedSize(horizontal: false, vertical: true).help(step.body)
+                    Text(step.body).font(.system(size: 12)).foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1).help(step.body)
                 }
             }
             Spacer(minLength: 0)
             if let id = step.ticket {
-                HStack(spacing: 16) {
-                    Button("打开工单终端") { appModel.goToTicket(id) }.buttonStyle(BannerButtonStyle(kind: .text))
-                    Button("补充说明…") { appModel.ticketFeedback = TicketFeedbackRequest(ticketID: id, kind: .add) }
+                HStack(spacing: 12) {
+                    Button("打开终端") { appModel.goToTicket(id) }.buttonStyle(BannerButtonStyle(kind: .text))
+                    Button("补充…") { appModel.ticketFeedback = TicketFeedbackRequest(ticketID: id, kind: .add) }
                         .buttonStyle(BannerButtonStyle(kind: .text))
                 }
                 .fixedSize()
             }
         }
-        .padding(.vertical, 18)
-        .padding(.horizontal, 26)
+        .padding(.vertical, 12)
+        .padding(.horizontal, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Theme.surface))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.border, lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.md).fill(Theme.surface))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("现在：\(step.title)")
     }
 }
 
-/// 横幅上的颜色：深色底上的琥珀点 / 字和正文灰（对比度够 4.5:1）。
+/// 横幅上的颜色：无论浅色或深色主题，强调横幅都保持高对比深色卡片，避免翻转后失真。
 private enum BannerInk {
-    static let amberDot = Color(.sRGB, red: 0.878, green: 0.643, blue: 0.388, opacity: 1)   // #e0a463
-    static let amberText = Color(.sRGB, red: 0.914, green: 0.780, blue: 0.612, opacity: 1)  // #e9c79c
-    static let bodyText = Color(.sRGB, red: 0.839, green: 0.827, blue: 0.784, opacity: 1)   // #d6d3c8
-    static let outline = Color(.sRGB, red: 0.333, green: 0.325, blue: 0.302, opacity: 1)    // #55534d
+    static let cardFill = Color(.sRGB, red: 0.118, green: 0.125, blue: 0.149, opacity: 1)    // #1e2026
+    static let cardStroke = Color(.sRGB, red: 0.220, green: 0.235, blue: 0.278, opacity: 1)  // #383c47
+    static let titleText = Color(.sRGB, red: 0.965, green: 0.969, blue: 0.976, opacity: 1)   // #f6f7f9
+    static let mutedText = Color(.sRGB, red: 0.651, green: 0.678, blue: 0.729, opacity: 1)   // #a6adb9
+    static let amberDot = Color(.sRGB, red: 0.941, green: 0.659, blue: 0.251, opacity: 1)    // #f0a840
+    static let amberText = Color(.sRGB, red: 0.965, green: 0.796, blue: 0.522, opacity: 1)   // #f6cb85
+    static let bodyText = Color(.sRGB, red: 0.800, green: 0.816, blue: 0.851, opacity: 1)    // #ccd0d9
+    static let outline = Color(.sRGB, red: 0.320, green: 0.341, blue: 0.396, opacity: 1)     // #525765
+    static let buttonFill = Color(.sRGB, red: 0.976, green: 0.980, blue: 0.988, opacity: 1)  // #f9fafc
+    static let buttonText = Color(.sRGB, red: 0.094, green: 0.102, blue: 0.122, opacity: 1)  // #181a1f
 }
 
-/// 横幅按钮：`prominent` 象牙底墨字（深色横幅上的主按钮）；`outline` 细框象牙字；`ghost` 只有字；`text` 浅色横幅上带下划线的字。
+/// 横幅按钮：`prominent` 亮底深字；`outline` 细框亮字；`ghost` 轻字；`text` 浅色状态条上的链接字。
 struct BannerButtonStyle: ButtonStyle {
     enum Kind { case prominent, outline, ghost, text }
     var kind: Kind
@@ -339,17 +343,17 @@ struct BannerButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         let label = configuration.label
-            .font(.system(size: kind == .prominent ? 14 : 13, weight: kind == .prominent ? .semibold : .regular))
+            .font(.system(size: 13, weight: kind == .prominent ? .semibold : .regular))
             .foregroundStyle(foreground)
         return Group {
             if kind == .text {
-                label.underline(true, color: Theme.Colors.mist)
+                label
             } else {
                 label
-                    .padding(.horizontal, kind == .prominent ? 20 : 14)
-                    .frame(height: 40)
-                    .background(RoundedRectangle(cornerRadius: 9).fill(kind == .prominent ? Theme.canvas : Color.clear))
-                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(kind == .outline ? BannerInk.outline : Color.clear, lineWidth: 1))
+                    .padding(.horizontal, kind == .prominent ? 16 : 12)
+                    .frame(height: 34)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(kind == .prominent ? BannerInk.buttonFill : Color.clear))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(kind == .outline ? BannerInk.outline : Color.clear, lineWidth: 1))
             }
         }
         .contentShape(Rectangle())
@@ -358,8 +362,8 @@ struct BannerButtonStyle: ButtonStyle {
 
     private var foreground: Color {
         switch kind {
-        case .prominent: return Theme.textPrimary
-        case .outline: return Theme.canvas
+        case .prominent: return BannerInk.buttonText
+        case .outline: return BannerInk.titleText
         case .ghost: return BannerInk.bodyText
         case .text: return Theme.textSecondary
         }

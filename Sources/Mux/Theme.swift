@@ -6,41 +6,48 @@ import SwiftUI
 /// scattered magic numbers and the duplicated, color-only status logic the design review flagged.
 enum Theme {
 
-    // MARK: - DESIGN.md palette (Claude letterpress · warm light system)
-    //
-    // The whole app chrome follows DESIGN.md: a warm ivory canvas under near-black ink, taupe linen
-    // hairline borders instead of shadows, nearly monochrome with ONE chromatic accent (Dust Blue).
-    // Emphasis is carried by ink/charcoal (not a saturated brand color); see `brand` below.
-    enum Colors {
-        static let ivory = Color(.sRGB, red: 0.980, green: 0.976, blue: 0.961, opacity: 1)   // #faf9f5 main content
-        static let cream = Color(.sRGB, red: 0.957, green: 0.949, blue: 0.918, opacity: 1)    // #f4f2ea chrome (sidebar / titlebar / quiet chips)
-        static let white = Color(.sRGB, red: 1, green: 1, blue: 1, opacity: 1)                // #ffffff card
-        static let parchment = Color(.sRGB, red: 0.941, green: 0.933, blue: 0.902, opacity: 1)// #f0eee6 secondary surface
-        static let ink = Color(.sRGB, red: 0.078, green: 0.078, blue: 0.075, opacity: 1)      // #141413 primary text
-        static let charcoal = Color(.sRGB, red: 0.122, green: 0.118, blue: 0.114, opacity: 1) // #1f1e1d emphasis / filled
-        static let slate = Color(.sRGB, red: 0.239, green: 0.239, blue: 0.227, opacity: 1)    // #3d3d3a tertiary text
-        static let stone = Color(.sRGB, red: 0.451, green: 0.447, blue: 0.424, opacity: 1)    // #73726c muted text
-        static let pewter = Color(.sRGB, red: 0.612, green: 0.604, blue: 0.573, opacity: 1)   // #9c9a92 subtle icons
-        static let linen = Color(.sRGB, red: 0.871, green: 0.863, blue: 0.820, opacity: 1)    // #dedcd1 hairline border
-        static let mist = Color(.sRGB, red: 0.788, green: 0.776, blue: 0.741, opacity: 1)     // #c9c6bd faintest tone (dormant dot / off-track)
-        static let coolStone = Color(.sRGB, red: 0.718, green: 0.718, blue: 0.710, opacity: 1)// #b7b7b5 nav-level border
-        static let dustBlue = Color(.sRGB, red: 0.800, green: 0.859, blue: 0.910, opacity: 1) // #ccdbe8 sole accent
+    /// Helper for adaptive light/dark semantic colors backed by AppKit's dynamic `NSColor`.
+    private static func dynamic(light: (CGFloat, CGFloat, CGFloat), dark: (CGFloat, CGFloat, CGFloat), alpha: CGFloat = 1) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let c = isDark ? dark : light
+            return NSColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: alpha)
+        })
     }
 
-    // MARK: - Semantic surfaces & text (use these in views, not raw NSColors)
-    //
-    // DESIGN.md v2 is a three-tier warm paper stack: cream chrome (sidebar/titlebar) frames an ivory
-    // main content, with white cards floating on top. The tiers must stay distinct — that layering IS
-    // the "editorial workbench" identity.
+    // MARK: - Workbench palette (Refined warm light + sleek dark workbench)
+    enum Colors {
+        static let ivory = dynamic(light: (0.976, 0.976, 0.969), dark: (0.086, 0.094, 0.114))      // #f9f9f7 / #16181d main canvas
+        static let cream = dynamic(light: (0.949, 0.945, 0.929), dark: (0.071, 0.078, 0.094))      // #f2f1ec / #121418 sidebar chrome
+        static let white = dynamic(light: (1.000, 1.000, 1.000), dark: (0.118, 0.129, 0.157))      // #ffffff / #1e2128 elevated surface
+        static let parchment = dynamic(light: (0.918, 0.914, 0.890), dark: (0.149, 0.165, 0.200))  // #eae9e3 / #262a33 quiet chip / track
+        static let ink = dynamic(light: (0.086, 0.086, 0.082), dark: (0.925, 0.933, 0.949))        // #161615 / #eceef2 primary text
+        static let charcoal = dynamic(light: (0.102, 0.102, 0.098), dark: (0.925, 0.933, 0.949))   // #1a1a19 / #eceef2 high emphasis
+        static let slate = dynamic(light: (0.290, 0.286, 0.271), dark: (0.643, 0.671, 0.722))      // #4a4945 / #a4abb8 secondary text
+        static let stone = dynamic(light: (0.478, 0.471, 0.447), dark: (0.435, 0.467, 0.522))      // #7a7872 / #6f7785 muted text
+        static let pewter = dynamic(light: (0.612, 0.604, 0.576), dark: (0.365, 0.396, 0.455))     // #9c9a93 / #5d6574 subtle icons
+        static let linen = dynamic(light: (0.886, 0.878, 0.847), dark: (0.169, 0.188, 0.231))      // #e2e0d8 / #2b303b hairline border
+        static let mist = dynamic(light: (0.788, 0.780, 0.749), dark: (0.255, 0.282, 0.341))       // #c9c7bf / #414857 faintest tone
+        static let coolStone = dynamic(light: (0.776, 0.769, 0.737), dark: (0.239, 0.263, 0.322))  // #c6c4bc / #3d4352 nav border
+        static let dustBlue = dynamic(light: (0.800, 0.859, 0.910), dark: (0.243, 0.388, 0.686))   // #ccdbe8 / #3e63af accent
+    }
+
+    // MARK: - Semantic surfaces & text
     static let canvas = Colors.ivory          // main content background
-    static let chrome = Colors.cream          // sidebar / titlebar / quiet chips — one tier warmer than canvas
+    static let chrome = Colors.cream          // sidebar / titlebar / quiet chips
     static let surface = Colors.white         // cards, inputs, elevated containers
-    static let surface2 = Colors.cream        // toggle tracks, hover washes, quiet chips (#f4f2ea)
+    static let surface2 = Colors.parchment    // toggle tracks, hover washes, segmented wells
     static let border = Colors.linen          // hairline card/divider borders
-    static let borderStrong = Colors.coolStone// nav-level interactive borders only
+    static let borderStrong = Colors.coolStone// nav-level interactive borders
     static let textPrimary = Colors.ink
     static let textSecondary = Colors.slate
     static let textTertiary = Colors.stone
+
+    /// Foreground color on top of a `Theme.brand` filled surface (white on dark ink in light mode; dark ink on light fill in dark mode).
+    static let onBrand = dynamic(light: (1.0, 1.0, 1.0), dark: (0.078, 0.086, 0.102))
+
+    /// AppKit/SwiftUI `.tint` for `.borderedProminent` buttons so AppKit always renders legible white label text in both modes.
+    static let controlTint = dynamic(light: (0.102, 0.102, 0.098), dark: (0.231, 0.408, 0.910))
 
     // MARK: - Terminal surface (the 终端主题)
     //
@@ -112,10 +119,10 @@ enum Theme {
     enum Status {
         static let neutral = Colors.stone                                    // idle / dormant / stopped / todo
         static let pending = Colors.stone                                    // connecting / reconnecting / retrying (+ spinner)
-        static let positive = Color(.sRGB, red: 0.357, green: 0.490, blue: 0.408, opacity: 1) // #5b7d68 muted sage — connected / running / done
+        static let positive = dynamic(light: (0.267, 0.514, 0.365), dark: (0.345, 0.714, 0.494))   // #44835d / #58b67e sage green
         static let active = Colors.charcoal                                  // live working (equalizer) — ink emphasis
-        static let attention = Color(.sRGB, red: 0.722, green: 0.451, blue: 0.180, opacity: 1) // #b8732e warm amber (needs you)
-        static let error = Color(.sRGB, red: 0.639, green: 0.251, blue: 0.180, opacity: 1)     // #a3402e muted brick (failed / blocked)
+        static let attention = dynamic(light: (0.745, 0.439, 0.125), dark: (0.941, 0.659, 0.251))  // #be7020 / #f0a840 warm amber
+        static let error = dynamic(light: (0.710, 0.235, 0.188), dark: (0.925, 0.408, 0.365))      // #b53c30 / #ec685d brick red
     }
 }
 
@@ -258,11 +265,10 @@ struct KindBadge: View {
     var body: some View {
         Image(systemName: kind.symbol)
             .font(.system(size: 10, weight: .bold))
-            .foregroundStyle(prominent || kind.isAgent ? Theme.canvas : Theme.textSecondary)
+            .foregroundStyle(prominent ? Color.white : (kind.isAgent ? Theme.onBrand : Theme.textSecondary))
             .frame(width: 22, height: 22)
             .background(fill, in: RoundedRectangle(cornerRadius: 6))
             .overlay {
-                // A white shell chip needs its hairline to read on cream, gray selection and amber.
                 if !kind.isAgent && !prominent {
                     RoundedRectangle(cornerRadius: 6).stroke(Theme.border, lineWidth: 1)
                 }

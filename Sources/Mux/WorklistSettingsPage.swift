@@ -11,8 +11,30 @@ struct WorklistSettingsPage: View {
     @Environment(AppModel.self) private var appModel
     @FocusState private var focused: Bool
 
+    private struct NavGroup: Identifiable {
+        let id: String
+        let title: String
+        let items: [(segment: WorklistSettingsSegment, label: String, icon: String)]
+    }
+
+    private let navGroups: [NavGroup] = [
+        NavGroup(id: "core", title: "核心编排", items: [
+            (.router, "主管与 Agent", "person.crop.rectangle.stack"),
+            (.roles, "执行角色", "person.2"),
+            (.workflow, "工作流模板", "point.3.connected.trianglepath.dotted"),
+        ]),
+        NavGroup(id: "auto", title: "自动与定时", items: [
+            (.rules, "自动接单规则", "checklist.checked"),
+            (.schedules, "定时任务", "clock"),
+        ]),
+        NavGroup(id: "sys", title: "连接与高级", items: [
+            (.other, "运行与外观", "slider.horizontal.3"),
+            (.org, "组织协同", "building.2"),
+            (.records, "决定记录", "doc.text.magnifyingglass"),
+        ]),
+    ]
+
     var body: some View {
-        @Bindable var model = appModel
         let sa = appModel.superagent
         let segment = appModel.worklistSettingsSegment
         VStack(spacing: 0) {
@@ -30,19 +52,60 @@ struct WorklistSettingsPage: View {
                 .keyboardShortcut("[", modifiers: .command)
             })
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: Theme.Space.xl) {
-                    if let e = sa.setupError { Banner(text: e) }
-                    if let e = sa.actionError { Banner(text: e) { sa.actionError = nil } }
-                    SegmentedChoice(selection: $model.worklistSettingsSegment,
-                                    options: WorklistSettingsSegment.allCases.map { (value: $0, label: $0.rawValue) })
-                        .help("← → 切换")
-                        .accessibilityLabel("设置的分段")
-                    content(segment)
+            HStack(alignment: .top, spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Theme.Space.lg) {
+                        ForEach(navGroups) { group in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(group.title)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Theme.textTertiary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.bottom, 4)
+                                ForEach(group.items, id: \.segment) { item in
+                                    let chosen = item.segment == segment
+                                    Button {
+                                        appModel.worklistSettingsSegment = item.segment
+                                    } label: {
+                                        HStack(spacing: 8) {
+                                            Image(systemName: item.icon)
+                                                .font(.system(size: 12, weight: .medium))
+                                                .frame(width: 16)
+                                            Text(item.label)
+                                                .font(.system(size: 13, weight: chosen ? .semibold : .regular))
+                                                .lineLimit(1)
+                                            Spacer(minLength: 0)
+                                        }
+                                        .foregroundStyle(chosen ? Theme.onBrand : Theme.textPrimary)
+                                        .padding(.horizontal, 10)
+                                        .frame(height: 30)
+                                        .background(chosen ? Theme.brand : Color.clear,
+                                                    in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                                        .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityAddTraits(chosen ? .isSelected : [])
+                                }
+                            }
+                        }
+                    }
+                    .padding(Theme.Space.lg)
                 }
-                .padding(Theme.Space.xxl)
-                .frame(maxWidth: 760, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(width: 190)
+                .background(Theme.chrome.opacity(0.55))
+
+                Rectangle().fill(Theme.border).frame(width: 1).accessibilityHidden(true)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Theme.Space.xl) {
+                        if let e = sa.setupError { Banner(text: e) }
+                        if let e = sa.actionError { Banner(text: e) { sa.actionError = nil } }
+                        content(segment)
+                    }
+                    .padding(Theme.Space.xxl)
+                    .frame(maxWidth: 720, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
         .background(Theme.canvas)
@@ -53,9 +116,18 @@ struct WorklistSettingsPage: View {
         .focused($focused)
         .onAppear { DispatchQueue.main.async { focused = true } }
         .onMoveCommand { direction in
+            let visualOrder = navGroups.flatMap { $0.items.map(\.segment) }
             switch direction {
             case .left: appModel.worklistSettingsSegment = segment.stepped(by: -1)
             case .right: appModel.worklistSettingsSegment = segment.stepped(by: 1)
+            case .up:
+                if let i = visualOrder.firstIndex(of: segment), i > 0 {
+                    appModel.worklistSettingsSegment = visualOrder[i - 1]
+                }
+            case .down:
+                if let i = visualOrder.firstIndex(of: segment), i + 1 < visualOrder.count {
+                    appModel.worklistSettingsSegment = visualOrder[i + 1]
+                }
             default: break
             }
         }

@@ -357,13 +357,13 @@ struct SegmentedChoice<Value: Hashable>: View {
             }
         }
         .padding(2)
-        .background(Theme.Colors.linen.opacity(0.7), in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
         .opacity(disabled ? 0.5 : 1)
         .disabled(disabled)
     }
 }
 
-/// 分区标题后的计数胶囊：需要你 = amber 底象牙字，其余 Linen 底 stone 字。
+/// 分区标题后的计数胶囊：需要你 = amber 底亮色字，其余柔和底色。
 struct CountBadge: View {
     let count: Int
     var attention = false
@@ -371,27 +371,27 @@ struct CountBadge: View {
     var body: some View {
         Text("\(count)")
             .font(.system(size: 11, weight: .semibold)).monospacedDigit()
-            .foregroundStyle(attention ? Theme.canvas : Theme.textSecondary)
+            .foregroundStyle(attention ? Color.white : Theme.textSecondary)
             .padding(.horizontal, 7)
             .frame(height: 18)
-            .background(attention ? Theme.Status.attention : Theme.border, in: RoundedRectangle(cornerRadius: 6))
+            .background(attention ? Theme.Status.attention : Theme.surface2, in: RoundedRectangle(cornerRadius: 6))
             .accessibilityHidden(true)
     }
 }
 
-/// 清单项勾选框 22pt、圆角 6：完成 = Charcoal 填充 + 象牙勾；工作中 = 半圆（静态，注意事项 F-19）；
-/// 待做 = Cool Stone 描边；受阻 = amber 描边 + 手掌。只画形状，可不可点由调用方决定。
+/// 清单项勾选框 20pt、圆角 6：完成 = 品牌填充 + 对勾；工作中 = 半圆（静态，注意事项 F-19）；
+/// 待做 = 描边；受阻 = amber 描边 + 手掌。只画形状，可不可点由调用方决定。
 struct ItemCheckbox: View {
     let status: ItemStatus
-    var size: CGFloat = 22
+    var size: CGFloat = 20
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 6).fill(status == .done ? Theme.brand : Theme.surface)
-            RoundedRectangle(cornerRadius: 6).stroke(stroke, lineWidth: status == .done ? 0 : 1)
+            RoundedRectangle(cornerRadius: 5).fill(status == .done ? Theme.brand : Theme.surface)
+            RoundedRectangle(cornerRadius: 5).stroke(stroke, lineWidth: status == .done ? 0 : 1)
             switch status {
             case .done:
-                Image(systemName: "checkmark").font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.canvas)
+                Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.onBrand)
             case .doing:
                 ZStack {
                     Circle().stroke(Theme.brand, lineWidth: 1.5)
@@ -399,7 +399,7 @@ struct ItemCheckbox: View {
                 }
                 .frame(width: size * 0.5, height: size * 0.5)
             case .blocked:
-                Image(systemName: "hand.raised").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.Status.attention)
+                Image(systemName: "hand.raised").font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.Status.attention)
             case .todo:
                 EmptyView()
             }

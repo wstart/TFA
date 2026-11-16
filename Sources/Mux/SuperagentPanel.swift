@@ -71,13 +71,17 @@ struct RouterCard: View {
     var body: some View {
         let sa = appModel.superagent
         let session = sa.routerSession
+        let agentBinding = Binding<CodingAgentKind>(
+            get: { sa.settings.codingAgent },
+            set: { var s = sa.settings; s.codingAgent = $0; sa.saveSettings(s) }
+        )
         VStack(alignment: .leading, spacing: Theme.Space.md) {
             HStack(spacing: Theme.Space.md) {
                 Image(systemName: session == nil ? "moon.zzz" : "checkmark.circle.fill")
                     .foregroundStyle(session == nil ? Theme.Status.neutral : Theme.Status.positive)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("主管终端").font(Theme.Font.rowTitle)
-                    Text(session.map { "运行中 · \($0)" } ?? "未启动")
+                    Text(session.map { "运行中 · \($0) · \(sa.settings.codingAgent.label)" } ?? "未启动")
                         .font(Theme.Font.rowSubtitle).foregroundStyle(Theme.textSecondary).lineLimit(1)
                 }
                 Spacer()
@@ -88,8 +92,22 @@ struct RouterCard: View {
                 Button(session == nil ? "启动主管" : "打开主管") { appModel.openRouter() }
                     .buttonStyle(.borderedProminent)
             }
+
+            Hairline()
+
+            HStack(spacing: Theme.Space.md) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("执行与主管 Agent").font(.callout.weight(.medium))
+                    Text("所有角色与主管统一使用该 Agent 执行工单")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+                Spacer()
+                SegmentedChoice(selection: agentBinding, options: CodingAgentKind.allCases.map { (value: $0, label: $0.label) })
+                    .accessibilityLabel("执行与主管 Agent")
+            }
+
             HStack(spacing: Theme.Space.sm) {
-                Text("目录").font(.caption).foregroundStyle(Theme.textTertiary)
+                Text("默认目录").font(.caption).foregroundStyle(Theme.textTertiary)
                 Text(tilde(dir)).font(.caption.monospaced()).foregroundStyle(Theme.textSecondary)
                     .lineLimit(1).truncationMode(.head).help(dir)
                 Button("更换…") {
@@ -102,9 +120,6 @@ struct RouterCard: View {
                 .help(session == nil ? "主管终端的起始目录，也是新工单的默认目录" : "主管下次启动时生效")
                 Spacer(minLength: 0)
             }
-            Text("在主管终端里说需求，它拆成工单派给执行终端；执行终端用 \(sa.settings.codingAgent.label)（全部放行），"
-                 + (sa.settings.worktree ? "每个工单一个 git worktree。" : "直接在请求的目录里工作。"))
-                .font(.caption).foregroundStyle(Theme.textTertiary).fixedSize(horizontal: false, vertical: true)
         }
         .saCard()
         .onAppear { dir = appModel.routerDirectory }
@@ -762,28 +777,17 @@ struct SettingsCard: View {
     @Environment(AppModel.self) private var appModel
 
     var body: some View {
+        @Bindable var model = appModel
         let s = appModel.superagent.settings
         VStack(alignment: .leading, spacing: Theme.Space.md) {
-            Text("设置").font(Theme.Font.rowTitle)
-            SettingRow(title: "并发执行数", note: "人的跟进额外 +1") {
-                Stepper(value: bind(\.slots), in: 1...8) { Text("\(s.slots)").monospacedDigit() }
+            Text("外观与执行").font(Theme.Font.rowTitle)
+
+            SettingRow(title: "界面外观", note: "终端区固定保持护眼深色；侧栏与卡片支持浅色 / 深色自适应") {
+                SegmentedChoice(selection: $model.appearanceMode,
+                                options: AppModel.AppearanceMode.allCases.map { (value: $0, label: $0.label) })
+                    .accessibilityLabel("界面外观")
             }
-            SettingRow(title: "每个工单建 git worktree") {
-                Toggle("", isOn: bind(\.worktree)).labelsHidden().toggleStyle(.switch).controlSize(.small)
-            }
-            SettingRow(title: "停下多久催报") {
-                Stepper(value: bind(\.idleSeconds), in: 30...600, step: 30) { Text("\(Int(s.idleSeconds)) 秒").monospacedDigit() }
-            }
-            SettingRow(title: "每天打扰预算", note: "超了只显示，「需要你」照样到你") {
-                Stepper(value: bind(\.interruptionBudget), in: 1...30) { Text("\(s.interruptionBudget) 次").monospacedDigit() }
-            }
-            SettingRow(title: "交付前验收（LobeHub Acceptance）", note: "需要 Node ≥ 22.15；只对 Web 界面改动生效") {
-                Button("安装验收工具") {
-                    appModel.runSetupCommand(name: "安装验收工具", "npm install -g @lobehub/cli && lh acceptance install")
-                }
-                .controlSize(.small)
-                Toggle("", isOn: bind(\.acceptance)).labelsHidden().toggleStyle(.switch).controlSize(.small)
-            }
+
             SettingRow(title: "执行与主管 Agent", note: Self.agentNote(s.codingAgent)) {
                 HStack(spacing: Theme.Space.sm) {
                     if appModel.superagent.routerSession != nil {
@@ -795,26 +799,56 @@ struct SettingsCard: View {
                         .accessibilityLabel("执行与主管 Agent")
                 }
             }
+
+            SettingRow(title: "每个开发工单独立建 git worktree") {
+                Toggle("", isOn: bind(\.worktree)).labelsHidden().toggleStyle(.switch).controlSize(.small)
+            }
+
+            SettingRow(title: "并发执行上限", note: "人的跟进额外 +1") {
+                Stepper(value: bind(\.slots), in: 1...8) { Text("\(s.slots)").monospacedDigit() }
+            }
+
             Hairline()
-            // 看门狗（第 4 期）：模型定时看工作中的工单有没有偏离清单项；偏离先提醒执行者，宽限期过了仍偏离就把问题挂给你。
-            SettingRow(title: "看门狗", note: "每隔一段时间请模型看一眼工作中的工单有没有偏离清单项；偏离先提醒执行者，\(Int(SuperagentEngine.watchdogGrace / 60)) 分钟内不改正就把问题挂给你") {
+
+            SettingRow(title: "看门狗巡检", note: "定时检查执行中的工单是否偏离清单项，连续偏离才提醒你") {
                 Toggle("", isOn: bind(\.watchdogEnabled)).labelsHidden().toggleStyle(.switch).controlSize(.small)
                     .accessibilityLabel("看门狗")
             }
             if s.watchdogEnabled {
-                SettingRow(title: "检查间隔") {
+                SettingRow(title: "巡检间隔") {
                     Stepper(value: bind(\.watchdogIntervalMinutes), in: 1...60) { Text("\(s.watchdogIntervalMinutes) 分钟").monospacedDigit() }
                 }
+                SettingRow(title: "模型调用方式", note: Self.backendNote(s.modelBackend)) {
+                    SegmentedChoice(selection: bind(\.modelBackend), options: ModelBackendKind.allCases.map { (value: $0, label: $0.label) })
+                        .accessibilityLabel("模型调用方式")
+                }
+                SettingRow(title: "研判模型", note: Self.modelNameNote(s.modelBackend)) {
+                    ModelNameField()
+                }
+                if s.modelBackend == .api {
+                    APIKeyRow()
+                }
             }
-            SettingRow(title: "模型调用方式", note: Self.backendNote(s.modelBackend)) {
-                SegmentedChoice(selection: bind(\.modelBackend), options: ModelBackendKind.allCases.map { (value: $0, label: $0.label) })
-                    .accessibilityLabel("模型调用方式")
-            }
-            SettingRow(title: "研判用的模型", note: Self.modelNameNote(s.modelBackend)) {
-                ModelNameField()
-            }
-            if s.modelBackend == .api {
-                APIKeyRow()
+
+            Hairline()
+
+            Collapsible(title: "高级运行参数") {
+                VStack(alignment: .leading, spacing: Theme.Space.md) {
+                    SettingRow(title: "停下多久催报") {
+                        Stepper(value: bind(\.idleSeconds), in: 30...600, step: 30) { Text("\(Int(s.idleSeconds)) 秒").monospacedDigit() }
+                    }
+                    SettingRow(title: "每天打扰预算", note: "超预算后合并转告，不压制「需要你」") {
+                        Stepper(value: bind(\.interruptionBudget), in: 1...30) { Text("\(s.interruptionBudget) 次").monospacedDigit() }
+                    }
+                    SettingRow(title: "交付前 Web 验收（LobeHub Acceptance）", note: "需要 Node ≥ 22.15；仅对 Web 界面改动生效") {
+                        Button("安装工具") {
+                            appModel.runSetupCommand(name: "安装验收工具", "npm install -g @lobehub/cli && lh acceptance install")
+                        }
+                        .controlSize(.small)
+                        Toggle("", isOn: bind(\.acceptance)).labelsHidden().toggleStyle(.switch).controlSize(.small)
+                    }
+                }
+                .padding(.top, Theme.Space.xs)
             }
         }
         .saCard()

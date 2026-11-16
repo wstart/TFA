@@ -140,7 +140,9 @@ struct WorklistView: View {
                 } else if sa.tasks.isEmpty && holds.isEmpty {
                     emptyState
                 } else {
-                    FilterRow(filter: $filter, project: $project, projects: projects)
+                    if sa.tasks.count > 2 || filter != .all || project != nil {
+                        FilterRow(filter: $filter, project: $project, projects: projects)
+                    }
                     if sections.isEmpty { empty("这个筛选下没有任务。") }
                     ForEach(WorklistSections.Kind.allCases, id: \.self) { kind in
                         let tasks = sections[kind]
@@ -155,8 +157,9 @@ struct WorklistView: View {
                     }
                 }
             }
-            .padding(Theme.Space.xxl)
-            .frame(maxWidth: 760, alignment: .leading)
+            .padding(.horizontal, Theme.Space.xxl)
+            .padding(.vertical, Theme.Space.xl)
+            .frame(maxWidth: 780, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
@@ -286,7 +289,7 @@ private struct WorklistHeader<Trailing: View>: View {
                     Text("我的清单").font(Theme.Font.headerTitle).lineLimit(1)
                 }
                 HStack(spacing: Theme.Space.xs) {
-                    Text(WorklistHeaderText.router(running: running))
+                    Text(running ? "主管运行中 · \(sa.settings.codingAgent.label)" : WorklistHeaderText.router(running: false))
                     if !running {
                         Button("启动") { appModel.openRouter() }
                             .buttonStyle(.bordered)
@@ -294,11 +297,11 @@ private struct WorklistHeader<Trailing: View>: View {
                             .help("启动主管终端：对它说一句，它把任务加进清单并建议谁来做")
                             .accessibilityLabel("启动主管")
                     }
-                    if !empty {
+                    if !empty && budget.over {
                         Text("·")
                         Text(budget.text).monospacedDigit()
-                            .fontWeight(budget.over ? .semibold : .regular)
-                            .foregroundStyle(budget.over ? Theme.textPrimary : Theme.textTertiary) // 超预算只加重，不着琥珀（A-04 / G-03）
+                            .fontWeight(.semibold)
+                            .foregroundStyle(Theme.textPrimary)
                     }
                 }
                 .font(Theme.Font.headerMeta)
@@ -306,8 +309,11 @@ private struct WorklistHeader<Trailing: View>: View {
                 .lineLimit(1)
             }
             Spacer()
-            HStack(spacing: Theme.Space.sm) { trailing() }
-                .controlSize(.small)
+            HStack(spacing: Theme.Space.sm) {
+                trailing()
+                AppearanceMenuButton()
+            }
+            .controlSize(.small)
         }
         .padding(.horizontal, Theme.Space.lg)
         .padding(.vertical, Theme.Space.md)
@@ -341,20 +347,25 @@ private struct FilterRow: View {
             SegmentedChoice(selection: $filter, options: WorklistFilter.allCases.map { (value: $0, label: $0.label) })
                 .help(WorklistFilter.help)
                 .accessibilityLabel("按时间筛选，当前：\(filter.label)")
-            Menu {
-                Button("全部项目") { project = nil }
-                if !projects.isEmpty { Divider() }
-                ForEach(projects, id: \.self) { p in
-                    Button(WorklistSections.projectName(p)) { project = p }
-                }
-            } label: {
-                Text(project.map(WorklistSections.projectName) ?? "按项目")
-                    .font(.callout.weight(project == nil ? .regular : .semibold))
+            if projects.count > 1 || project != nil {
+                Menu {
+                    Button("全部项目") { project = nil }
+                    if !projects.isEmpty { Divider() }
+                    ForEach(projects, id: \.self) { p in
+                        Button(WorklistSections.projectName(p)) { project = p }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "folder").font(.system(size: 11))
+                        Text(project.map(WorklistSections.projectName) ?? "全部项目")
+                    }
+                    .font(.caption.weight(project == nil ? .regular : .semibold))
                     .foregroundStyle(project == nil ? Theme.textTertiary : Theme.textPrimary)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help(project.map { "只看 \($0)" } ?? "按项目目录筛选")
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help(project.map { "只看 \($0)" } ?? "按项目目录筛选")
             Spacer(minLength: 0)
         }
         .padding(.horizontal, Theme.Space.xs)
@@ -754,11 +765,24 @@ struct TaskRow: View {
         let error = sa.actionErrors[view.id]
         let isFocused = focused == view.id
         HStack(spacing: Theme.Space.lg) {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: Theme.Space.sm) {
-                    Text(view.task.label).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.textTertiary)
-                    Text(view.task.title).font(Theme.Font.rowTitle).foregroundStyle(Theme.textPrimary)
-                        .lineLimit(1).truncationMode(.tail)
+                    Text(view.task.label)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.textTertiary)
+                    Text(view.task.title)
+                        .font(Theme.Font.rowTitle)
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if view.totalCount > 1 {
+                        Text("\(view.doneCount)/\(view.totalCount)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Theme.textTertiary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 4))
+                    }
                 }
                 HStack(spacing: Theme.Space.sm) {
                     if let echo {
@@ -766,13 +790,12 @@ struct TaskRow: View {
                     } else {
                         Text(line.text).font(Theme.Font.rowSubtitle).foregroundStyle(Theme.textSecondary).lineLimit(1).truncationMode(.tail)
                         if let at = line.at { AgoText(time: at) }
-                    }
-                }
-                if wide {
-                    HStack(spacing: Theme.Space.sm) {
-                        Text(WorklistRowText.meta(view)).font(.caption).monospacedDigit().foregroundStyle(Theme.textTertiary).lineLimit(1)
-                        ForEach(view.assignees.prefix(3), id: \.self) { AssigneeChip(assignee: $0) }
-                        if view.assignees.isEmpty && view.task.isOpen { AssigneeChip(assignee: .unassigned) }
+                        if wide, !view.task.scope.isEmpty {
+                            Text("· \(WorklistSections.projectName(view.task.scope))")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textTertiary)
+                                .lineLimit(1)
+                        }
                     }
                 }
                 if let error {
@@ -791,11 +814,11 @@ struct TaskRow: View {
                     .menuStyle(.borderlessButton).fixedSize()
                     .help("这一步的动作").accessibilityLabel("动作")
             } else {
-                actions.controlSize(.large)
+                actions.controlSize(.regular)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, Theme.Space.md)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(minHeight: 52)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(needs ? Theme.Status.attention.opacity(0.06) : Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))

@@ -122,9 +122,11 @@ struct SidebarView: View {
                 // front. Wrapped in a Section so the drop target spans the whole folder.
                 Section {
                     if !ungrouped.isEmpty {
-                        defaultHeaderRow(count: ungrouped.count)
-                        // Filtering force-expands it so matches are never hidden.
-                        if !defaultCollapsed || !filter.trimmingCharacters(in: .whitespaces).isEmpty {
+                        let hasGroups = !appModel.currentGroups.isEmpty
+                        if hasGroups {
+                            defaultHeaderRow(count: ungrouped.count)
+                        }
+                        if !hasGroups || !defaultCollapsed || !filter.trimmingCharacters(in: .whitespaces).isEmpty {
                             ForEach(ungrouped) { row($0) }
                         }
                     }
@@ -471,8 +473,8 @@ struct SidebarView: View {
     }
 }
 
-/// Top of the left panel, one row: the scope field (host · project menu on the left, the live
-/// terminal filter on the right), the 待处理 button, and the charcoal「+」(rebuild.md #1/#2).
+/// Top of the left panel: clean scope selector on the left, contextual attention pill + search toggle +
+/// primary「+」menu on the right; filter text field expands smoothly on demand underneath.
 private struct SidebarHeader: View {
     @Environment(AppModel.self) private var appModel
     @Binding var filter: String
@@ -481,68 +483,89 @@ private struct SidebarHeader: View {
     let onManageProjects: () -> Void
     let onNewGroup: () -> Void
 
-    /// The pointer is over the scope (host · project) half — it gets a cream wash so it reads as
-    /// its own control, separate from the filter text beside it.
     @State private var scopeHovered = false
+    @State private var showFilter = false
 
     private var hasServers: Bool {
         appModel.knownHosts.contains { if case .ssh = $0 { return true }; return false }
     }
 
     var body: some View {
-        HStack(spacing: Theme.Space.sm) {
-            // One white field, two jobs: WHICH terminals (host · project, a menu) and, of those, which
-            // match the typed text. A Linen hairline splits the halves. The scope keeps its full width
-            // first; the filter takes the rest.
-            HStack(spacing: 0) {
+        VStack(spacing: Theme.Space.xs) {
+            HStack(spacing: Theme.Space.xs) {
                 scopeMenu
-                    .layoutPriority(1)
-                Rectangle()
-                    .fill(Theme.border)
-                    .frame(width: 1, height: 16)
-                FilterField(text: $filter)
-                    .frame(minWidth: 64) // keeps the whole「筛选终端」placeholder
-            }
-            .frame(height: 32)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
-            // Nav-level control → Cool Stone border (DESIGN.md), one step stronger than card Linen.
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.borderStrong, lineWidth: 1))
 
-            AttentionButton()
+                Spacer(minLength: Theme.Space.xs)
 
-            // New terminal — a filled charcoal square (v2 primary action); a menu of the two launch
-            // kinds, each opening the「新建会话」sheet, plus a new group folder. axis-claude runs
-            // against the LOCAL model only.
-            Menu {
-                Button { appModel.newTerminal() } label: { Label("启动终端", systemImage: "terminal") }
-                Button { appModel.newTerminal(launch: .antigravity) } label: { Label("启动 Antigravity (agy)", systemImage: "sparkles") }
-                    .disabled(appModel.currentHost != .local)
-                Button { appModel.newTerminal(launch: .axisClaude) } label: { Label("启动 axis-claude", systemImage: "cpu") }
-                    .disabled(appModel.currentHost != .local)
-                Divider()
-                Button { onNewGroup() } label: { Label("新建分组…", systemImage: "folder.badge.plus") }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.canvas)
-                    .frame(width: 32, height: 32)
-                    .background(Theme.brand, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
-                    .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
+                AttentionButton()
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        showFilter.toggle()
+                        if !showFilter { filter = "" }
+                    }
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(showFilter || !filter.isEmpty ? Theme.textPrimary : Theme.textSecondary)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            showFilter || !filter.isEmpty ? Theme.surface : Color.clear,
+                            in: RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                        )
+                        .overlay {
+                            if showFilter || !filter.isEmpty {
+                                RoundedRectangle(cornerRadius: Theme.Radius.sm).stroke(Theme.border, lineWidth: 1)
+                            }
+                        }
+                        .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                }
+                .buttonStyle(.plain)
+                .help(showFilter ? "收起筛选" : "筛选终端")
+                .accessibilityLabel("筛选终端")
+
+                Menu {
+                    Button { appModel.newTerminal() } label: { Label("启动终端", systemImage: "terminal") }
+                    Button { appModel.newTerminal(launch: .antigravity) } label: { Label("启动 Antigravity (agy)", systemImage: "sparkles") }
+                        .disabled(appModel.currentHost != .local)
+                    Button { appModel.newTerminal(launch: .axisClaude) } label: { Label("启动 axis-claude", systemImage: "cpu") }
+                        .disabled(appModel.currentHost != .local)
+                    Divider()
+                    Button { onNewGroup() } label: { Label("新建分组…", systemImage: "folder.badge.plus") }
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.onBrand)
+                        .frame(width: 28, height: 28)
+                        .background(Theme.brand, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                        .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("新建终端 (⌘T) · 新建分组")
+                .accessibilityLabel("新建终端或分组")
             }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("New terminal on \(appModel.currentHost.label) (⌘T) · 新建分组")
-            .accessibilityLabel("新建终端或分组")
+
+            if showFilter || !filter.isEmpty {
+                FilterField(text: $filter, onCancel: {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        filter = ""
+                        showFilter = false
+                    }
+                })
+                .frame(height: 28)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.sm).stroke(Theme.border, lineWidth: 1))
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.top, Theme.Space.md)
         .padding(.bottom, Theme.Space.sm)
     }
 
-    /// The scope half of the field: host glyph with a status dot · host · project · chevron. One
-    /// menu for hosts and projects.
     private var scopeMenu: some View {
         @Bindable var store = WorkspaceStore.shared
         return Menu {
@@ -554,9 +577,9 @@ private struct SidebarHeader: View {
                         Label(hostName(host), systemImage: appModel.currentHost == host ? "checkmark" : host.icon)
                     }
                 }
-                Button { onAddHost() } label: { Label("Add Host…", systemImage: "plus") }
+                Button { onAddHost() } label: { Label("添加远程主机…", systemImage: "plus") }
                 if hasServers {
-                    Button { onManageServers() } label: { Label("Manage Servers…", systemImage: "server.rack") }
+                    Button { onManageServers() } label: { Label("管理服务器…", systemImage: "server.rack") }
                 }
             }
             Section("项目") {
@@ -569,26 +592,25 @@ private struct SidebarHeader: View {
                 Button { onManageProjects() } label: { Label("管理项目…", systemImage: "folder.badge.gearshape") }
             }
         } label: {
-            // The longest wording that fits whole: 本机 · 项目 → the project alone (the host still shows
-            // as the glyph) → the project cut short → the glyph alone, at the narrowest sidebar. The
-            // project only shows when one narrows the list; "全部项目" is the quiet default.
             let host = hostName(appModel.currentHost)
             let project = store.selected?.name
             ViewThatFits(in: .horizontal) {
                 scopeLabel(host, detail: project)
                 scopeLabel(project ?? host)
                 scopeLabel(project ?? host, truncates: true)
-                scopeLabel(nil)
             }
             .foregroundStyle(Theme.textPrimary)
-            .padding(.leading, 10)
-            .padding(.trailing, Theme.Space.md)
-            .frame(maxHeight: .infinity)
-            .background(scopeHovered ? Theme.surface2 : .clear,
-                        in: UnevenRoundedRectangle(topLeadingRadius: Theme.Radius.md, bottomLeadingRadius: Theme.Radius.md))
-            .contentShape(Rectangle())
+            .padding(.horizontal, Theme.Space.sm)
+            .frame(height: 28)
+            .background(scopeHovered ? Theme.surface : Color.clear,
+                        in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+            .overlay {
+                if scopeHovered || store.selected != nil {
+                    RoundedRectangle(cornerRadius: Theme.Radius.sm).stroke(Theme.border, lineWidth: 1)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
         }
-        // `.button` + plain draws the custom label as-is (`.borderlessButton` reduces it to text).
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
@@ -645,82 +667,121 @@ private struct SidebarHeader: View {
     }
 }
 
-/// Bottom-of-sidebar entry into the Claude Code / Codex global rules editor.
-/// v2 tool dock: the five tool panes as an equal-width icon+label row pinned to the sidebar bottom.
-/// Selected = a filled charcoal cell (mirrors a selected terminal row), per DESIGN.md v2.
+/// Streamlined sidebar footer: removes the cramped 6-cell 10pt grid and duplicate「主管」entry.
+/// Exposes 3 clear items (Skills, 指令, 工具 menu) + a Settings gear button.
 private struct ToolDock: View {
     @Environment(AppModel.self) private var appModel
 
-    private struct Tool: Identifiable {
-        let id: String
-        let title: String
-        let icon: String
-        let selected: Bool
-        var badge = 0
-        let action: () -> Void
+    private var moreToolSelected: Bool {
+        appModel.tunnelsSelected || appModel.axisSelected || appModel.labSelected
     }
 
-    private var tools: [Tool] {
-        [
-            // 主管 opens the work list's settings sub-page at its 主管 segment (roles / rules / schedules live there now) and
-            // lights up while that page (or the fallback 主管 panel) is on screen; the badge counts tasks that need you plus
-            // tickets outside any task (注意事项 B-03), never both for one thing.
-            Tool(id: "superagent", title: "主管", icon: "person.crop.rectangle.stack", selected: appModel.superagentToolSelected,
-                 badge: appModel.superagent.tasksNeedingYou.count + appModel.superagent.needsYouOutsideTasks.count) {
-                appModel.openWorklistSettings(.router)
-            },
-            Tool(id: "axis",    title: "模型",   icon: "cpu",                                selected: appModel.axisSelected)    { appModel.openAxis() },
-            Tool(id: "tunnels", title: "隧道",   icon: "network.badge.shield.half.filled",   selected: appModel.tunnelsSelected) { appModel.openTunnels() },
-            Tool(id: "rules",   title: "规则",    icon: "text.book.closed",                   selected: appModel.claudeMdSelected){ appModel.openClaudeMd() },
-            Tool(id: "skills",  title: "Skills", icon: "wand.and.stars",                     selected: appModel.skillsSelected)  { appModel.openSkills() },
-            Tool(id: "lab",     title: "实验室", icon: "flask",                              selected: appModel.labSelected)     { appModel.openLab() },
-        ]
+    private var moreToolTitle: String {
+        if appModel.tunnelsSelected { return "隧道" }
+        if appModel.axisSelected { return "模型" }
+        if appModel.labSelected { return "监控" }
+        return "工具"
+    }
+
+    private var anyTunnelRunning: Bool {
+        appModel.tunnelRunner.states.values.contains { $0 == .running }
+            || appModel.cloudflaredRunner.states.values.contains {
+                if case .running = $0 { return true }
+                return false
+            }
     }
 
     var body: some View {
-        // Six cells in the 230–280pt sidebar: tight gaps so「实验室」fits without truncating.
-        HStack(spacing: Theme.Space.xxs) {
-            ForEach(tools) { tool in
-                Button(action: tool.action) {
-                    VStack(spacing: 3) {
-                        Image(systemName: tool.icon)
-                            .font(.system(size: 14, weight: .regular))
-                            .frame(height: 18) // one baseline for glyphs of different heights
-                            .foregroundStyle(tool.selected ? Theme.canvas : Theme.textSecondary)
-                            .overlay(alignment: .topTrailing) {
-                                if tool.badge > 0 {
-                                    Circle().fill(Theme.Status.attention).frame(width: 7, height: 7)
-                                        .overlay(Circle().stroke(tool.selected ? Theme.brand : Theme.chrome, lineWidth: 1.5))
-                                        .offset(x: 4, y: -1)
-                                }
-                            }
-                        Text(tool.title)
-                            .font(.system(size: 10))
-                            .minimumScaleFactor(0.85)
-                            .foregroundStyle(tool.selected ? Theme.canvas : Theme.textTertiary)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, Theme.Space.sm)
-                    .padding(.horizontal, Theme.Space.xxs)
-                    .background(tool.selected ? Theme.brand : Color.clear,
-                                in: RoundedRectangle(cornerRadius: Theme.Radius.md))
-                    .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md))
-                }
-                .buttonStyle(.plain)
-                .help(tool.title)
-                .accessibilityLabel(tool.title)
+        let settingsBadge = appModel.superagent.needsYouOutsideTasks.count
+        HStack(spacing: Theme.Space.xs) {
+            dockButton(title: "Skills", icon: "wand.and.stars", selected: appModel.skillsSelected) {
+                appModel.openSkills()
             }
+            dockButton(title: "指令", icon: "doc.text", selected: appModel.claudeMdSelected) {
+                appModel.openClaudeMd()
+            }
+            Menu {
+                Button { appModel.openTunnels() } label: {
+                    Label("隧道与端口转发", systemImage: appModel.tunnelsSelected ? "checkmark" : "network.badge.shield.half.filled")
+                }
+                Button { appModel.openAxis() } label: {
+                    Label("本地模型 (axis-model)", systemImage: appModel.axisSelected ? "checkmark" : "cpu")
+                }
+                Button { appModel.openLab() } label: {
+                    Label("系统与用量监控", systemImage: appModel.labSelected ? "checkmark" : "waveform.path.ecg")
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "wrench.and.screwdriver")
+                        .font(.system(size: 11, weight: .medium))
+                    Text(moreToolTitle)
+                        .font(.system(size: 11, weight: moreToolSelected ? .semibold : .regular))
+                        .lineLimit(1)
+                    if anyTunnelRunning && !moreToolSelected {
+                        Circle().fill(Theme.Status.positive).frame(width: 5, height: 5)
+                    }
+                }
+                .foregroundStyle(moreToolSelected ? Theme.onBrand : Theme.textSecondary)
+                .frame(maxWidth: .infinity)
+                .frame(height: 28)
+                .background(moreToolSelected ? Theme.brand : Color.clear,
+                            in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .help("更多工具：隧道、本地模型、系统监控")
+
+            Button {
+                appModel.openWorklistSettings(.router)
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(appModel.superagentToolSelected ? Theme.onBrand : Theme.textSecondary)
+                    .frame(width: 28, height: 28)
+                    .background(appModel.superagentToolSelected ? Theme.brand : Color.clear,
+                                in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                    .overlay(alignment: .topTrailing) {
+                        if settingsBadge > 0 {
+                            Circle().fill(Theme.Status.attention).frame(width: 6, height: 6)
+                                .offset(x: -3, y: 3)
+                        }
+                    }
+                    .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
+            }
+            .buttonStyle(.plain)
+            .help("编排与全局设置")
+            .accessibilityLabel("编排与全局设置")
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)
-        // A warm linen rule (the system separator reads cool against the cream sidebar).
         .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
+    }
+
+    private func dockButton(title: String, icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .medium))
+                Text(title)
+                    .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(selected ? Theme.onBrand : Theme.textSecondary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 28)
+            .background(selected ? Theme.brand : Color.clear,
+                        in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
+        }
+        .buttonStyle(.plain)
+        .help(title)
+        .accessibilityLabel(title)
     }
 }
 
-/// A full-width two-way switch in the system segmented look (the stock segmented Picker can't
-/// stretch to the sidebar width on macOS): a linen well with the chosen segment raised in white.
+/// A full-width two-way switch in the system segmented look.
 private struct SegmentedBar<Value: Hashable>: View {
     @Binding var selection: Value
     let options: [(Value, String)]
@@ -739,7 +800,8 @@ private struct SegmentedBar<Value: Hashable>: View {
                             if chosen {
                                 RoundedRectangle(cornerRadius: 6)
                                     .fill(Theme.surface)
-                                    .shadow(color: Theme.textPrimary.opacity(0.12), radius: 1, y: 0.5)
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Theme.border, lineWidth: 1)
                             }
                         }
                         .contentShape(Rectangle())
@@ -749,7 +811,7 @@ private struct SegmentedBar<Value: Hashable>: View {
             }
         }
         .padding(2)
-        .background(Theme.Colors.linen.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -783,27 +845,33 @@ private struct EndedActionsRow: View {
 /// which searches the text inside every pane). The surrounding field draws the surface and border.
 private struct FilterField: View {
     @Binding var text: String
+    var onCancel: (() -> Void)? = nil
     @FocusState private var focused: Bool
 
     var body: some View {
         HStack(spacing: Theme.Space.xs) {
-            TextField("筛选终端", text: $text)
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textTertiary)
+            TextField("筛选终端…", text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
                 .focused($focused)
-            if !text.isEmpty {
-                Button { text = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.tertiary)
-                .accessibilityLabel("Clear filter")
+                .onExitCommand { onCancel?() }
+            Button {
+                if let onCancel { onCancel() } else { text = "" }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 12))
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tertiary)
+            .accessibilityLabel("Clear filter")
         }
-        .padding(.horizontal, Theme.Space.md)
+        .padding(.horizontal, Theme.Space.sm)
         .frame(maxHeight: .infinity)
-        // The whole half is the click target, not just the text line.
         .contentShape(Rectangle())
+        .onAppear { focused = true }
         .onTapGesture { focused = true }
         .accessibilityLabel("Filter terminals")
     }
@@ -837,7 +905,7 @@ private struct TerminalRow: View {
         let status = TerminalStatus.of(conn)
         let showDot = conn.hasUnseenOutput && !isSelected
         let prominent = prominence == .increased
-        let ink = prominent ? Theme.canvas : Theme.brand
+        let ink = prominent ? Color.white : Theme.brand
         HStack(spacing: Theme.Space.md) {
             // ONE primary signal per row (dsh discipline): the icon tint + the single right-side
             // glyph carry the state; no left rail, no colored subtitles duplicating them.
@@ -982,28 +1050,23 @@ private struct RouterRow: View {
 
     var body: some View {
         let sa = appModel.superagent
-        // Tasks that need you are counted on the「我的清单」row; here only tickets outside any task (old / direct
-        // accepts, 注意事项 B-03) — one amber signal per thing to do (注意事项 A-04).
         let needs = sa.needsYouOutsideTasks.count
-        let open = sa.openTasks.count
         let prominent = prominence == .increased
         HStack(spacing: Theme.Space.md) {
             Image(systemName: "person.crop.rectangle.stack")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.canvas)
+                .foregroundStyle(prominent ? Color.white : Theme.onBrand)
                 .frame(width: 22, height: 22)
                 .background(prominent ? Color.white.opacity(0.22) : Theme.brand, in: RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: Theme.Space.xxs) {
-                Text("主管").font(Theme.Font.rowTitle).foregroundStyle(prominent ? Theme.canvas : Theme.textPrimary).lineLimit(1)
+                Text("主管").font(Theme.Font.rowTitle).foregroundStyle(prominent ? Color.white : Theme.textPrimary).lineLimit(1)
                 Group {
                     if needs > 0 {
-                        Text("\(needs) 个工单需要你").foregroundStyle(prominent ? Theme.canvas : Theme.Status.attention)
-                    } else if open > 0 {
-                        Text("\(open) 个任务进行中 · 对我说一句就能加任务").foregroundStyle(.secondary)
+                        Text("\(needs) 个工单需要你").foregroundStyle(prominent ? Color.white : Theme.Status.attention)
                     } else if conn == nil {
                         Text("未启动 · 点击启动").foregroundStyle(.tertiary)
                     } else {
-                        Text("对我说一句就能加任务").foregroundStyle(.secondary)
+                        Text("运行中 · \(sa.settings.codingAgent.label)").foregroundStyle(.secondary)
                     }
                 }
                 .font(Theme.Font.rowSubtitle)
@@ -1014,11 +1077,11 @@ private struct RouterRow: View {
                 if needs > 0 {
                     Text("\(needs)")
                         .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Theme.canvas)
+                        .foregroundStyle(Color.white)
                         .frame(minWidth: 14, minHeight: 14)
                         .background(Theme.Status.attention, in: Capsule())
                 } else if let conn, appModel.isWorking(conn) {
-                    EqualizerBars(animated: !reduceMotion, tint: prominent ? Theme.canvas : Theme.brand)
+                    EqualizerBars(animated: !reduceMotion, tint: prominent ? Color.white : Theme.brand)
                 }
             }
             .frame(minWidth: 14)
@@ -1030,17 +1093,12 @@ private struct RouterRow: View {
                 Capsule().fill(Theme.brand).frame(width: 3, height: 16).offset(x: -11)
             }
         }
-        .help(conn == nil ? "启动主管终端：对它说一句，它把任务加进你的清单并建议谁来做" : "主管终端")
+        .help(conn == nil ? "启动主管终端：对它说一句，它把任务加进你的清单并建议谁来做" : "主管终端（右键可重启主管）")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(needs > 0 ? "主管，\(needs) 个工单需要你" : "主管")
     }
 }
 
-/// The pinned「我的清单」row above 主管 (注意事项 F-01 / F-02): a 22px charcoal badge with the
-/// `list.bullet.clipboard` glyph, 「我的清单」 in `rowTitle`, one subtitle line — 「N 件需要你」(amber) >
-/// 「N 件待分配」(stone, 设计评审 2026-11-08 1A) > 「N 件进行中」> 「清单是空的」— and an amber count capsule in the
-/// signal column while tasks need you (nothing else there: the equalizer belongs to terminals; 待分配 gets no
-/// capsule). While the list is on screen the row shows the 3px charcoal bar a tool pane's row gets. Tapping opens the list.
 private struct WorklistRow: View {
     @Environment(AppModel.self) private var appModel
 
@@ -1052,7 +1110,7 @@ private struct WorklistRow: View {
         HStack(spacing: Theme.Space.md) {
             Image(systemName: "list.bullet.clipboard")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.canvas)
+                .foregroundStyle(Theme.onBrand)
                 .frame(width: 22, height: 22)
                 .background(Theme.brand, in: RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: Theme.Space.xxs) {
@@ -1061,7 +1119,7 @@ private struct WorklistRow: View {
                     if subtitle.attention {
                         Text(subtitle.text).foregroundStyle(Theme.Status.attention)
                     } else if sa.openTasks.isEmpty {
-                        Text(subtitle.text).foregroundStyle(.tertiary) // 清单是空的 / 迁移失败（注意事项 K-05：原因在面板顶部）
+                        Text(subtitle.text).foregroundStyle(.tertiary)
                     } else {
                         Text(subtitle.text).foregroundStyle(.secondary)
                     }
@@ -1074,7 +1132,7 @@ private struct WorklistRow: View {
                 if needs > 0 {
                     Text("\(needs)")
                         .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Theme.canvas)
+                        .foregroundStyle(Color.white)
                         .frame(minWidth: 14, minHeight: 14)
                         .background(Theme.Status.attention, in: Capsule())
                 }

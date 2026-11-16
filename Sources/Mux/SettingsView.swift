@@ -28,6 +28,16 @@ private struct GeneralSettingsPane: View {
         @Bindable var model = appModel
         Form {
             Section("外观 / Appearance") {
+                Picker("主题模式", selection: $model.appearanceMode) {
+                    ForEach(AppModel.AppearanceMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("终端画布始终保持护眼深色以兼容 ANSI 调色板；侧栏与面板可跟随系统浅色 / 深色自动切换。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Toggle("键入特效（Typing Combo）", isOn: $model.typingEffectsEnabled)
                     .accessibilityLabel("键入特效")
                 Text("每次按键在光标处的粒子特效与右上角连击计数。")
