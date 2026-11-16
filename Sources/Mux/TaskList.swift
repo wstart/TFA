@@ -35,7 +35,6 @@ struct WorklistView: View {
         let sa = appModel.superagent
         VStack(spacing: 0) {
             if let id = appModel.worklistTaskID {
-                // 「‹ 我的清单 · 任务 A-12」：返回在标题左侧（参考图 02）；副标题是状态行「更新于 刚刚 · 工单 #12 · 分支 tfa/12」（Pass 1）。
                 ToolHeaderBar(icon: "list.bullet.clipboard", title: "任务 A-\(id)",
                               subtitle: sa.task(id)?.headerStatus(now: Date()) ?? "任务不在清单里。", leading: {
                     Button {
@@ -49,10 +48,9 @@ struct WorklistView: View {
                     .accessibilityLabel("返回我的清单")
                     .keyboardShortcut("[", modifiers: .command)
                 })
-                Divider()
                 if let tv = sa.task(id) {
                     TaskCard(view: tv, assign: { assigning = tv })
-                        .id(tv.id) // 换一张卡就换一份状态（正在加的项、乐观勾选、活动）
+                        .id(tv.id)
                 } else {
                     VStack(spacing: Theme.Space.lg) {
                         Text("任务 A-\(id) 不在清单里。").font(Theme.Font.emptyBody).foregroundStyle(Theme.textTertiary)
@@ -92,7 +90,6 @@ struct WorklistView: View {
                     .help("设置：主管终端、组织、工作流、角色、规则、定时任务、记录")
                     .accessibilityLabel("清单设置")
                 }
-                Divider()
                 list
             }
         }
@@ -157,10 +154,10 @@ struct WorklistView: View {
                     }
                 }
             }
-            .padding(.horizontal, Theme.Space.xxl)
-            .padding(.vertical, Theme.Space.xl)
-            .frame(maxWidth: 780, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 32)
+            .padding(.vertical, 24)
+            .frame(maxWidth: 960, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
     }
@@ -191,11 +188,10 @@ struct WorklistView: View {
     /// `count` = 计数胶囊的数目：按真正的分区算（`WorklistSections.counts`），停住的行只是暂时画在这里。
     private func section(_ kind: WorklistSections.Kind, _ tasks: [TaskView], count: Int, order: [Int64], wide: Bool, compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
-            HStack(spacing: Theme.Space.sm) {
+            HStack(alignment: .center, spacing: Theme.Space.sm) {
                 Text(kind.title).font(Theme.Font.sectionHeader).foregroundStyle(Theme.textPrimary)
                 CountBadge(count: count, attention: kind == .needsYou)
             }
-            .padding(.horizontal, Theme.Space.xs)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(kind.title) \(count) 件")
             ForEach(tasks) { row($0, kind: kind, order: order, wide: wide, compact: compact) }
@@ -207,11 +203,11 @@ struct WorklistView: View {
             Button {
                 showDone.toggle()
             } label: {
-                HStack(spacing: Theme.Space.sm) {
+                HStack(alignment: .center, spacing: Theme.Space.sm) {
                     Text(WorklistSections.Kind.done.title).font(Theme.Font.sectionHeader).foregroundStyle(Theme.textPrimary)
                     CountBadge(count: count)
                     Spacer()
-                    HStack(spacing: Theme.Space.xs) {
+                    HStack(alignment: .center, spacing: Theme.Space.xs) {
                         Text(showDone ? "收起" : "展开")
                         Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
                             .rotationEffect(.degrees(showDone ? 90 : 0))
@@ -221,7 +217,6 @@ struct WorklistView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, Theme.Space.xs)
             .accessibilityLabel("已完成 \(count) 件，\(showDone ? "收起" : "展开")")
             if showDone {
                 ForEach(tasks) { row($0, kind: .done, order: order, wide: wide, compact: compact) }
@@ -265,6 +260,8 @@ struct WorklistView: View {
 
 /// 清单页头（Pass 1）：和 `ToolHeaderBar` 同一套排版——侧栏开关、图标 + 标题、右侧小控件——但标题下不是宣言，而是一行可带按钮的
 /// meta：「主管 运行中 · 今天打扰 0 / 8」；主管没开就是「主管 未启动」+ 小「启动」；超预算时打扰那段加重；空态下不显示打扰数（Pass 2）。
+/// Unified 44pt single-row header for「我的清单」, sharing the exact Y=44pt bottom hairline and vertical
+/// center axis with `SidebarHeader`, `ToolHeaderBar`, and `ActiveTerminalHeader`.
 private struct WorklistHeader<Trailing: View>: View {
     @Environment(AppModel.self) private var appModel
     let empty: Bool
@@ -274,51 +271,63 @@ private struct WorklistHeader<Trailing: View>: View {
         let sa = appModel.superagent
         let running = sa.routerSession != nil
         let budget = WorklistHeaderText.interruptions(used: sa.interruptionsToday, budget: sa.settings.interruptionBudget)
-        HStack(alignment: .top, spacing: Theme.Space.md) {
+        HStack(alignment: .center, spacing: 10) {
             Button { appModel.toggleSidebar() } label: {
                 Image(systemName: "sidebar.left")
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 26, height: 26)
+                    .contentShape(RoundedRectangle(cornerRadius: 5))
             }
-            .buttonStyle(.borderless)
-            .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
+            .buttonStyle(.plain)
+            .help(appModel.sidebarCollapsed ? "显示侧栏 (⌘\\)" : "隐藏侧栏 (⌘\\)")
             .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
-            .padding(.top, 2)
 
-            VStack(alignment: .leading, spacing: Theme.Space.xxs) {
-                HStack(spacing: Theme.Space.sm) {
-                    Image(systemName: "list.bullet.clipboard").foregroundStyle(Theme.brand)
-                    Text("我的清单").font(Theme.Font.headerTitle).lineLimit(1)
-                }
-                HStack(spacing: Theme.Space.xs) {
-                    Text(running ? "主管运行中 · \(sa.settings.codingAgent.label)" : WorklistHeaderText.router(running: false))
-                    if !running {
-                        Button("启动") { appModel.openRouter() }
-                            .buttonStyle(.bordered)
-                            .controlSize(.mini)
-                            .help("启动主管终端：对它说一句，它把任务加进清单并建议谁来做")
-                            .accessibilityLabel("启动主管")
-                    }
-                    if !empty && budget.over {
-                        Text("·")
-                        Text(budget.text).monospacedDigit()
-                            .fontWeight(.semibold)
-                            .foregroundStyle(Theme.textPrimary)
-                    }
-                }
-                .font(Theme.Font.headerMeta)
-                .foregroundStyle(Theme.textTertiary)
-                .lineLimit(1)
+            HStack(alignment: .center, spacing: 6) {
+                Image(systemName: "list.bullet.clipboard")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.brand)
+                Text("我的清单")
+                    .font(Theme.Font.headerTitle)
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1)
+                    .fixedSize()
             }
-            Spacer()
-            HStack(spacing: Theme.Space.sm) {
+
+            HStack(alignment: .center, spacing: 6) {
+                Text("·").foregroundStyle(Theme.textTertiary).accessibilityHidden(true)
+                Text(running ? "主管运行中 · \(sa.settings.codingAgent.label)" : WorklistHeaderText.router(running: false))
+                if !running {
+                    Button("启动") { appModel.openRouter() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                        .help("启动主管终端：对它说一句，它把任务加进清单并建议谁来做")
+                        .accessibilityLabel("启动主管")
+                }
+                if !empty && budget.over {
+                    Text("·")
+                    Text(budget.text).monospacedDigit()
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Theme.textPrimary)
+                }
+            }
+            .font(Theme.Font.headerMeta)
+            .foregroundStyle(Theme.textTertiary)
+            .lineLimit(1)
+
+            Spacer(minLength: 8)
+
+            HStack(alignment: .center, spacing: Theme.Space.sm) {
                 trailing()
                 AppearanceMenuButton()
             }
             .controlSize(.small)
         }
-        .padding(.horizontal, Theme.Space.lg)
-        .padding(.vertical, Theme.Space.md)
+        .padding(.horizontal, 16)
+        .frame(height: 44)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.canvas)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 }
 
@@ -363,12 +372,11 @@ private struct FilterRow: View {
                     .foregroundStyle(project == nil ? Theme.textTertiary : Theme.textPrimary)
                 }
                 .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help(project.map { "只看 \($0)" } ?? "按项目目录筛选")
+        .fixedSize()
+        .help(project.map { "只看 \($0)" } ?? "按项目目录筛选")
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, Theme.Space.xs)
     }
 }
 
@@ -764,9 +772,9 @@ struct TaskRow: View {
         let echo = sa.actionEchoes[view.id]
         let error = sa.actionErrors[view.id]
         let isFocused = focused == view.id
-        HStack(spacing: Theme.Space.lg) {
+        HStack(alignment: .center, spacing: Theme.Space.lg) {
             VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: Theme.Space.sm) {
+                HStack(alignment: .center, spacing: Theme.Space.sm) {
                     Text(view.task.label)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(Theme.textTertiary)
@@ -784,7 +792,7 @@ struct TaskRow: View {
                             .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 4))
                     }
                 }
-                HStack(spacing: Theme.Space.sm) {
+                HStack(alignment: .center, spacing: Theme.Space.sm) {
                     if let echo {
                         Text(echo).font(Theme.Font.rowSubtitle).fontWeight(.medium).foregroundStyle(Theme.textPrimary).lineLimit(1)
                     } else {

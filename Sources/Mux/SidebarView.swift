@@ -79,55 +79,50 @@ struct SidebarView: View {
                     (false, "在线 \(appModel.visibleConnections.count - endedCount)"),
                     (true, "已断开 \(endedCount)"),
                 ])
-                .padding(.horizontal, Theme.Space.md)
-                .padding(.bottom, Theme.Space.sm)
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
             }
 
             List(selection: Binding(
-                // While a tool pane (Tasks / Lab / Skills / CLAUDE.md) is showing, no terminal is on
-                // screen — so don't keep a terminal row highlighted (avoids a confusing double-selection).
-                // selectedConnectionID is preserved underneath, so returning to a terminal restores it.
                 get: { toolPaneOpen ? nil : model.selectedConnectionID },
                 set: {
                     guard let id = $0 else { return }
                     if id == appModel.routerConnection?.id {
-                        model.openRouter() // 主管终端若已退回 shell，点它时顺手按当前配置拉起 Agent
+                        model.openRouter()
                     } else {
                         model.activateTerminal(id)
                     }
                 }
             )) {
-                // 已断开 tab: bulk actions first, where they're seen before scrolling the records.
                 if showEnded && endedCount > 0 {
                     EndedActionsRow(count: endedCount,
                                     onRestoreAll: { appModel.restoreAllEnded() },
                                     onRemoveAll: { confirmRemoveAllEnded = true })
+                        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
                 }
-                // 「我的清单」is the first screen: pinned above 主管 (注意事项 F-01). It stays while a project is
-                // selected (the list filters by project itself); the terminal filter text hides it like 主管.
                 if !showEnded && filter.isEmpty {
                     WorklistRow()
+                        .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
                 }
-                // The「主管」(router) row is pinned above everything (including while a project is selected):
-                // `projectScoped` excludes the router from terminal lists so it only appears here.
                 if !showEnded && filter.isEmpty {
                     routerRow
+                        .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
                 }
-                // Ungrouped terminals live in a built-in「未分组」folder pinned above the group folders
-                // (not a real group: no note, no reorder, not deletable). Scoped to the current host.
                 let ungrouped = filtered(showEnded ? appModel.visibleEndedUngroupedTerminals
                                                    : appModel.visibleUngroupedTerminals)
-                // The folder also accepts drops: dropping a grouped terminal here pulls it back out of
-                // its folder (#8, "drag out to ungrouped"); dropping a folder here moves it to the
-                // front. Wrapped in a Section so the drop target spans the whole folder.
                 Section {
                     if !ungrouped.isEmpty {
                         let hasGroups = !appModel.currentGroups.isEmpty
                         if hasGroups {
                             defaultHeaderRow(count: ungrouped.count)
+                                .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 2, trailing: 8))
                         }
                         if !hasGroups || !defaultCollapsed || !filter.trimmingCharacters(in: .whitespaces).isEmpty {
-                            ForEach(ungrouped) { row($0) }
+                            ForEach(ungrouped) {
+                                row($0)
+                                    .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
+                            }
                         }
                     }
                 } header: {
@@ -221,12 +216,9 @@ struct SidebarView: View {
     @ViewBuilder
     private func groupTree(_ group: AppModel.TerminalGroup) -> some View {
         let members = tabMembers(group)
-        // The 已断开 tab lists only folders that hold ended records; 在线 keeps empty folders as drop targets.
         if (filter.isEmpty && WorkspaceStore.shared.selected == nil && !showEnded) || !members.isEmpty {
             groupHeaderRow(group)
-                // One drop target, two payloads: a folder token → reorder before this folder; a
-                // terminal's groupKey → file that terminal into this group (#8). (The folder's OWN
-                // drag lives on its grip handle inside groupHeaderRow, not here.)
+                .listRowInsets(EdgeInsets(top: 6, leading: 8, bottom: 2, trailing: 8))
                 .dropDestination(for: String.self) { keys, _ in
                     for key in keys {
                         if let gid = SidebarDrag.groupID(from: key) {
@@ -242,12 +234,9 @@ struct SidebarView: View {
                         : (dropTargetGroup == group.id ? nil : dropTargetGroup)
                 }
             if groupExpanded(group.id) && !members.isEmpty {
-                ForEach(members) { row($0) }
-                if members.isEmpty {
-                    Text("暂无终端 · 右键终端可加入分组")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .padding(.leading, Theme.Space.lg)
+                ForEach(members) {
+                    row($0)
+                        .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
                 }
             }
         }
@@ -326,7 +315,7 @@ struct SidebarView: View {
                 .onTapGesture { appModel.openGroupNote(group) }
             // The count and the drag grip share the rows' signal column; hovering swaps them. The grip
             // is the ONLY draggable bit, so tap-to-toggle never fights the drag recognizer.
-            ZStack(alignment: .trailing) {
+            ZStack(alignment: .center) {
                 countLabel(count).opacity(hovered ? 0 : 1)
                 Image(systemName: "line.3.horizontal")
                     .font(.caption)
@@ -340,10 +329,10 @@ struct SidebarView: View {
                     }
                     .help("拖动重新排序分组")
             }
-            .frame(width: 14, alignment: .trailing)
-                .accessibilityHidden(true) // reorder is exposed via the row's accessibilityActions
+            .frame(width: 18, alignment: .center)
+                .accessibilityHidden(true)
         }
-        .padding(.top, isFirstSection(group.id) ? 0 : Theme.Space.lg)
+        .padding(.top, isFirstSection(group.id) ? 0 : Theme.Space.sm)
         .onHover { hoveredGroup = $0 ? group.id : (hoveredGroup == group.id ? nil : hoveredGroup) }
         .background(
             // Highlight the folder while a terminal is dragged over it (#8 drop feedback).
@@ -395,7 +384,7 @@ struct SidebarView: View {
         return HStack(spacing: Theme.Space.md) {
             chevron(expanded)
             sectionHeaderLabel("未分组")
-            countLabel(count).frame(width: 14, alignment: .trailing)
+            countLabel(count).frame(width: 18, alignment: .center)
         }
         .contentShape(Rectangle())
         .onTapGesture { defaultCollapsed.toggle() }
@@ -491,11 +480,11 @@ private struct SidebarHeader: View {
     }
 
     var body: some View {
-        VStack(spacing: Theme.Space.xs) {
-            HStack(spacing: Theme.Space.xs) {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 6) {
                 scopeMenu
 
-                Spacer(minLength: Theme.Space.xs)
+                Spacer(minLength: 4)
 
                 AttentionButton()
 
@@ -547,6 +536,9 @@ private struct SidebarHeader: View {
                 .help("新建终端 (⌘T) · 新建分组")
                 .accessibilityLabel("新建终端或分组")
             }
+            .padding(.horizontal, 12)
+            .frame(height: 44)
+            .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
 
             if showFilter || !filter.isEmpty {
                 FilterField(text: $filter, onCancel: {
@@ -558,12 +550,12 @@ private struct SidebarHeader: View {
                 .frame(height: 28)
                 .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
                 .overlay(RoundedRectangle(cornerRadius: Theme.Radius.sm).stroke(Theme.border, lineWidth: 1))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .padding(.horizontal, Theme.Space.md)
-        .padding(.top, Theme.Space.md)
-        .padding(.bottom, Theme.Space.sm)
     }
 
     private var scopeMenu: some View {
@@ -754,8 +746,8 @@ private struct ToolDock: View {
             .help("编排与全局设置")
             .accessibilityLabel("编排与全局设置")
         }
-        .padding(.horizontal, Theme.Space.md)
-        .padding(.vertical, Theme.Space.sm)
+        .padding(.horizontal, 12)
+        .frame(height: 40)
         .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 
@@ -918,23 +910,18 @@ private struct TerminalRow: View {
                 subtitle(status)
             }
             Spacer(minLength: Theme.Space.xs)
-            // ONE signal column (14pt, shared with the folder counts), in priority order.
-            ZStack {
+            ZStack(alignment: .center) {
                 if attention {
-                    // Highest priority: an amber bell = this terminal explicitly wants you.
                     AttentionBell(animated: !reduceMotion, tint: Self.amber)
                 } else if status != .connected {
-                    // Only surface a connection glyph when it needs attention — a healthy row stays quiet.
                     StatusIndicator(status: status)
                 } else if working {
-                    // Lively "equalizer" bars = this terminal is actively producing output.
                     EqualizerBars(animated: !reduceMotion, tint: ink)
                 } else {
-                    // Idle: a checkmark flash when a burst just finished, else the unseen-output dot.
                     OutputActivityIndicator(phase: conn.outputPhase, showUnseen: showDot, tint: ink)
                 }
             }
-            .frame(width: 14)
+            .frame(width: 18, alignment: .center)
         }
         .padding(.vertical, Theme.Space.xxs)
         // The amber "needs you" wash spans the same rounded area as the system selection highlight.
@@ -1073,21 +1060,20 @@ private struct RouterRow: View {
                 .lineLimit(1)
             }
             Spacer(minLength: Theme.Space.xs)
-            ZStack {
+            ZStack(alignment: .center) {
                 if needs > 0 {
                     Text("\(needs)")
                         .font(.system(size: 10, weight: .semibold).monospacedDigit())
                         .foregroundStyle(Color.white)
-                        .frame(minWidth: 14, minHeight: 14)
+                        .frame(minWidth: 16, minHeight: 16)
                         .background(Theme.Status.attention, in: Capsule())
                 } else if let conn, appModel.isWorking(conn) {
                     EqualizerBars(animated: !reduceMotion, tint: prominent ? Color.white : Theme.brand)
                 }
             }
-            .frame(minWidth: 14)
+            .frame(width: 18, alignment: .center)
         }
         .padding(.vertical, Theme.Space.xxs)
-        .padding(.bottom, Theme.Space.xs)
         .overlay(alignment: .leading) {
             if isSelected && toolPaneOpen {
                 Capsule().fill(Theme.brand).frame(width: 3, height: 16).offset(x: -11)
@@ -1105,6 +1091,7 @@ private struct WorklistRow: View {
     var body: some View {
         let sa = appModel.superagent
         let needs = sa.tasksNeedingYou.count
+        let active = appModel.worklistSelected && !appModel.worklistShowsSettings
         let subtitle = WorklistSidebarText.subtitle(needs: needs, unassigned: sa.unassignedTasks.count, open: sa.openTasks.count,
                                                     available: appModel.worklistAvailable)
         HStack(spacing: Theme.Space.md) {
@@ -1128,21 +1115,24 @@ private struct WorklistRow: View {
                 .lineLimit(1)
             }
             Spacer(minLength: Theme.Space.xs)
-            ZStack {
+            ZStack(alignment: .center) {
                 if needs > 0 {
                     Text("\(needs)")
                         .font(.system(size: 10, weight: .semibold).monospacedDigit())
                         .foregroundStyle(Color.white)
-                        .frame(minWidth: 14, minHeight: 14)
+                        .frame(minWidth: 16, minHeight: 16)
                         .background(Theme.Status.attention, in: Capsule())
                 }
             }
-            .frame(minWidth: 14)
+            .frame(width: 18, alignment: .center)
         }
         .padding(.vertical, Theme.Space.xxs)
-        .overlay(alignment: .leading) {
-            if appModel.worklistSelected {
-                Capsule().fill(Theme.brand).frame(width: 3, height: 16).offset(x: -11)
+        .background {
+            if active {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Theme.surface2)
+                    .padding(.horizontal, -6)
+                    .padding(.vertical, -3)
             }
         }
         .contentShape(Rectangle())

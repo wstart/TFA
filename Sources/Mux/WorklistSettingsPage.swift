@@ -51,7 +51,6 @@ struct WorklistSettingsPage: View {
                 .accessibilityLabel("返回我的清单")
                 .keyboardShortcut("[", modifiers: .command)
             })
-            Divider()
             HStack(alignment: .top, spacing: 0) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: Theme.Space.lg) {
@@ -89,9 +88,10 @@ struct WorklistSettingsPage: View {
                             }
                         }
                     }
-                    .padding(Theme.Space.lg)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 20)
                 }
-                .frame(width: 190)
+                .frame(width: 200)
                 .background(Theme.chrome.opacity(0.55))
 
                 Rectangle().fill(Theme.border).frame(width: 1).accessibilityHidden(true)
@@ -102,9 +102,10 @@ struct WorklistSettingsPage: View {
                         if let e = sa.actionError { Banner(text: e) { sa.actionError = nil } }
                         content(segment)
                     }
-                    .padding(Theme.Space.xxl)
-                    .frame(maxWidth: 720, alignment: .leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 32)
+                    .padding(.vertical, 24)
+                    .frame(maxWidth: 820, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .center)
                 }
             }
         }

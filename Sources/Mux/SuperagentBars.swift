@@ -57,10 +57,11 @@ struct TicketBar: View {
             actions(stage, t)
         }
         .controlSize(.small)
-        .padding(.horizontal, Theme.Space.lg)
-        .frame(height: 34)
+        .padding(.horizontal, 16)
+        .frame(height: 36)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(stage.needsPerson != nil ? stage.tint.opacity(0.06) : Theme.canvas)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
         .alert("停止工单 #\(t.id)？", isPresented: $confirmStop) {
             Button("停止", role: .destructive) { appModel.superagent.stop(t.id) }
             Button("取消", role: .cancel) {}

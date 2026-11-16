@@ -44,27 +44,22 @@ struct RootView: View {
                 }
                 if appModel.axisSelected {
                     ToolHeaderBar(icon: "cpu", title: "本地模型", subtitle: "管理本机 axis-model 服务：安装、启停与模型切换。")
-                    Divider()
                     AxisModelView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.claudeMdSelected {
                     ToolHeaderBar(icon: "doc.text", title: "全局指令", subtitle: "编辑 Antigravity (GEMINI.md)、Claude Code 与 Codex 的全局指令。")
-                    Divider()
                     ClaudeMdView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.skillsSelected {
                     ToolHeaderBar(icon: "wand.and.stars", title: "Skills", subtitle: "浏览与编辑 Antigravity、Claude Code 与 Codex 的 Skills。")
-                    Divider()
                     SkillsView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.labSelected {
                     ToolHeaderBar(icon: "waveform.path.ecg", title: "系统监控", subtitle: "本机资源、Token 用量与活跃 PTY 进程。")
-                    Divider()
                     LabView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.tunnelsSelected {
                     ToolHeaderBar(icon: "network.badge.shield.half.filled", title: "隧道", subtitle: "SSH 反向端口转发与临时公网地址，断线自动重连。")
-                    Divider()
                     TunnelsView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.worklistSelected {
@@ -78,7 +73,6 @@ struct RootView: View {
                 } else if appModel.superagentSelected {
                     ToolHeaderBar(icon: "person.crop.rectangle.stack", title: "主管",
                                   subtitle: "在主管终端里用自然语言提需求；这里列出工单、问题和规则。")
-                    Divider()
                     SuperagentPanel()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if appModel.groupNoteSelected, let gid = appModel.groupNoteID {
@@ -86,10 +80,8 @@ struct RootView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ActiveTerminalHeader(connection: appModel.selectedConnection)
-                    Divider()
                     if let conn = appModel.selectedConnection, let ticket = appModel.ticket(for: conn) {
                         TicketBar(view: ticket)
-                        Divider()
                     }
                     TerminalAreaView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -161,7 +153,9 @@ private struct SidebarDivider: View {
     let maxWidth: Double
 
     var body: some View {
-        Divider()
+        Rectangle()
+            .fill(Theme.border)
+            .frame(width: 1)
             .overlay(
                 Rectangle()
                     .fill(Color.clear)
@@ -182,7 +176,7 @@ private struct SidebarDivider: View {
                             }
                     )
             )
-            .accessibilityHidden(true) // decorative drag handle
+            .accessibilityHidden(true)
     }
 }
 
@@ -198,11 +192,15 @@ private struct ActiveTerminalHeader: View {
     @State private var gridHideTask: Task<Void, Never>?
 
     var body: some View {
-        HStack(spacing: Theme.Space.md) {
+        HStack(alignment: .center, spacing: 10) {
             Button { appModel.toggleSidebar() } label: {
                 Image(systemName: "sidebar.left")
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 26, height: 26)
+                    .contentShape(RoundedRectangle(cornerRadius: 5))
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .help(appModel.sidebarCollapsed ? "显示侧栏 (⌘\\)" : "隐藏侧栏 (⌘\\)")
             .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
 
@@ -299,10 +297,11 @@ private struct ActiveTerminalHeader: View {
             AppearanceMenuButton()
         }
         .controlSize(.small)
-        .padding(.horizontal, Theme.Space.lg)
-        .frame(height: 38)
+        .padding(.horizontal, 16)
+        .frame(height: 44)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.canvas)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
         .onChange(of: gridText) { _, new in
             guard new != nil else { showGrid = false; return }
             withAnimation(.easeInOut(duration: 0.15)) { showGrid = true }
@@ -460,60 +459,86 @@ private struct ErrorBanner: View {
     }
 }
 
-/// Header for a tool pane (模型 / 规则 / Skills / 实验室 / 隧道): sidebar toggle, accent icon and
-/// title, and one line underneath saying what the pane is for.
+/// Unified 44pt single-row header bar for all tool/settings/detail panes — shares the exact Y=44pt
+/// bottom hairline and vertical center axis with `SidebarHeader` and `ActiveTerminalHeader`.
 struct ToolHeaderBar<Leading: View, Trailing: View>: View {
     @Environment(AppModel.self) private var appModel
     let icon: String
     let title: String
     let subtitle: String
-    /// Between the sidebar toggle and the title (e.g. a「‹ 我的清单」back button on a task card).
+    let hasLeading: Bool
     @ViewBuilder let leading: () -> Leading
-    /// Right-aligned controls (search, a prominent「+ 任务」).
     @ViewBuilder let trailing: () -> Trailing
 
     init(icon: String, title: String, subtitle: String,
          @ViewBuilder leading: @escaping () -> Leading = { EmptyView() },
          @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }) {
-        self.icon = icon; self.title = title; self.subtitle = subtitle
-        self.leading = leading; self.trailing = trailing
+        self.icon = icon
+        self.title = title
+        self.subtitle = subtitle
+        self.hasLeading = Leading.self != EmptyView.self
+        self.leading = leading
+        self.trailing = trailing
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: Theme.Space.md) {
+        HStack(alignment: .center, spacing: 10) {
             Button { appModel.toggleSidebar() } label: {
                 Image(systemName: "sidebar.left")
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 26, height: 26)
+                    .contentShape(RoundedRectangle(cornerRadius: 5))
             }
-            .buttonStyle(.borderless)
-            .help(appModel.sidebarCollapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)")
+            .buttonStyle(.plain)
+            .help(appModel.sidebarCollapsed ? "显示侧栏 (⌘\\)" : "隐藏侧栏 (⌘\\)")
             .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
-            .padding(.top, 2)
 
-            leading()
-                .buttonStyle(.borderless)
-                .padding(.top, 2)
+            if hasLeading {
+                leading()
+                    .buttonStyle(.plain)
+                Rectangle()
+                    .fill(Theme.border)
+                    .frame(width: 1, height: 14)
+                    .accessibilityHidden(true)
+            }
 
-            VStack(alignment: .leading, spacing: Theme.Space.xxs) {
-                HStack(spacing: Theme.Space.sm) {
-                    Image(systemName: icon).foregroundStyle(Theme.brand)
-                    Text(title).font(Theme.Font.headerTitle).lineLimit(1)
-                }
+            HStack(alignment: .center, spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.brand)
+                Text(title)
+                    .font(Theme.Font.headerTitle)
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+
+            if !subtitle.isEmpty {
+                Text("·")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                    .accessibilityHidden(true)
                 Text(subtitle)
                     .font(Theme.Font.headerMeta)
                     .foregroundStyle(Theme.textTertiary)
                     .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            Spacer()
-            HStack(spacing: Theme.Space.sm) {
+
+            Spacer(minLength: 8)
+
+            HStack(alignment: .center, spacing: Theme.Space.sm) {
                 trailing()
                 AppearanceMenuButton()
             }
             .controlSize(.small)
         }
-        .padding(.horizontal, Theme.Space.lg)
-        .padding(.vertical, Theme.Space.md)
+        .padding(.horizontal, 16)
+        .frame(height: 44)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.canvas)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 }
 

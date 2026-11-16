@@ -53,9 +53,10 @@ struct SuperagentPanel: View {
                     }
                 }
             }
-            .padding(Theme.Space.xxl)
-            .frame(maxWidth: 760, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 32)
+            .padding(.vertical, 24)
+            .frame(maxWidth: 860, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
         .background(Theme.canvas)
     }
@@ -106,10 +107,11 @@ struct RouterCard: View {
                     .accessibilityLabel("执行与主管 Agent")
             }
 
-            HStack(spacing: Theme.Space.sm) {
+            HStack(alignment: .center, spacing: Theme.Space.sm) {
                 Text("默认目录").font(.caption).foregroundStyle(Theme.textTertiary)
                 Text(tilde(dir)).font(.caption.monospaced()).foregroundStyle(Theme.textSecondary)
                     .lineLimit(1).truncationMode(.head).help(dir)
+                Spacer(minLength: 0)
                 Button("更换…") {
                     if let path = pickFolder(from: dir, message: "主管终端的起始目录，也是新工单的默认目录") {
                         dir = path
@@ -118,7 +120,6 @@ struct RouterCard: View {
                 }
                 .controlSize(.small)
                 .help(session == nil ? "主管终端的起始目录，也是新工单的默认目录" : "主管下次启动时生效")
-                Spacer(minLength: 0)
             }
         }
         .saCard()
@@ -948,14 +949,15 @@ private struct SettingRow<Control: View>: View {
     @ViewBuilder let control: () -> Control
 
     var body: some View {
-        HStack(spacing: Theme.Space.md) {
-            VStack(alignment: .leading, spacing: 1) {
+        HStack(alignment: .center, spacing: Theme.Space.md) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.callout)
                 if let note { Text(note).font(.caption).foregroundStyle(Theme.textTertiary) }
             }
             Spacer(minLength: Theme.Space.md)
             control()
         }
+        .padding(.vertical, 2)
     }
 }
 

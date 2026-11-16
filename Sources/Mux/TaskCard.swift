@@ -56,8 +56,8 @@ struct TaskCard: View {
             }
             .padding(.horizontal, 32)
             .padding(.vertical, 24)
-            .frame(maxWidth: 780, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: 920, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
         .onAppear { events = sa.taskEvents(view.id) }
         .onChange(of: view) { _, new in
@@ -127,7 +127,7 @@ struct TaskCard: View {
                 Text(meta)
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.textTertiary)
-                    .padding(.vertical, 4)
+                    .frame(minHeight: 26)
                     .help(view.task.scope)
                     .accessibilityLabel("元信息：\(meta)")
                 if hasChips { metaChips }
@@ -166,10 +166,19 @@ struct TaskCard: View {
     private var titleText: some View {
         let t = view.task
         let tag = view.stateTag
-        return HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(t.label).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.textTertiary)
-            Text(t.title).font(.system(size: 20, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-                .lineLimit(2).textSelection(.enabled).help(t.title)
+        return HStack(alignment: .center, spacing: 10) {
+            Text(t.label)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(Theme.textTertiary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 4))
+            Text(t.title)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(2)
+                .textSelection(.enabled)
+                .help(t.title)
             StateTag(text: tag.text, tint: tag.tint)
         }
     }
@@ -309,18 +318,23 @@ struct TaskCard: View {
         .saCard(padding: 0)
     }
 
-    /// 一直在的「加一项」：回车加进去，焦点留在这里接着加。
+    /// 一直在的「加一项」：与 `ItemRow` 共享完全相同的「16pt 序号列 + 10pt + 20pt 勾选框列 + 10pt + 文本列」网格，保证纵向像素级对齐。
     private var addField: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "plus").font(.system(size: 13)).foregroundStyle(Theme.Colors.pewter).frame(width: 20)
+        HStack(alignment: .center, spacing: 10) {
+            Color.clear.frame(width: 16, height: 1).accessibilityHidden(true)
+            Image(systemName: "plus")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.Colors.pewter)
+                .frame(width: 20, height: 20)
                 .accessibilityHidden(true)
             TextField("加一项，回车确认", text: $newItem)
-                .textFieldStyle(.plain).font(.system(size: 14))
+                .textFieldStyle(.plain)
+                .font(.system(size: 14))
                 .focused($newItemFocused)
                 .onSubmit(addItem)
                 .accessibilityLabel("加一项")
         }
-        .padding(.vertical, 14)
+        .padding(.vertical, 12)
     }
 
     private func shownStatus(_ item: Item) -> ItemStatus {
@@ -437,7 +451,7 @@ struct StageStepper: View {
     }
 
     var body: some View {
-        HStack(spacing: Theme.Space.md) {
+        HStack(alignment: .center, spacing: Theme.Space.md) {
             ForEach(Array(stages.enumerated()), id: \.offset) { i, s in
                 if i > 0 {
                     Text("›").font(.system(size: 13)).foregroundStyle(Theme.Colors.pewter).accessibilityHidden(true)
@@ -445,7 +459,7 @@ struct StageStepper: View {
                 segment(s.name, Self.tone(i, current: current))
             }
         }
-        .frame(height: 24)
+        .frame(height: 26)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("阶段：" + stages.enumerated().map { $0.offset == current ? "\($0.element.name)（当前）" : $0.element.name }.joined(separator: "，"))
     }
@@ -455,7 +469,7 @@ struct StageStepper: View {
             .font(.system(size: 13, weight: tone == .current ? .semibold : .regular))
             .foregroundStyle(tone == .current ? Theme.brand : tone == .past ? Theme.textTertiary : Theme.Colors.pewter)
             .lineLimit(1)
-            .padding(.bottom, 4)
+            .frame(height: 26)
             .overlay(alignment: .bottom) { if tone == .current { Theme.brand.frame(height: 2) } }
     }
 }
@@ -733,13 +747,31 @@ struct FlowLayout: Layout {
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX, y = bounds.minY, rowHeight: CGFloat = 0
+        var rows: [[(subview: LayoutSubview, size: CGSize)]] = []
+        var currentRow: [(subview: LayoutSubview, size: CGSize)] = []
+        var x = bounds.minX
         for s in subviews {
             let size = s.sizeThatFits(.unspecified)
-            if x > bounds.minX, x + size.width > bounds.maxX { x = bounds.minX; y += rowHeight + spacing; rowHeight = 0 }
-            s.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            if !currentRow.isEmpty, x + size.width > bounds.maxX {
+                rows.append(currentRow)
+                currentRow = []
+                x = bounds.minX
+            }
+            currentRow.append((s, size))
             x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
+        }
+        if !currentRow.isEmpty { rows.append(currentRow) }
+
+        var y = bounds.minY
+        for row in rows {
+            let rowHeight = row.map(\.size.height).max() ?? 0
+            var rowX = bounds.minX
+            for item in row {
+                let centeredY = y + (rowHeight - item.size.height) * 0.5
+                item.subview.place(at: CGPoint(x: rowX, y: centeredY), proposal: ProposedViewSize(item.size))
+                rowX += item.size.width + spacing
+            }
+            y += rowHeight + spacing
         }
     }
 }
