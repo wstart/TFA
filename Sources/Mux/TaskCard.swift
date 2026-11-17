@@ -25,6 +25,8 @@ struct TaskCard: View {
     @State private var events: [TimelineEvent] = []
     @State private var newItem = ""
     @State private var editing: Item?
+    @State private var editingSummaryItem: Item?
+    @State private var expandedOrds: Set<Int> = []
     @State private var removing: Item?
     @State private var confirmCancel = false
     @State private var confirmDrop = false
@@ -79,6 +81,7 @@ struct TaskCard: View {
             if !newItem.isEmpty { newItem = "" } else { appModel.openWorklist() }
         }
         .sheet(item: $editing) { ItemTextSheet(taskID: view.id, item: $0).environment(appModel) }
+        .sheet(item: $editingSummaryItem) { ItemSummarySheet(taskID: view.id, item: $0).environment(appModel) }
         .alert("删除第 \(removing?.ord ?? 0) 项？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
             Button("删除", role: .destructive) { if let i = removing { sa.removeItem(view.id, ord: i.ord) } }
             Button("取消", role: .cancel) {}
@@ -385,9 +388,37 @@ struct TaskCard: View {
             VStack(spacing: 0) {
                 ForEach(Array(view.items.enumerated()), id: \.element.id) { idx, item in
                     if idx > 0 { Hairline() }
-                    ItemRow(view: view, item: item, status: shownStatus(item), editable: editable,
-                            toggle: { toggle(item) }, edit: { editing = item }, remove: { removing = item })
+                    let expanded = expandedOrds.contains(item.ord)
+                    let summary = Self.effectiveItemSummary(item: item, in: view)
+                    ItemRow(
+                        view: view,
+                        item: item,
+                        status: shownStatus(item),
+                        summary: summary,
+                        expanded: expanded,
+                        editable: editable,
+                        toggle: { toggle(item) },
+                        toggleExpand: {
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                if expanded { expandedOrds.remove(item.ord) } else { expandedOrds.insert(item.ord) }
+                            }
+                        },
+                        editSummary: { editingSummaryItem = item },
+                        edit: { editing = item },
+                        remove: { removing = item }
+                    )
+                    .padding(.horizontal, 18)
+
+                    if expanded {
+                        ItemSummaryDrawer(
+                            view: view,
+                            item: item,
+                            summary: summary,
+                            editSummary: { editingSummaryItem = item }
+                        )
                         .padding(.horizontal, 18)
+                        .padding(.bottom, 12)
+                    }
                 }
                 if editable {
                     if !view.items.isEmpty { Hairline() }
@@ -514,6 +545,16 @@ struct TaskCard: View {
         let d = Date(timeIntervalSince1970: at)
         return (Calendar.current.isDateInToday(d) ? clock : dated).string(from: d)
     }
+
+    static func effectiveItemSummary(item: Item, in view: TaskView) -> String {
+        let saved = item.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !saved.isEmpty { return saved }
+        if let tid = item.ticketID, let tv = view.ticket(tid) {
+            let report = tv.ticket.reportSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !report.isEmpty { return report }
+        }
+        return ""
+    }
 }
 
 // MARK: - 阶段步进（F-08；设计评审 2026-11-08，6A）
@@ -564,10 +605,18 @@ private struct ItemRow: View {
     let item: Item
     /// 乐观更新后显示的状态。
     let status: ItemStatus
+    let summary: String
+    let expanded: Bool
     let editable: Bool
     let toggle: () -> Void
+    let toggleExpand: () -> Void
+    let editSummary: () -> Void
     let edit: () -> Void
     let remove: () -> Void
+
+    private var canExpand: Bool {
+        !summary.isEmpty || item.ticketID != nil || status == .done || !view.task.isOpen
+    }
 
     var body: some View {
         var shown = item
@@ -580,14 +629,23 @@ private struct ItemRow: View {
                 .foregroundStyle(Theme.textTertiary)
                 .frame(width: 16, alignment: .trailing)
             checkbox
-            Text(item.text)
-                .font(.system(size: 14))
-                .foregroundStyle(status == .done ? Theme.textTertiary : Theme.textPrimary)
-                .strikethrough(status == .done, color: Theme.Colors.mist)
-                .lineLimit(2)
-                .help(item.text)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.text)
+                    .font(.system(size: 14))
+                    .foregroundStyle(status == .done ? Theme.textSecondary : Theme.textPrimary)
+                    .strikethrough(status == .done, color: Theme.Colors.mist)
+                    .lineLimit(2)
+                    .help(item.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !expanded, !summary.isEmpty {
+                    Text(summary.replacingOccurrences(of: "\n", with: " "))
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 6) {
                 if handback == nil {
@@ -601,7 +659,7 @@ private struct ItemRow: View {
                             .frame(height: 22)
                             .background(Theme.chrome, in: RoundedRectangle(cornerRadius: 5))
                             .overlay(RoundedRectangle(cornerRadius: 5).stroke(Theme.border, lineWidth: 1))
-                            .help("前往工单 #\(id) 的终端")
+                            .help("打开工单 #\(id)（终端在线时跳终端，终端已结束时打开归档摘要）")
                     }
                     if status != .done, view.task.isOpen, item.assignee.role != nil {
                         Button {
@@ -638,13 +696,38 @@ private struct ItemRow: View {
                         .font(.system(size: 11, weight: word.attention ? .semibold : .regular))
                         .foregroundStyle(word.attention ? Theme.Status.attention : Theme.textTertiary)
                 }
+                if canExpand {
+                    Button(action: toggleExpand) {
+                        HStack(spacing: 3) {
+                            Text(summary.isEmpty ? "详情" : "摘要")
+                                .font(.system(size: 11))
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 8, weight: .semibold))
+                                .rotationEffect(.degrees(expanded ? 90 : 0))
+                        }
+                        .foregroundStyle(expanded ? Theme.textPrimary : Theme.textTertiary)
+                        .padding(.horizontal, 6)
+                        .frame(height: 22)
+                        .background(expanded ? Theme.surface2 : Color.clear, in: RoundedRectangle(cornerRadius: 5))
+                    }
+                    .buttonStyle(.plain)
+                    .help(expanded ? "收起本项摘要" : "展开查看本项保存的执行摘要与记录")
+                }
             }
             .fixedSize()
         }
         .padding(.vertical, 12)
         .contentShape(Rectangle())
+        .onTapGesture {
+            if canExpand { toggleExpand() }
+        }
         .contextMenu {
+            if canExpand {
+                Button(expanded ? "收起本项摘要" : "查看本项摘要", action: toggleExpand)
+            }
+            Button("编辑本项摘要…", action: editSummary)
             if editable {
+                Divider()
                 if status != .done, item.assignee.role != nil, handback == nil {
                     Button("重试此项") { retryItem() }
                     Divider()

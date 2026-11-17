@@ -854,3 +854,360 @@ struct KnowledgeLinkPicker: View {
             }
     }
 }
+
+// MARK: - 清单项内嵌展开摘要抽屉 + 编辑弹窗 + 工单持久化归档弹窗
+
+struct ItemSummaryDrawer: View {
+    @Environment(AppModel.self) private var appModel
+    let view: TaskView
+    let item: Item
+    let summary: String
+    let editSummary: () -> Void
+
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f
+    }()
+
+    var body: some View {
+        let ticketView = item.ticketID.flatMap { view.ticket($0) }
+        let reviews = item.ticketID.map { tid in
+            view.tickets.filter { $0.ticket.reviewOf == tid && !$0.ticket.reportSummary.isEmpty }
+        } ?? []
+        let sessionName = ticketView?.ticket.session ?? ""
+        let liveSession = appModel.hasLiveLocalTmuxSession(sessionName)
+        let isStanding = ticketView.map { appModel.superagent.role(for: $0.ticket).standing } ?? false
+
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 8) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textTertiary)
+                if let doneBy = item.doneBy, !doneBy.isEmpty {
+                    Text("由「\(doneBy)」完成")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Theme.textSecondary)
+                } else {
+                    Text("执行记录")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                if let doneAt = item.doneAt {
+                    Text("· \(Self.dateFmt.string(from: Date(timeIntervalSince1970: doneAt)))")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                }
+                if let tv = ticketView, !tv.ticket.isOpen, !liveSession {
+                    Text("· 终端已关闭，摘要已归档")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                }
+
+                Spacer(minLength: 8)
+
+                if let tv = ticketView {
+                    if !tv.ticket.branch.isEmpty {
+                        Button("看改动") {
+                            appModel.showTaskDiff(task: view.id, ticket: tv.id)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+                    if let rp = tv.ticket.reportPath, !rp.isEmpty, FileManager.default.fileExists(atPath: rp) {
+                        Button("打开报告") {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: rp))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+                    Button("工单 #\(tv.id) 归档…") {
+                        appModel.inspectingTicket = .init(ticketID: tv.id)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+
+                    if liveSession && (tv.ticket.isOpen || !isStanding) {
+                        Button("打开终端") {
+                            appModel.goToTicket(tv.id, forceTerminal: true)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+                }
+
+                Button("编辑摘要…", action: editSummary)
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+            }
+
+            if let ack = ticketView?.ticket.ack, !ack.isEmpty {
+                Text("目标确认：\(ack)")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                    .textSelection(.enabled)
+            }
+
+            if !summary.isEmpty {
+                Text(summary)
+                    .font(.system(size: 13))
+                    .lineSpacing(4)
+                    .foregroundStyle(Theme.textPrimary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(item.assignee == .you
+                     ? "这项由你手动勾选完成，还没有填写备注；可点右上角「编辑摘要…」记录处理结果。"
+                     : "这项暂无保存的文字摘要；可点「工单归档…」查看消息与时间线，或手动补记摘要。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+
+            if let lastReview = reviews.last {
+                Hairline()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("评审工单 #\(lastReview.id) 核对结论")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.textTertiary)
+                    Text(lastReview.ticket.reportSummary)
+                        .font(.system(size: 12))
+                        .lineSpacing(3)
+                        .foregroundStyle(Theme.textSecondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(12)
+        .padding(.leading, 26)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface2.opacity(0.55), in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+    }
+}
+
+struct ItemSummarySheet: View {
+    @Environment(AppModel.self) private var appModel
+    @Environment(\.dismiss) private var dismiss
+    let taskID: Int64
+    let item: Item
+
+    @State private var text = ""
+
+    var body: some View {
+        let sa = appModel.superagent
+        VStack(alignment: .leading, spacing: Theme.Space.lg) {
+            Text("第 \(item.ord) 项摘要 · A-\(taskID)")
+                .font(Theme.Font.headerTitle)
+            Text(item.text)
+                .font(.callout)
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(2)
+            TextEditor(text: $text)
+                .editorBox()
+                .frame(minHeight: 160)
+            SheetButtons(
+                error: nil,
+                confirm: "保存摘要",
+                enabled: true,
+                shortcut: KeyboardShortcut(.return, modifiers: .command)
+            ) {
+                sa.editItemSummary(taskID, ord: item.ord, summary: text)
+                dismiss()
+            }
+        }
+        .padding(Theme.Space.xl)
+        .frame(width: 520)
+        .onAppear {
+            if !item.summary.isEmpty {
+                text = item.summary
+            } else if let tv = sa.task(taskID) {
+                text = TaskCard.effectiveItemSummary(item: item, in: tv)
+            }
+        }
+    }
+}
+
+struct TicketArchiveSheet: View {
+    @Environment(AppModel.self) private var appModel
+    @Environment(\.dismiss) private var dismiss
+    let ticketID: Int64
+
+    @State private var showTerminalSnapshot = false
+
+    private static let timeFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm:ss"
+        return f
+    }()
+
+    var body: some View {
+        let sa = appModel.superagent
+        let ticketView = sa.views.first(where: { $0.id == ticketID }) ?? (try? sa.engine?.view(ticketID))
+        let inputs = sa.inputs(ticketID)
+        let events = sa.events(ticketID)
+        let archive = (try? sa.engine?.store.ticketArchive(ticketID)) ?? nil
+
+        VStack(alignment: .leading, spacing: Theme.Space.lg) {
+            if let tv = ticketView {
+                let t = tv.ticket
+                let liveSession = appModel.hasLiveLocalTmuxSession(t.session)
+
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Text("工单 #\(t.id)")
+                                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Theme.textSecondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 4))
+                            Text(t.title)
+                                .font(Theme.Font.headerTitle)
+                                .foregroundStyle(Theme.textPrimary)
+                                .lineLimit(2)
+                        }
+                        HStack(spacing: 8) {
+                            Text("角色：\(t.role)")
+                            Text("· 状态：\(tv.stage.label)")
+                            if let taskID = t.taskID {
+                                Button("所属任务 A-\(taskID)") {
+                                    dismiss()
+                                    appModel.openWorklist(task: taskID)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                            if !t.branch.isEmpty {
+                                Text("· 分支 \(t.branch)").font(.caption.monospaced())
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                    }
+                    Spacer(minLength: 8)
+                    if let rp = t.reportPath, !rp.isEmpty, FileManager.default.fileExists(atPath: rp) {
+                        Button("打开报告附件") {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: rp))
+                        }
+                        .controlSize(.small)
+                    }
+                    if liveSession {
+                        Button("打开终端（\(t.session)）") {
+                            let id = t.id
+                            dismiss()
+                            appModel.goToTicket(id, forceTerminal: true)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    } else {
+                        Text("终端会话已关闭 · 已归档")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                            .padding(.top, 4)
+                    }
+                }
+
+                Hairline()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if !t.ack.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("开工确认").font(.caption.weight(.semibold)).foregroundStyle(Theme.textTertiary)
+                                Text(t.ack)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Theme.textPrimary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("保存的执行摘要 / 最终回报").font(.caption.weight(.semibold)).foregroundStyle(Theme.textTertiary)
+                            Text(t.reportSummary.isEmpty ? "（该工单未留下文字回报摘要）" : t.reportSummary)
+                                .font(.system(size: 13))
+                                .lineSpacing(4)
+                                .foregroundStyle(t.reportSummary.isEmpty ? Theme.textTertiary : Theme.textPrimary)
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+                                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
+                                .textSelection(.enabled)
+                        }
+
+                        if !inputs.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("往来消息（\(inputs.count) 条）").font(.caption.weight(.semibold)).foregroundStyle(Theme.textTertiary)
+                                ForEach(inputs, id: \.id) { msg in
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text("\(msg.kind == .human ? "你" : "TFA 系统") · \(Self.timeFmt.string(from: Date(timeIntervalSince1970: msg.createdAt)))")
+                                            .font(.caption2)
+                                            .foregroundStyle(Theme.textTertiary)
+                                        Text(msg.text)
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(Theme.textSecondary)
+                                            .textSelection(.enabled)
+                                    }
+                                    .padding(8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Theme.surface2.opacity(0.45), in: RoundedRectangle(cornerRadius: 6))
+                                }
+                            }
+                        }
+
+                        if let archive, !archive.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Button {
+                                    showTerminalSnapshot.toggle()
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 9, weight: .semibold))
+                                            .rotationEffect(.degrees(showTerminalSnapshot ? 90 : 0))
+                                        Text("归档终端输出快照")
+                                            .font(.caption.weight(.semibold))
+                                    }
+                                    .foregroundStyle(Theme.textSecondary)
+                                }
+                                .buttonStyle(.plain)
+
+                                if showTerminalSnapshot {
+                                    Text(archive)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(Theme.textSecondary)
+                                        .padding(10)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 6))
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+
+                        if !events.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("执行时间线（\(events.count) 条）").font(.caption.weight(.semibold)).foregroundStyle(Theme.textTertiary)
+                                ForEach(events.prefix(25), id: \.id) { ev in
+                                    Text("\(Self.timeFmt.string(from: Date(timeIntervalSince1970: ev.at)))  [\(ev.kind)]  \(ev.text)")
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(Theme.textTertiary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 420)
+            } else {
+                Text("找不到工单 #\(ticketID) 的记录。")
+                    .foregroundStyle(Theme.textTertiary)
+            }
+
+            HStack {
+                Spacer()
+                Button("关闭") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(Theme.Space.xl)
+        .frame(width: 640)
+    }
+}

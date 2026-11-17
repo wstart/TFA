@@ -106,10 +106,39 @@ extension AppModel {
         superagent.terminalEvent(session: name, title: conn.title, what: what, repo: repo)
     }
 
-    /// 跳到工单的执行终端。
-    func goToTicket(_ id: Int64) {
-        guard let v = superagent.views.first(where: { $0.id == id }), !v.ticket.session.isEmpty else { return }
-        if localConnection(named: v.ticket.session) == nil { adoptSuperagentSession(v.ticket.session, isRouter: false) }
-        if let conn = localConnection(named: v.ticket.session) { activateTerminal(conn.id) }
+    /// 判断某个本地 tmux 会话此刻是否真实在线（避免对已结束关闭的工单会话做 `attachOnly` 导致报错「打不开」）。
+    func hasLiveLocalTmuxSession(_ sessionName: String) -> Bool {
+        guard !sessionName.isEmpty else { return false }
+        if let conn = localConnection(named: sessionName), conn.state.connected { return true }
+        return TmuxServer.listLocalSessions().contains(sessionName)
+    }
+
+    /// 跳到工单的执行终端；若工单已结束且原终端会话已关闭（或常驻角色终端已转去做别的单），自动弹出「工单执行摘要与归档记录」弹窗，保证永远打得开。
+    func goToTicket(_ id: Int64, forceTerminal: Bool = false) {
+        let resolved = superagent.views.first(where: { $0.id == id }) ?? (try? superagent.engine?.view(id))
+        guard let v = resolved else { return }
+        let session = v.ticket.session
+        let role = superagent.role(for: v.ticket)
+        let sessionAlive = hasLiveLocalTmuxSession(session)
+
+        if !forceTerminal {
+            // 1. 终端没开过，或 tmux 会话已经关闭 → 打开持久化的归档摘要弹窗
+            if session.isEmpty || !sessionAlive {
+                inspectingTicket = TicketArchiveRequest(ticketID: id)
+                return
+            }
+            // 2. 常驻角色（如「助理」「评审」）的已结束工单：终端可能已接着跑别的单，优先打开这张工单自己的归档摘要（弹窗内仍可一键跳去常驻终端）
+            if !v.ticket.isOpen && role.standing {
+                inspectingTicket = TicketArchiveRequest(ticketID: id)
+                return
+            }
+        }
+
+        guard !session.isEmpty, sessionAlive else {
+            inspectingTicket = TicketArchiveRequest(ticketID: id)
+            return
+        }
+        if localConnection(named: session) == nil { adoptSuperagentSession(session, isRouter: false) }
+        if let conn = localConnection(named: session) { activateTerminal(conn.id) }
     }
 }

@@ -120,6 +120,10 @@ struct RootView: View {
             TaskRejectSheet(request: req)
                 .environment(appModel)
         }
+        .sheet(item: $model.inspectingTicket) { req in
+            TicketArchiveSheet(ticketID: req.ticketID)
+                .environment(appModel)
+        }
         .sheet(isPresented: $model.isShowingNewSession) {
             NewSessionSheet()
                 .environment(appModel)

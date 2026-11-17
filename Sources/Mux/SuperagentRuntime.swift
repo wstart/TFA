@@ -138,6 +138,7 @@ final class SuperagentRuntime {
             return
         }
         migrateTasks()
+        _ = try? engine?.backfillItemSummaries()
         reader = (try? SuperagentStore(url: engine!.store.url)).map { SuperagentEngine(store: $0) }
         reload()
         if installTools { installSupport() }

@@ -388,7 +388,7 @@ extension SuperagentEngine {
     }
 
     /// 人手动勾 / 取消勾自己的项（Agent 的项只读，由回报推进）。勾完同一事务里 `advanceIfComplete`（注意事项 C-04）。
-    public func setItemDone(_ taskID: Int64, ord: Int, done: Bool = true, by: String = "你") throws {
+    public func setItemDone(_ taskID: Int64, ord: Int, done: Bool = true, summary: String? = nil, by: String = "你") throws {
         try store.transaction {
             var t = try requireTask(taskID)
             try requireNotCancelled(t)
@@ -404,6 +404,9 @@ extension SuperagentEngine {
             guard (i.status == .done) != done else { return }
             if done {
                 i.status = .done; i.doneAt = at; i.doneBy = by
+                if let s = summary?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
+                    i.summary = String(s.prefix(Item.maxSummary))
+                }
             } else {
                 i.status = .todo; i.doneAt = nil; i.doneBy = nil
                 i.startedAt = i.assignee == .you ? at : nil // 取消勾 = 还是你在做，2 天的计时从现在重新算
@@ -653,9 +656,13 @@ extension SuperagentEngine {
                 if i.ticketID != t.id {
                     try store.log(t.id, "item", "第 \(ord) 项已不归工单 #\(t.id)（改派或退回），这次回报不改它", at: at, task: taskID) // C-07
                 } else if i.status != .done {
-                    try finish(i, by: t.role, at: at)
+                    try finish(i, by: t.role, summary: r.summary, at: at)
                     finished.append(ord)
                     try store.log(t.id, "item", "工单 #\(t.id)（\(t.role)）完成第 \(ord) 项：\(summary)", at: at, task: taskID)
+                } else if !r.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    var updated = i
+                    updated.summary = String(r.summary.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Item.maxSummary))
+                    try store.saveItem(updated)
                 }
             }
             // 其余没做完的项：还在做 = 工作中（没 ack 就回报也算开始了）；带问题 = 等人，受阻。
@@ -683,8 +690,12 @@ extension SuperagentEngine {
                         try store.log(t.id, "item", "第 \(i.ord) 项已不归工单 #\(t.id)（改派或退回），这次回报不改它", at: at, task: taskID) // C-07
                     }
                 } else if i.status != .done {
-                    try finish(i, by: t.role, at: at)
+                    try finish(i, by: t.role, summary: r.summary, at: at)
                     finished.append(i.ord)
+                } else if i.summary.isEmpty, !r.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    var updated = i
+                    updated.summary = String(r.summary.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Item.maxSummary))
+                    try store.saveItem(updated)
                 }
             }
             if t.reviewOf != nil {
@@ -866,7 +877,9 @@ extension SuperagentEngine {
             guard var a = try store.task(link.fromTaskID), a.status == .open,
                   var i = try store.items(a.id).first(where: { $0.ord == link.itemOrd && $0.status != .done && $0.ticketID == nil }) else { continue }
             if b.status == .done {
-                try finish(i, by: b.label, at: at)
+                let childKB = try store.knowledgeEntry(taskID: b.id)?.tldr ?? b.resultSummary
+                let subSummary = "由衍生任务 \(b.label)「\(b.title)」完成" + (childKB.isEmpty ? "" : "：\n\(childKB)")
+                try finish(i, by: b.label, summary: subSummary, at: at)
                 try store.log(nil, "item", "第 \(i.ord) 项由 \(b.label) 完成：\(i.text)", at: at, task: a.id)
                 try advanceIfComplete(a.id, at: at)
             } else {
@@ -1152,13 +1165,33 @@ extension SuperagentEngine {
         SuperagentError("任务 \(t.label) 没有第 \(ord) 项（共 \(count) 项）")
     }
 
-    /// 清单项标 done（调用方在事务里）。
-    private func finish(_ item: Item, by: String, at: Double) throws {
+    /// 清单项标 done 并保存本项执行摘要（调用方在事务里）。
+    private func finish(_ item: Item, by: String, summary: String? = nil, at: Double) throws {
         var i = item
         i.status = .done
         i.doneAt = at
         i.doneBy = by
+        if let raw = summary?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            if i.summary.isEmpty {
+                i.summary = String(raw.prefix(Item.maxSummary))
+            } else if !i.summary.contains(raw) {
+                i.summary = String("\(i.summary)\n\n\(raw)".prefix(Item.maxSummary))
+            }
+        }
         try store.saveItem(i)
+    }
+
+    /// 手动编辑或补充某个清单项的执行摘要（已完成任务也可直接补记，不触发重开）。
+    public func editItemSummary(_ taskID: Int64, ord: Int, summary: String, by: String = "你") throws {
+        try store.transaction {
+            let t = try requireTask(taskID)
+            var i = try requireItem(t, ord)
+            let cleaned = String(summary.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Item.maxSummary))
+            guard i.summary != cleaned else { return }
+            i.summary = cleaned
+            try store.saveItem(i)
+            try store.log(nil, "item", "\(by)\(cleaned.isEmpty ? "清空" : "更新")了第 \(ord) 项摘要", at: now(), task: taskID)
+        }
     }
 
     /// 回到第一个 `doing`（打回 / 待评审时加项或重新分配）；阶段变了才记 timeline。通知键随阶段名变化，不用另清。

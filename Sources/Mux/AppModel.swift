@@ -54,9 +54,15 @@ final class AppModel {
         }
     }
 
+    struct TicketArchiveRequest: Identifiable, Equatable {
+        let ticketID: Int64
+        var id: Int64 { ticketID }
+    }
+
     var worklistTab: WorklistTab = .tasks
     var worklistFocusedKnowledgeID: Int64?
     var newTaskSeed: NewTaskSeed?
+    var inspectingTicket: TicketArchiveRequest?
     var worklistDiffTicketID: Int64?
     /// 设置子页当前的段（设计评审 2026-11-08，2A）；`openWorklistSettings` 不给段就保持上次的。
     var worklistSettingsSegment: WorklistSettingsSegment = .router

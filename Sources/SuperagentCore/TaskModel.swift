@@ -191,14 +191,18 @@ public struct Item: Equatable, Sendable, Identifiable {
     /// 开始做的时间：Agent 的项在 `todo → doing`（ack / 第一次回报）时写；你的项没有「开始」这一步，分给你的那一刻就算开始；
     /// 回到 `todo`（改派、放弃、取消勾）时清。清单页的「今天」视图据此把你名下做了超过 2 天还没勾的项提到前面（需求文档 §13）。
     public var startedAt: Double?
+    /// 本清单项完成时的持久化执行摘要（来自工单 `--item` / `ready` 回报、退回子任务结果或人的手动备注；任务完成后即使终端已关闭仍可随时展开查阅）。
+    public var summary: String
 
     public init(id: Int64, taskID: Int64, ord: Int, text: String, assignee: Assignee = .unassigned, status: ItemStatus = .todo,
-                ticketID: Int64? = nil, doneAt: Double? = nil, doneBy: String? = nil, startedAt: Double? = nil) {
+                ticketID: Int64? = nil, doneAt: Double? = nil, doneBy: String? = nil, startedAt: Double? = nil, summary: String = "") {
         self.id = id; self.taskID = taskID; self.ord = ord; self.text = text; self.assignee = assignee
-        self.status = status; self.ticketID = ticketID; self.doneAt = doneAt; self.doneBy = doneBy; self.startedAt = startedAt
+        self.status = status; self.ticketID = ticketID; self.doneAt = doneAt; self.doneBy = doneBy
+        self.startedAt = startedAt; self.summary = summary
     }
 
     public static let maxText = 200
+    public static let maxSummary = 4000
 
     /// 清单项的一行文字，三处同源（CLI、执行者的请求文本、界面；注意事项 E-04）：`3. 改为分段加锁，跑回归 ✓`。
     public var line: String {

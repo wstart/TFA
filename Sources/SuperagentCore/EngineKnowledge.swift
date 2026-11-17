@@ -146,7 +146,8 @@ extension SuperagentEngine {
     /// 一键补齐所有尚未入库的历史已完成任务总结。返回新生成的知识条目列表。
     @discardableResult
     public func backfillCompletedTasks(aiRefine: Bool = true, limit: Int = 100) throws -> [KnowledgeEntry] {
-        try store.transaction {
+        _ = try backfillItemSummaries()
+        return try store.transaction {
             let ids = try store.unindexedDoneTaskIDs(limit: limit)
             guard !ids.isEmpty else { return [] }
             let at = now()
@@ -164,6 +165,47 @@ extension SuperagentEngine {
                 made.append(e)
             }
             return made
+        }
+    }
+
+    /// 自动回填存量历史清单项的摘要（从已结束工单的 `reportSummary` 与任务时间线 `完成第 N 项：…` 中恢复，使老任务每一项都能点开看摘要）。
+    @discardableResult
+    public func backfillItemSummaries() throws -> Int {
+        try store.transaction {
+            let allTasks = try store.tasks(endedLimit: 500)
+            var updatedCount = 0
+            for t in allTasks {
+                let items = try store.items(t.id)
+                guard items.contains(where: { $0.summary.isEmpty && ($0.status == .done || $0.ticketID != nil) }) else { continue }
+                let events = try store.events(taskID: t.id, limit: 200)
+                let tickets = Dictionary(uniqueKeysWithValues: try store.tickets(task: t.id).map { ($0.id, $0) })
+
+                for var item in items where item.summary.isEmpty {
+                    var recovered = ""
+                    let marker = "完成第 \(item.ord) 项："
+                    if let ev = events.last(where: { $0.text.contains(marker) }),
+                       let range = ev.text.range(of: marker) {
+                        recovered = String(ev.text[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    if let tid = item.ticketID, let tk = tickets[tid], !tk.reportSummary.isEmpty {
+                        if recovered.isEmpty {
+                            recovered = tk.reportSummary
+                        } else if !tk.reportSummary.contains(recovered) && !recovered.contains(tk.reportSummary) {
+                            recovered = "\(recovered)\n\n【工单 #\(tid) 交付总结】\n\(tk.reportSummary)"
+                        }
+                    }
+                    if recovered.isEmpty, item.status == .done, items.count == 1, !t.resultSummary.isEmpty {
+                        recovered = t.resultSummary
+                    }
+                    let cleaned = String(recovered.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Item.maxSummary))
+                    if !cleaned.isEmpty {
+                        item.summary = cleaned
+                        try store.saveItem(item)
+                        updatedCount += 1
+                    }
+                }
+            }
+            return updatedCount
         }
     }
 
@@ -400,11 +442,17 @@ extension SuperagentEngine {
         let workerTickets = tickets.filter { $0.reviewOf == nil }
         let reviewTickets = tickets.filter { $0.reviewOf != nil && !$0.reportSummary.isEmpty }
 
-        // 1. 交付要点：优先取各交付工单的汇报，再补全手动勾选的清单项
+        // 1. 交付要点：优先取各清单项持久化的摘要与工单汇报，再补全手动勾选的清单项
         var outcomes: [String] = []
-        for tk in workerTickets where !tk.reportSummary.isEmpty {
-            let line = clip(tk.reportSummary, 220)
-            if !outcomes.contains(line) { outcomes.append("[\(tk.role) #\(tk.id)] \(line)") }
+        for item in items where item.status == .done && !item.summary.isEmpty {
+            let line = "第 \(item.ord) 项（\(clip(item.text, 40))）：\(clip(item.summary, 180))"
+            if !outcomes.contains(line) { outcomes.append(line) }
+        }
+        if outcomes.isEmpty {
+            for tk in workerTickets where !tk.reportSummary.isEmpty {
+                let line = clip(tk.reportSummary, 220)
+                if !outcomes.contains(line) { outcomes.append("[\(tk.role) #\(tk.id)] \(line)") }
+            }
         }
         for item in items where item.status == .done && item.assignee == .you {
             let line = "手动完成：\(item.text)"

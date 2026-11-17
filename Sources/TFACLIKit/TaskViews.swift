@@ -98,6 +98,13 @@ extension Views {
         }
         if let r = v.reviewSummary { s += "\n【评审结论】\(r)\n" }
         if !t.resultSummary.isEmpty { s += "\n【结果】\(t.resultSummary)\n" }
+        let itemsWithSummary = v.items.filter { !$0.summary.isEmpty }
+        if !t.isOpen, !itemsWithSummary.isEmpty {
+            s += "\n【清单各项摘要】\n"
+            for i in itemsWithSummary {
+                s += "- 第 \(i.ord) 项（\(i.text)）：\(clip(i.summary, 240))\n"
+            }
+        }
         if let kb = v.knowledge {
             s += "\n【任务总结（\(kb.kbLabel)\(kb.pinned ? " · 置顶" : "")）】\n\(kb.tldr)\n"
             if !kb.pitfalls.isEmpty {

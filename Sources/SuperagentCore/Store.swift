@@ -97,6 +97,8 @@ public final class SuperagentStore {
             """)
         // 第 4 期：清单项开始做的时间（「今天」视图把你名下拖了 2 天的项提到前面）。
         try addColumn("item", "started_at", "REAL")
+        // 第 6 版：每个清单项独立持久化完成摘要（任务完成后终端关闭仍可点开阅读）。
+        try addColumn("item", "summary", "TEXT NOT NULL DEFAULT ''")
         // 组织同步（第 3 期，需求文档 §10.3；注意事项 I-01 / I-02）：上行 outbox、组织任务的服务端版本、清单项 ↔ 服务端清单项。
         try db.exec("""
             CREATE TABLE IF NOT EXISTS outbox (
@@ -144,8 +146,8 @@ public final class SuperagentStore {
         }
     }
 
-    /// 表结构版本（注意事项 B-01）：1 = 工单 + 角色；2 = 工作清单；3 = 清单项的 started_at；4 = 组织同步；5 = 任务总结与项目知识库。
-    static let schemaVersion: Int64 = 5
+    /// 表结构版本（注意事项 B-01）：1 = 工单 + 角色；2 = 工作清单；3 = 清单项的 started_at；4 = 组织同步；5 = 任务总结与项目知识库；6 = 清单项独立摘要。
+    static let schemaVersion: Int64 = 6
 
     /// 加一列；已有就跳过。App 和 tfa 可能同时打开旧库：另一个连接先加上了也不算错。
     private func addColumn(_ table: String, _ name: String, _ decl: String) throws {
@@ -603,10 +605,10 @@ public final class SuperagentStore {
     private static func item(_ r: SQLRow) -> Item {
         Item(id: r.int(0), taskID: r.int(1), ord: Int(r.int(2)), text: r.text(3), assignee: Assignee(raw: r.text(4)),
              status: ItemStatus(rawValue: r.text(5)) ?? .todo, ticketID: r.optInt(6), doneAt: r.optDouble(7), doneBy: r.optText(8),
-             startedAt: r.optDouble(9))
+             startedAt: r.optDouble(9), summary: r.text(10))
     }
 
-    private static let itemColumns = "id,task_id,ord,text,assignee,status,ticket_id,done_at,done_by,started_at"
+    private static let itemColumns = "id,task_id,ord,text,assignee,status,ticket_id,done_at,done_by,started_at,summary"
 
     public func items(_ taskID: Int64) throws -> [Item] {
         try db.query("SELECT \(Self.itemColumns) FROM item WHERE task_id=? ORDER BY ord", [.int(taskID)]).map(Self.item)
@@ -641,16 +643,16 @@ public final class SuperagentStore {
     }
 
     func insertItem(_ i: Item) throws -> Int64 {
-        try db.run("INSERT INTO item (task_id,ord,text,assignee,status,ticket_id,done_at,done_by,started_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        try db.run("INSERT INTO item (task_id,ord,text,assignee,status,ticket_id,done_at,done_by,started_at,summary) VALUES (?,?,?,?,?,?,?,?,?,?)",
                    [.int(i.taskID), .int(Int64(i.ord)), .text(i.text), .text(i.assignee.raw), .text(i.status.rawValue),
-                    i.ticketID.map(SQLValue.int) ?? .null, .opt(i.doneAt), .opt(i.doneBy), .opt(i.startedAt)])
+                    i.ticketID.map(SQLValue.int) ?? .null, .opt(i.doneAt), .opt(i.doneBy), .opt(i.startedAt), .text(i.summary)])
         return db.lastInsertID
     }
 
     func saveItem(_ i: Item) throws {
-        try db.run("UPDATE item SET ord=?,text=?,assignee=?,status=?,ticket_id=?,done_at=?,done_by=?,started_at=? WHERE id=?",
+        try db.run("UPDATE item SET ord=?,text=?,assignee=?,status=?,ticket_id=?,done_at=?,done_by=?,started_at=?,summary=? WHERE id=?",
                    [.int(Int64(i.ord)), .text(i.text), .text(i.assignee.raw), .text(i.status.rawValue),
-                    i.ticketID.map(SQLValue.int) ?? .null, .opt(i.doneAt), .opt(i.doneBy), .opt(i.startedAt), .int(i.id)])
+                    i.ticketID.map(SQLValue.int) ?? .null, .opt(i.doneAt), .opt(i.doneBy), .opt(i.startedAt), .text(i.summary), .int(i.id)])
     }
 
     func deleteItem(_ id: Int64) throws {

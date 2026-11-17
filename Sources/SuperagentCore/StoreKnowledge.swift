@@ -133,6 +133,18 @@ extension SuperagentStore {
         try db.run("UPDATE knowledge SET md_path=? WHERE id=?", [.text(mdPath), .int(id)])
     }
 
+    // MARK: - 工单终端输出归档（终端会话关闭后仍可在归档弹窗里查阅）
+
+    public func ticketArchive(_ ticketID: Int64) throws -> String? {
+        try kv("ticket.archive.\(ticketID)")?.nilIfEmpty
+    }
+
+    public func saveTicketArchive(_ ticketID: Int64, text: String) throws {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        try setKV("ticket.archive.\(ticketID)", String(trimmed.suffix(12000)))
+    }
+
     // MARK: - 任务 ↔ 知识关联（`task_context_link`）
 
     public func linkedKnowledgeIDs(forTask taskID: Int64) throws -> [Int64] {

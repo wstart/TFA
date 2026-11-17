@@ -38,7 +38,10 @@ extension SuperagentRuntime {
             knowledgeRefining = false
         }
 
-        // 1. 同步未落盘或有更新的 Markdown 文件
+        // 1. 归档最近刚结束工单的终端尾部输出（防止之后 tmux 会话被关掉就看不到终端快照）
+        await archiveRecentlyEndedTickets(engine: engine)
+
+        // 2. 同步未落盘或有更新的 Markdown 文件
         await syncPendingMarkdown(engine: engine)
 
         // 2. 异步调用模型提炼待精炼条目（每次最多 3 条，避免占用过久）
@@ -128,6 +131,29 @@ extension SuperagentRuntime {
             }
             return files
         }.value
+    }
+
+    private func archiveRecentlyEndedTickets(engine: SuperagentEngine) async {
+        let ended = (try? engine.store.tickets(endedLimit: 25))?.filter { !$0.isOpen && !$0.session.isEmpty } ?? []
+        let unarchived = ended.filter { tk in
+            !role(for: tk).standing && ((try? engine.store.ticketArchive(tk.id)) == nil)
+        }
+        guard !unarchived.isEmpty else { return }
+        let tmux = self.tmux
+        let snap = await Task.detached(priority: .utility) { tmux.snapshot() }.value ?? []
+        for tk in unarchived {
+            guard let pane = snap.first(where: { $0.ticket == tk.id || $0.session == tk.session })?.pane else { continue }
+            let captured = await Task.detached(priority: .utility) { tmux.capture(pane, lines: 180) }.value
+            if !captured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try? engine.store.saveTicketArchive(tk.id, text: captured)
+            }
+        }
+    }
+
+    func editItemSummary(_ taskID: Int64, ord: Int, summary: String) {
+        if act(task: taskID, { try $0.editItemSummary(taskID, ord: ord, summary: summary) }) {
+            noteEcho(taskID, "已保存第 \(ord) 项摘要")
+        }
     }
 
     // MARK: - 界面交互方法
