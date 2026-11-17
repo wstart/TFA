@@ -448,6 +448,8 @@ public struct Settings: Equatable, Sendable {
     public var modelName: String = Settings.defaultModel
     /// 执行终端与主管终端用哪个编码 Agent。
     public var codingAgent: CodingAgentKind = .claude
+    /// 知识库 Markdown 镜像目录；空 = 默认 `SuperagentPaths.knowledgeDir`（`~/.tfa/knowledge`），也可改指 Obsidian 某子目录。
+    public var knowledgeSyncDir: String = ""
 
     public static let defaultModel = "claude-sonnet-5-5"
 

@@ -76,6 +76,8 @@ extension Views {
         var meta = [v.handbackOrigin.map(origin) ?? "来源 \(t.source.label)\(t.sourceRef.map { "（\($0)）" } ?? "")", "优先级 \(t.priority.label)"]
         if let d = t.due { meta.append("截止 \(day(d))") }
         if !t.deps.isEmpty { meta.append("依赖 " + t.deps.map { "A-\($0)" }.joined(separator: "、")) }
+        if !v.relatedKnowledge.isEmpty { meta.append("关联经验 " + v.relatedKnowledge.map(\.displayLabel).joined(separator: "、")) }
+        if !v.derivedTasks.isEmpty { meta.append("后续关联 " + v.derivedTasks.map(\.label).joined(separator: "、")) }
         s += meta.joined(separator: " · ") + "\n"
         s += "范围：\(t.scope.isEmpty ? "没有（不针对某个项目）" : t.scope)\n"
         s += "阶段：" + t.stages.enumerated().map { $0.offset == t.stageIndex ? "[\($0.element.name)]" : $0.element.name }.joined(separator: " → ") + "\n"
@@ -96,6 +98,21 @@ extension Views {
         }
         if let r = v.reviewSummary { s += "\n【评审结论】\(r)\n" }
         if !t.resultSummary.isEmpty { s += "\n【结果】\(t.resultSummary)\n" }
+        if let kb = v.knowledge {
+            s += "\n【任务总结（\(kb.kbLabel)\(kb.pinned ? " · 置顶" : "")）】\n\(kb.tldr)\n"
+            if !kb.pitfalls.isEmpty {
+                s += "避坑与决策：" + kb.pitfalls.joined(separator: "；") + "\n"
+            }
+            if !kb.files.isEmpty {
+                s += "关键文件：" + kb.files.joined(separator: "、") + "\n"
+            }
+        }
+        if !v.relatedKnowledge.isEmpty {
+            s += "\n【关联历史经验】\n"
+            for r in v.relatedKnowledge {
+                s += "- \(r.displayLabel)「\(r.title)」：\(clip(r.tldr, 140))\n"
+            }
+        }
         let events = try engine.store.events(taskID: id, limit: 20)
         if !events.isEmpty {
             s += "\n【活动】最近 \(events.count) 条：\n" + events.map { "\(time($0.at)) \($0.kind) \(clip($0.text, 200))\n" }.joined()
@@ -117,10 +134,15 @@ extension Views {
 
     /// `tfa read ticket` 里的所属任务和这张单负责的清单项（§6）：只列 `itemIDs` 里的项，不写别人的（注意事项 D-06）。
     static func taskLines(_ engine: SuperagentEngine, _ t: Ticket, _ taskID: Int64) throws -> String {
-        var s = "所属任务：A-\(taskID)" + (try engine.store.task(taskID).map { "「\($0.title)」" } ?? "") + "\n"
+        let taskObj = try engine.store.task(taskID)
+        var s = "所属任务：A-\(taskID)" + (taskObj.map { "「\($0.title)」" } ?? "") + "\n"
         if let of = t.reviewOf { return s + "你负责的清单项：没有（这张单核对 #\(of) 的交付）\n" }
         let mine = try engine.store.items(taskID).filter { t.itemIDs.contains($0.id) }
         s += mine.isEmpty ? "你负责的清单项：没有\n" : "你负责的清单项：\n" + mine.map { $0.line + "\n" }.joined()
+        if let taskObj {
+            let kbBlock = try engine.knowledgeContextBlock(for: taskObj)
+            if !kbBlock.isEmpty { s += kbBlock + "\n" }
+        }
         return s
     }
 

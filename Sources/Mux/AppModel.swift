@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import AppKit
 import SwiftUI
+import SuperagentCore
 import TmuxKit
 
 /// Top-level app state.
@@ -37,6 +38,25 @@ final class AppModel {
     var worklistTaskID: Int64?
     var worklistShowsSettings = false
     /// 任务卡上展开改动的工单（「看改动」，`showTaskDiff`）；nil = 不展开。换任务时清掉。
+    enum WorklistTab: String, CaseIterable, Hashable {
+        case tasks
+        case knowledge
+    }
+
+    struct NewTaskSeed: Identifiable, Equatable {
+        let id = UUID()
+        var scope: String = ""
+        var relatedRefs: [KnowledgeRef] = []
+        var relatedBadges: [(ref: KnowledgeRef, title: String)] = []
+
+        static func == (lhs: NewTaskSeed, rhs: NewTaskSeed) -> Bool {
+            lhs.id == rhs.id
+        }
+    }
+
+    var worklistTab: WorklistTab = .tasks
+    var worklistFocusedKnowledgeID: Int64?
+    var newTaskSeed: NewTaskSeed?
     var worklistDiffTicketID: Int64?
     /// 设置子页当前的段（设计评审 2026-11-08，2A）；`openWorklistSettings` 不给段就保持上次的。
     var worklistSettingsSegment: WorklistSettingsSegment = .router
@@ -496,8 +516,27 @@ final class AppModel {
         clearToolPanes(); worklistSelected = true
         if worklistTaskID != task { worklistDiffTicketID = nil }
         worklistTaskID = task
+        if task != nil { worklistTab = .tasks }
         worklistShowsSettings = settings
         leaveTerminals()
+    }
+
+    /// 打开「我的清单 · 知识库」子视图，可选自动展开某张知识卡片。
+    func openKnowledgeBase(entryID: Int64? = nil) {
+        guard worklistAvailable else { return openSuperagent() }
+        clearToolPanes(); worklistSelected = true
+        worklistShowsSettings = false
+        worklistTaskID = nil
+        worklistTab = .knowledge
+        worklistFocusedKnowledgeID = entryID
+        leaveTerminals()
+    }
+
+    /// 从某张已完成任务或知识卡一键「接着做…」衍生新任务：自动继承项目目录并挂上原任务经验关联。
+    func startDerivedTask(scope: String, ref: KnowledgeRef, refTitle: String) {
+        openWorklist()
+        worklistTab = .tasks
+        newTaskSeed = NewTaskSeed(scope: scope, relatedRefs: [ref], relatedBadges: [(ref: ref, title: refTitle)])
     }
 
     /// Show the「主管」panel. Mutually exclusive with the other tool panes / a terminal.

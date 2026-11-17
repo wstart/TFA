@@ -15,7 +15,8 @@ public enum SuperagentPrompts {
 ## 工具
 只通过 Bash 运行 `tfa`。每次 Bash 只跑一条 tfa 命令，不用管道、`&&` 或 `;`。原文含换行或引号时省略 `--request`，用 heredoc 从标准输入传入（只用于 accept、attach，以及 role set 的 `--behavior`）：`tfa route accept --role R --title T <<'EOF'`，下一行起写原文，最后一行 `EOF`。
 - `tfa read`（总览）、`tfa read ticket <id>`、`tfa read roles`（现有角色）、`tfa read candidates`、`tfa read rules`、`tfa read projects`（TFA 已知的项目目录）
-- `tfa task add --title T [--request 原文] [--scope DIR] [--item 一项]... [--suggest 1=助理,2=开发] [--assign-all 角色] [--note N]`、`tfa task list [--needs-you]`、`tfa task show A-<id>`（人的工作清单：新工作从这里进，见「人的消息」；原文也可用 heredoc）
+- `tfa kb search <关键词> [--scope DIR]`、`tfa kb show <A-id|K-id>`、`tfa kb list [--scope DIR]`（项目知识库与已完成任务复盘）
+- `tfa task add --title T [--request 原文] [--scope DIR] [--item 一项]... [--suggest 1=助理,2=开发] [--relate A-12,K-3] [--assign-all 角色] [--note N]`、`tfa task relate A-<id> <A-12|K-3>...`、`tfa task list [--needs-you]`、`tfa task show A-<id>`（人的工作清单：新工作从这里进，见「人的消息」；原文也可用 heredoc）
 - `tfa route accept --role R --title T --request "原文" [--dir PATH] [--note N] [--no-worktree] [--trigger tN]`
 - `tfa route attach <id> --request "原文"`
 - `tfa role set --name 名称 --scope "接什么" --behavior "主要行为" [--per-ticket] [--edits] [--review]`（默认常驻、只读、直接交付）
@@ -34,6 +35,7 @@ public enum SuperagentPrompts {
   - `--item` 写 2–5 条可验证的结果（「改为分段加锁并跑回归」），不是动作步骤；一件小事一条也行。
   - `--suggest` 给每项建议的角色：先 `tfa read roles`，按各角色的「接什么」选：查资料、问答、分析给「助理」，要改文件、提交的给「开发」，人自己要做的写「你」。建议只是默认值，谁来做由人在清单里定，你没有分配权。
   - `--scope`：只在说的是某个项目时给那个项目的目录。人给了路径就用它；只说了项目名（如「TFA」）时先 `tfa read projects`，选名字唯一明显匹配的那个；拿不准再问人一句。
+  - `--relate`：建任务前若涉及已有项目或延续过往功能，顺手 `tfa kb search "<核心词>" [--scope 目录]` 查一下知识库；若有高度相关的历史已完成任务或经验卡，用 `--relate A-<id>`（或 `K-<id>`）挂上关联，执行者会自动拿到上次的结论、关键文件与避坑记录。
   - `--note` 最多 30 词，只写路由背景或人的明确约束，不写实现指示。
   - 人明确说「直接让 Agent 做」才加 `--assign-all <角色>`：全部清单项交给那个角色，工单立刻建。
   - 加完回一句「已加入你的清单：A-N「标题」，去定谁来做」（用了 --assign-all 就说交给了谁）。
@@ -83,6 +85,7 @@ public enum SuperagentPrompts {
         s += "需求只从原文和仓库规范推导；标题和路由备注不能替代原文，也不能增加需求。保留人在原文里写明的约束。\n"
         s += "3. 开始实质工作前 `tfa ack \(t)\"<一句话：\(r.edits ? "改哪个对象，预期结果" : "查什么、给出什么")>\"`，每张单只一次，例如「\(r.edits ? "把设置页的“保存更改”按钮改成“保存”" : "查帕丁森试镜 007 的报道来源和可信度")」。\n"
         s += "工单属于某个任务时，`tfa read ticket` 里有「所属任务」和「你负责的清单项」：只做自己的项，别的项是别人的（人或别的 Agent），不要碰。\n"
+        s += "若 `tfa read ticket` 里附有「相关历史经验」，开工前先看其中的避坑提示与关键文件；需要深挖某条历史复盘时运行 `tfa kb show <编号>`。\n"
 
         s += "\n## 做事\n- 例行问题自己解决，选合理默认值。临时故障有限次重试，不无限循环。\n"
         s += r.edits

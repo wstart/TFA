@@ -6,13 +6,14 @@ import SuperagentCore
 extension TFACommand {
     static func task(_ args: ArraySlice<String>, _ c: Context) throws -> Outcome {
         guard let sub = args.first else {
-            throw CLIError.usage("缺少子命令（add / list / show / assign / done / approve / reject / cancel）", command: "task")
+            throw CLIError.usage("缺少子命令（add / list / show / relate / assign / done / approve / reject / cancel）", command: "task")
         }
         let rest = args.dropFirst()
         switch sub {
         case "add": return try taskAdd(rest, c)
         case "list": return try taskList(rest, c)
         case "show": return try taskShow(rest, c)
+        case "relate": return try taskRelate(rest, c)
         case "assign": return try taskAssign(rest, c)
         case "done": return try taskDone(rest, c)
         case "approve": return try taskApprove(rest, c)
@@ -27,8 +28,8 @@ extension TFACommand {
 
     private static func taskAdd(_ args: ArraySlice<String>, _ c: Context) throws -> Outcome {
         let cmd = "task add"
-        let a = try parse(args, cmd, values: ["title", "request", "scope", "item", "items", "suggest", "assign-all", "priority", "due", "dep", "note"],
-                          repeatable: ["item", "suggest", "dep"])
+        let a = try parse(args, cmd, values: ["title", "request", "scope", "item", "items", "suggest", "assign-all", "priority", "due", "dep", "relate", "note"],
+                          repeatable: ["item", "suggest", "dep", "relate"])
         try noPositional(a, cmd)
         try c.requireNotWorker(cmd)
         guard let title = a.value("title") else { throw CLIError.usage("缺少 --title（任务标题）", command: cmd) }
@@ -42,6 +43,7 @@ extension TFACommand {
         let priority = try a.value("priority").map { try parsePriority($0, cmd) } ?? TaskPriority.medium
         let due = try a.value("due").map { try parseDue($0, cmd) }
         let deps = try (a.values["dep"] ?? []).flatMap { try taskIDs($0, cmd, flag: "--dep") }
+        let related = try parseKnowledgeRefs(a.values["relate"] ?? [], cmd, flag: "--relate")
         let scope = try a.value("scope").map(c.directory) ?? ""
         // 建议只是「谁来做」的默认值，不分配、不建工单（注意事项 E-02）；写法先查，角色名要在库里查。
         let count = max(items.count, 1)
@@ -62,8 +64,9 @@ extension TFACommand {
         let by = c.isRouter ? "主管" : "你"
         let task = try engine.createTask(.init(title: title, request: request, source: c.isRouter ? .router : .manual, scope: scope,
                                                items: items, suggestions: suggestions, priority: priority, due: due, deps: deps,
-                                               note: a.value("note") ?? "", by: by))
+                                               related: related, note: a.value("note") ?? "", by: by))
         var out = "已加入你的清单：\(task.label)「\(task.title)」，\(count) 项"
+        if !related.isEmpty { out += "（已关联经验 \(related.map(\.label).joined(separator: "、"))）" }
         if let (to, role) = assignAll {
             // 人明确说「直接让 Agent 做」：建完就把全部项交出去（§5.4）。
             let ords = try engine.store.items(task.id).map(\.ord)
@@ -103,6 +106,25 @@ extension TFACommand {
         let engine = try c.engine()
         _ = try requireTask(engine, id)
         return Outcome(out: try Views.task(engine, id))
+    }
+
+    private static func taskRelate(_ args: ArraySlice<String>, _ c: Context) throws -> Outcome {
+        let cmd = "task relate"
+        let a = try parse(args, cmd, flags: ["remove"])
+        try c.requireNotWorker(cmd)
+        guard a.positional.count >= 2 else {
+            throw CLIError.usage("用法：tfa task relate <任务号 A-20> <关联的 A-12 或 K-3>... [--remove]", command: cmd)
+        }
+        let id = try taskID(a.positional[0], cmd)
+        let refs = try parseKnowledgeRefs(Array(a.positional.dropFirst()), cmd, flag: "关联编号")
+        let who = c.isRouter ? "主管" : "你"
+        let remove = a.flags.contains("remove")
+        let changed = try c.engine().updateTaskKnowledgeLinks(id, refs: refs, remove: remove, by: who)
+        if changed.isEmpty {
+            return Outcome(out: "任务 A-\(id) 的关联经验没有变化。\n")
+        }
+        let labels = changed.map { "\($0.displayLabel)「\($0.title)」" }.joined(separator: "、")
+        return Outcome(out: "已为任务 A-\(id) \(remove ? "移除" : "关联")历史经验：\(labels)。\n", changed: true)
     }
 
     // MARK: - 清单里的决定（只给人）

@@ -20,6 +20,8 @@ public enum SuperagentPaths {
     public static var binDir: URL { home.appendingPathComponent("bin", isDirectory: true) }
     /// 每个工单的 git worktree 放在这里：`<repo名>-<工单号>`。
     public static var worktreesDir: URL { home.appendingPathComponent("worktrees", isDirectory: true) }
+    /// 知识库 Markdown 镜像默认目录：`~/.tfa/knowledge/<项目名或global>/`。
+    public static var knowledgeDir: URL { home.appendingPathComponent("knowledge", isDirectory: true) }
 
     /// Antigravity CLI（`agy`）全局自定义 Agent 目录：默认 `~/.gemini/config/agents`。
     /// 指定了 `AGY_CONFIG_DIR` 时写进 `<AGY_CONFIG_DIR>/agents`；指定了私有 `TFA_HOME`（测试 / 隔离实例）时写进 `<TFA_HOME>/agy-agents`，不污染真实用户目录。

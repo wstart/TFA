@@ -809,6 +809,44 @@ struct SettingsCard: View {
                 Stepper(value: bind(\.slots), in: 1...8) { Text("\(s.slots)").monospacedDigit() }
             }
 
+            SettingRow(title: "知识库 Markdown 目录", note: "任务完成自动同步可读的 .md 复盘，可改指 Obsidian 知识库文件夹") {
+                HStack(spacing: Theme.Space.sm) {
+                    let shown = s.knowledgeSyncDir.isEmpty ? tilde(SuperagentPaths.knowledgeDir.path) : tilde(s.knowledgeSyncDir)
+                    Text(shown)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                        .frame(maxWidth: 220, alignment: .trailing)
+                    if !s.knowledgeSyncDir.isEmpty {
+                        Button("恢复默认") {
+                            var next = s; next.knowledgeSyncDir = ""; appModel.superagent.saveSettings(next)
+                        }
+                        .controlSize(.small)
+                    }
+                    Button("更改…") {
+                        let start = s.knowledgeSyncDir.isEmpty ? SuperagentPaths.knowledgeDir.path : s.knowledgeSyncDir
+                        if let picked = pickFolder(from: start, message: "选择知识库 Markdown 镜像保存目录（例如 Obsidian 库下的文件夹）") {
+                            var next = s; next.knowledgeSyncDir = picked; appModel.superagent.saveSettings(next)
+                        }
+                    }
+                    .controlSize(.small)
+                }
+            }
+
+            Hairline()
+
+            SettingRow(title: "总结提炼与研判模型", note: Self.backendNote(s.modelBackend)) {
+                SegmentedChoice(selection: bind(\.modelBackend), options: ModelBackendKind.allCases.map { (value: $0, label: $0.label) })
+                    .accessibilityLabel("模型调用方式")
+            }
+            SettingRow(title: "模型 ID", note: Self.modelNameNote(s.modelBackend)) {
+                ModelNameField()
+            }
+            if s.modelBackend == .api {
+                APIKeyRow()
+            }
+
             Hairline()
 
             SettingRow(title: "看门狗巡检", note: "定时检查执行中的工单是否偏离清单项，连续偏离才提醒你") {
@@ -818,16 +856,6 @@ struct SettingsCard: View {
             if s.watchdogEnabled {
                 SettingRow(title: "巡检间隔") {
                     Stepper(value: bind(\.watchdogIntervalMinutes), in: 1...60) { Text("\(s.watchdogIntervalMinutes) 分钟").monospacedDigit() }
-                }
-                SettingRow(title: "模型调用方式", note: Self.backendNote(s.modelBackend)) {
-                    SegmentedChoice(selection: bind(\.modelBackend), options: ModelBackendKind.allCases.map { (value: $0, label: $0.label) })
-                        .accessibilityLabel("模型调用方式")
-                }
-                SettingRow(title: "研判模型", note: Self.modelNameNote(s.modelBackend)) {
-                    ModelNameField()
-                }
-                if s.modelBackend == .api {
-                    APIKeyRow()
                 }
             }
 

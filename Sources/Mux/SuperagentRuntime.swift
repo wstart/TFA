@@ -14,6 +14,12 @@ final class SuperagentRuntime {
     private(set) var views: [TicketView] = []
     /// 工作清单：打开的任务 + 最近结束的（每轮 Pass 后只在变化时发布，注意事项 F-16）。界面快照测试可直接注入。
     var tasks: [TaskView] = []
+    /// 项目知识库：已完成任务总结与常驻经验卡（置顶优先，再按更新时间倒序）。
+    var knowledge: [KnowledgeView] = []
+    /// 尚未生成知识总结的历史已完成任务数（>0 时在知识库页提示可一键补齐）。
+    private(set) var unindexedDoneCount = 0
+    /// 后台正在调用模型精炼知识总结。
+    var knowledgeRefining = false
     /// 今天打扰你的次数（注意事项 G-02）。
     private(set) var interruptionsToday = 0
     /// 工作流模板（内置 + 自定义）。
@@ -147,6 +153,7 @@ final class SuperagentRuntime {
             }
         }
         startWatchdog()
+        startKnowledgeWorker()
         startOrgSync()
     }
 
@@ -155,6 +162,8 @@ final class SuperagentRuntime {
         loop = nil
         watchdogLoop?.cancel()
         watchdogLoop = nil
+        knowledgeLoop?.cancel()
+        knowledgeLoop = nil
         ClaudeCLIBackend.terminateAll() // 研判中的 claude 子进程：App 退出时一并结束，不留孤儿
         org.stop()
         if notifyToken != 0 { notify_cancel(notifyToken); notifyToken = 0 }
@@ -283,9 +292,14 @@ final class SuperagentRuntime {
     func setSchedules(_ s: [Schedule]) { act { try $0.setSchedules(s) } }
     func saveSettings(_ s: Settings) {
         let needsPromptSync = s.acceptance != settings.acceptance || s.codingAgent != settings.codingAgent
+        let kbDirChanged = s.knowledgeSyncDir != settings.knowledgeSyncDir
         act { try $0.store.saveSettings(s) }
         let roles = roles
         if needsPromptSync { Task.detached(priority: .utility) { SuperagentPrompts.install(acceptance: s.acceptance, roles: roles) } }
+        if kbDirChanged {
+            mdSyncedStamp.removeAll()
+            kickKnowledge()
+        }
     }
 
     /// 新建 / 更新 / 删除角色（面板）。
@@ -415,7 +429,7 @@ final class SuperagentRuntime {
 
     /// 跑一个写库操作。`task` 给了就把错误记到那个任务名下（行下方），否则记到 `actionError`（页顶 / 表单）。返回有没有成功。
     @discardableResult
-    private func act(task: Int64? = nil, _ body: (SuperagentEngine) throws -> Void) -> Bool {
+    func act(task: Int64? = nil, _ body: (SuperagentEngine) throws -> Void) -> Bool {
         guard let engine else { return false }
         var ok = true
         do { try body(engine) } catch {
@@ -1020,6 +1034,8 @@ final class SuperagentRuntime {
         var schedules: [Schedule] = []
         var roles: [Role] = Role.builtins
         var tasks: [TaskView] = []
+        var knowledge: [KnowledgeView] = []
+        var unindexedDoneCount = 0
         var interruptionsToday = 0
         var workflows: [Workflow] = Workflow.builtins
         var accuracy: (correct: Int, annotated: Int, pending: Int) = (0, 0, 0)
@@ -1041,6 +1057,8 @@ final class SuperagentRuntime {
         s.schedules = (try? store.schedules()) ?? []
         s.roles = (try? store.roles()) ?? Role.builtins
         s.tasks = (try? engine.taskViews()) ?? []
+        s.knowledge = (try? engine.knowledgeViews()) ?? []
+        s.unindexedDoneCount = ((try? store.unindexedDoneTaskIDs(limit: 200)) ?? []).count
         s.interruptionsToday = (try? engine.interruptionsToday()) ?? 0
         s.workflows = (try? store.workflows()) ?? Workflow.builtins
         s.accuracy = (try? engine.policyAccuracy()) ?? (0, 0, 0)
@@ -1058,10 +1076,16 @@ final class SuperagentRuntime {
         if s.schedules != schedules { schedules = s.schedules }
         if s.roles != roles { roles = s.roles }
         if s.tasks != tasks { tasks = s.tasks }
+        let kbChanged = s.knowledge != knowledge
+        if kbChanged { knowledge = s.knowledge }
+        if s.unindexedDoneCount != unindexedDoneCount { unindexedDoneCount = s.unindexedDoneCount }
         if s.interruptionsToday != interruptionsToday { interruptionsToday = s.interruptionsToday }
         if s.workflows != workflows { workflows = s.workflows }
         if s.accuracy != policyAccuracy { policyAccuracy = s.accuracy }
         if !followUps.isEmpty { pruneFollowUps() }
+        if kbChanged || s.knowledge.contains(where: { $0.entry.needsRefine || $0.entry.mdPath.isEmpty }) {
+            kickKnowledge()
+        }
     }
 
     /// 同步刷新：界面操作（`act`）之后立刻可见；测试也直接调。
@@ -1236,6 +1260,9 @@ final class SuperagentRuntime {
     @ObservationIgnored var watchdogTick: Double = 60
     @ObservationIgnored private var watchdogLoop: Task<Void, Never>?
     @ObservationIgnored private var watchdogBusy = false
+    @ObservationIgnored var knowledgeLoop: Task<Void, Never>?
+    @ObservationIgnored var knowledgeBusy = false
+    @ObservationIgnored var mdSyncedStamp: [Int64: Double] = [:]
 
     /// Pass 之外独立定时：模型调用慢（几秒到一分钟），不能拖住每 2 秒一次的 Pass。
     private func startWatchdog() {

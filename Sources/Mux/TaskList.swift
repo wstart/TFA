@@ -10,6 +10,8 @@ import SuperagentCore
 struct WorklistView: View {
     @Environment(AppModel.self) private var appModel
     @State private var showingNewTask = false
+    @State private var activeSeed: AppModel.NewTaskSeed?
+    @State private var showingNewKnowledge = false
     /// 「谁来做」sheet 正在处理的任务；`assignFocus` = 「改派第 N 项…」要定位到的项。
     @State private var assigning: TaskView?
     @State private var assignFocus: Int?
@@ -59,12 +61,13 @@ struct WorklistView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else {
+                let inKB = appModel.worklistTab == .knowledge
                 WorklistHeader(empty: sa.loaded && sa.tasks.isEmpty && holds.isEmpty) {
                     if searching {
-                        TextField("搜索任务", text: $search)
+                        TextField(inKB ? "搜索知识库" : "搜索任务", text: $search)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 180)
-                            .accessibilityLabel("搜索任务")
+                            .accessibilityLabel(inKB ? "搜索知识库" : "搜索任务")
                     }
                     Button {
                         searching.toggle()
@@ -72,16 +75,28 @@ struct WorklistView: View {
                     } label: {
                         Image(systemName: searching ? "xmark" : "magnifyingglass")
                     }
-                    .help(searching ? "关闭搜索" : "搜索任务")
-                    .accessibilityLabel(searching ? "关闭搜索" : "搜索任务")
-                    Button {
-                        showingNewTask = true
-                    } label: {
-                        Label("任务", systemImage: "plus")
+                    .help(searching ? "关闭搜索" : (inKB ? "搜索知识库" : "搜索任务"))
+                    .accessibilityLabel(searching ? "关闭搜索" : (inKB ? "搜索知识库" : "搜索任务"))
+                    if inKB {
+                        Button {
+                            showingNewKnowledge = true
+                        } label: {
+                            Label("经验", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .help("手动沉淀一条项目经验或避坑指南")
+                        .accessibilityLabel("记一条经验")
+                    } else {
+                        Button {
+                            activeSeed = nil
+                            showingNewTask = true
+                        } label: {
+                            Label("任务", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .help("新建任务")
+                        .accessibilityLabel("新建任务")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .help("新建任务")
-                    .accessibilityLabel("新建任务")
                     Button {
                         appModel.openWorklistSettings()
                     } label: {
@@ -90,22 +105,31 @@ struct WorklistView: View {
                     .help("设置：主管终端、组织、工作流、角色、规则、定时任务、记录")
                     .accessibilityLabel("清单设置")
                 }
-                list
+                if inKB {
+                    KnowledgeBrowserView(search: search, showingNewEntry: $showingNewKnowledge)
+                } else {
+                    list
+                }
             }
         }
         .background(Theme.canvas)
         // 挂在整页上，不挂在清单上：任务卡开着的时候回声到期也要放开停住的行，否则它会一直钉在旧分区里。
-        .onAppear { previousTasks = sa.tasks }
+        .onAppear {
+            previousTasks = sa.tasks
+            consumeNewTaskSeed()
+        }
         .onChange(of: sa.tasks) { old, _ in previousTasks = old }
         .onChange(of: sa.actionEchoes) { old, new in updateHolds(old: old, new: new) }
+        .onChange(of: appModel.newTaskSeed) { _, _ in consumeNewTaskSeed() }
         .sheet(isPresented: $showingNewTask, onDismiss: {
+            activeSeed = nil
             // 建完直接弹「谁来做」（需求文档 §9.1）。
             if let id = pendingAssign {
                 pendingAssign = nil
                 if let tv = sa.task(id) { assigning = tv }
             }
         }) {
-            NewTaskSheet { id in
+            NewTaskSheet(seed: activeSeed) { id in
                 appModel.worklistTaskID = id
                 pendingAssign = id
             }
@@ -254,6 +278,14 @@ struct WorklistView: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, Theme.Space.xxxl)
     }
+
+    private func consumeNewTaskSeed() {
+        guard let seed = appModel.newTaskSeed else { return }
+        activeSeed = seed
+        appModel.newTaskSeed = nil
+        appModel.worklistTaskID = nil
+        showingNewTask = true
+    }
 }
 
 // MARK: - 页头
@@ -268,9 +300,12 @@ private struct WorklistHeader<Trailing: View>: View {
     @ViewBuilder let trailing: () -> Trailing
 
     var body: some View {
+        @Bindable var model = appModel
         let sa = appModel.superagent
         let running = sa.routerSession != nil
         let budget = WorklistHeaderText.interruptions(used: sa.interruptionsToday, budget: sa.settings.interruptionBudget)
+        let kbCount = sa.knowledge.count
+        let kbTitle = kbCount > 0 ? "知识库 \(kbCount)" : "知识库"
         HStack(alignment: .center, spacing: 10) {
             Button { appModel.toggleSidebar() } label: {
                 Image(systemName: "sidebar.left")
@@ -284,7 +319,7 @@ private struct WorklistHeader<Trailing: View>: View {
             .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
 
             HStack(alignment: .center, spacing: 6) {
-                Image(systemName: "list.bullet.clipboard")
+                Image(systemName: appModel.worklistTab == .knowledge ? "books.vertical" : "list.bullet.clipboard")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.brand)
                 Text("我的清单")
@@ -293,6 +328,15 @@ private struct WorklistHeader<Trailing: View>: View {
                     .lineLimit(1)
                     .fixedSize()
             }
+
+            SegmentedChoice(
+                selection: $model.worklistTab,
+                options: [
+                    (value: AppModel.WorklistTab.tasks, label: "清单"),
+                    (value: AppModel.WorklistTab.knowledge, label: kbTitle),
+                ]
+            )
+            .accessibilityLabel("切换清单与知识库")
 
             HStack(alignment: .center, spacing: 6) {
                 Text("·").foregroundStyle(Theme.textTertiary).accessibilityHidden(true)
@@ -644,8 +688,11 @@ enum WorklistRowText {
         return Line(text: "清单都做完了", at: tv.task.updatedAt)
     }
 
-    /// 完成态在标题下显示结果一句话（Pass 1）；没有就按数目说。
+    /// 完成态在标题下优先显示已提炼的知识卡一句话结论，再回退到结果摘要，最后按数目说。
     private static func closed(_ tv: TaskView) -> Line {
+        if tv.task.status == .done, let kb = tv.knowledge, !kb.tldr.isEmpty {
+            return Line(text: kb.tldr, at: tv.task.updatedAt)
+        }
         if !tv.task.resultSummary.isEmpty { return Line(text: tv.task.resultSummary, at: tv.task.updatedAt) }
         let text: String
         switch tv.task.status {
@@ -786,6 +833,22 @@ struct TaskRow: View {
                     if view.totalCount > 1 {
                         Text("\(view.doneCount)/\(view.totalCount)")
                             .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Theme.textTertiary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 4))
+                    }
+                    if view.task.status == .done, view.knowledge != nil {
+                        Text("✦ 已总结")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Theme.textTertiary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 4))
+                    }
+                    if !view.relatedKnowledge.isEmpty {
+                        Text("关联 \(view.relatedKnowledge.count)")
+                            .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(Theme.textTertiary)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 1)
@@ -1030,6 +1093,7 @@ private struct AgoText: View {
 struct NewTaskSheet: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
+    var seed: AppModel.NewTaskSeed? = nil
     let created: (Int64) -> Void
     @State private var title = ""
     @State private var request = ""
@@ -1041,6 +1105,9 @@ struct NewTaskSheet: View {
     @State private var due = Date()
     @State private var deps: Set<Int64> = []
     @State private var showDeps = false
+    @State private var relatedIDs: Set<Int64> = []
+    @State private var seedTaskRefs: [KnowledgeRef] = []
+    @State private var showRelated = false
     @State private var error: String?
     /// 试过提交：从这以后校验不过才标砖红。
     @State private var tried = false
@@ -1055,10 +1122,28 @@ struct NewTaskSheet: View {
         return nil
     }
 
+    private var combinedRelatedRefs: [KnowledgeRef] {
+        var out: [KnowledgeRef] = seedTaskRefs
+        let byID = Dictionary(uniqueKeysWithValues: appModel.superagent.knowledge.map { ($0.entry.id, $0.entry) })
+        for kid in relatedIDs.sorted() {
+            let ref: KnowledgeRef = byID[kid]?.taskID.map { .task($0) } ?? .knowledge(kid)
+            if !out.contains(ref) { out.append(ref) }
+        }
+        return out
+    }
+
     var body: some View {
         let sa = appModel.superagent
+        let suggestions = sa.suggestKnowledge(title: title, request: request, scope: scope, limit: 3)
+            .filter { entry in
+                !relatedIDs.contains(entry.id) && !seedTaskRefs.contains(where: { r in
+                    if case .task(let tid) = r { return tid == entry.taskID }
+                    if case .knowledge(let kid) = r { return kid == entry.id }
+                    return false
+                })
+            }
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
-            Text("新建任务").font(Theme.Font.headerTitle)
+            Text(seed == nil ? "新建任务" : "接着做 · 新建后续任务").font(Theme.Font.headerTitle)
             Field(title: "标题") {
                 TextField("一句话说清要做成什么", text: $title).textFieldStyle(.roundedBorder).focused($focused)
             }
@@ -1066,8 +1151,40 @@ struct NewTaskSheet: View {
                 TextEditor(text: $request).editorBox().frame(height: 72)
             }
             Field(title: "清单项（每行一条，可验证的结果；留空就一项 = 标题）") {
-                TextEditor(text: $itemsText).editorBox().frame(height: 96)
+                TextEditor(text: $itemsText).editorBox().frame(height: 88)
             }
+
+            if !suggestions.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("发现可复用的历史经验（点一下即可关联给执行者）：")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                    FlowLayout(spacing: 6) {
+                        ForEach(suggestions) { entry in
+                            Button {
+                                relatedIDs.insert(entry.id)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "plus.circle.fill")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(Theme.brand)
+                                    Text("\(entry.displayLabel) \(entry.title)")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(Theme.textPrimary)
+                                        .lineLimit(1)
+                                }
+                                .padding(.horizontal, 8)
+                                .frame(height: 24)
+                                .background(Theme.chrome, in: RoundedRectangle(cornerRadius: 6))
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.border, lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                            .help(entry.tldr)
+                        }
+                    }
+                }
+            }
+
             HStack(alignment: .top, spacing: Theme.Space.xl) {
                 Field(title: "范围（项目目录）") {
                     HStack(spacing: Theme.Space.sm) {
@@ -1076,6 +1193,22 @@ struct NewTaskSheet: View {
                         if !scope.isEmpty { Button("清除") { scope = "" }.controlSize(.small) }
                         Button("选择…") { if let p = pickFolder(from: scope, message: "任务的项目目录；交给 Agent 的项在这里工作") { scope = p } }
                             .controlSize(.small)
+                    }
+                }
+                Field(title: "关联历史经验（可选）") {
+                    HStack(spacing: Theme.Space.sm) {
+                        let refs = combinedRelatedRefs
+                        Text(refs.isEmpty ? "未关联" : refs.map(\.label).joined(separator: "、"))
+                            .font(.caption).foregroundStyle(refs.isEmpty ? Theme.textTertiary : Theme.textPrimary).lineLimit(1)
+                        if !refs.isEmpty {
+                            Button("清除") { relatedIDs.removeAll(); seedTaskRefs.removeAll() }.controlSize(.small)
+                        }
+                        Button("选择…") { showRelated = true }
+                            .controlSize(.small)
+                            .popover(isPresented: $showRelated, arrowEdge: .bottom) {
+                                KnowledgeLinkPicker(currentTaskID: nil, preferredScope: scope, selectedIDs: $relatedIDs)
+                                    .environment(appModel)
+                            }
                     }
                 }
                 Field(title: "依赖（可选）") {
@@ -1089,7 +1222,6 @@ struct NewTaskSheet: View {
                             }
                     }
                 }
-                Spacer(minLength: 0)
             }
             HStack(alignment: .top, spacing: Theme.Space.xl) {
                 Field(title: "工作流") {
@@ -1112,7 +1244,7 @@ struct NewTaskSheet: View {
                     }
                 }
             }
-            Text(problem ?? "交给 Agent 的项之后在「谁来做」里定；你自己做的项不开终端。")
+            Text(problem ?? "交给 Agent 的项之后在「谁来做」里定；关联的历史经验会自动附给执行 Agent。")
                 .font(.caption).foregroundStyle(problem == nil || !tried ? Theme.textTertiary : Theme.Status.error)
             SheetButtons(error: error, confirm: "建任务", enabled: true,
                          shortcut: KeyboardShortcut(.return, modifiers: .command)) {
@@ -1124,7 +1256,7 @@ struct NewTaskSheet: View {
                                              request: request.trimmingCharacters(in: .whitespacesAndNewlines), scope: scope,
                                              items: items, workflow: workflow, priority: priority,
                                              due: hasDue ? Calendar.current.startOfDay(for: due).addingTimeInterval(86399).timeIntervalSince1970 : nil,
-                                             deps: deps.sorted()))
+                                             deps: deps.sorted(), related: combinedRelatedRefs))
                 }
                 if error == nil, let id {
                     created(id)
@@ -1135,9 +1267,25 @@ struct NewTaskSheet: View {
             }
         }
         .padding(Theme.Space.xl)
-        .frame(width: 560)
+        .frame(width: 600)
         .onAppear {
-            scope = WorkspaceStore.shared.selected?.path ?? ""
+            if let seed {
+                scope = seed.scope.isEmpty ? (WorkspaceStore.shared.selected?.path ?? "") : seed.scope
+                for ref in seed.relatedRefs {
+                    switch ref {
+                    case .knowledge(let kid):
+                        relatedIDs.insert(kid)
+                    case .task(let tid):
+                        if let existing = sa.knowledge.first(where: { $0.entry.taskID == tid }) {
+                            relatedIDs.insert(existing.id)
+                        } else {
+                            seedTaskRefs.append(ref)
+                        }
+                    }
+                }
+            } else {
+                scope = WorkspaceStore.shared.selected?.path ?? ""
+            }
             focused = true
         }
     }

@@ -25,16 +25,18 @@ extension SuperagentEngine {
         public var priority: TaskPriority
         public var due: Double?
         public var deps: [Int64]
+        /// 建任务时显式关联的历史任务总结或经验卡（`A-12` / `K-3`）。
+        public var related: [KnowledgeRef]
         /// 路由备注（≤30 词）。
         public var note: String
         public var by: String
 
         public init(title: String, request: String = "", source: TaskSource = .manual, sourceRef: String? = nil, scope: String = "",
                     items: [String] = [], suggestions: [Int: String] = [:], workflow: String? = nil, priority: TaskPriority = .medium,
-                    due: Double? = nil, deps: [Int64] = [], note: String = "", by: String = "你") {
+                    due: Double? = nil, deps: [Int64] = [], related: [KnowledgeRef] = [], note: String = "", by: String = "你") {
             self.title = title; self.request = request; self.source = source; self.sourceRef = sourceRef; self.scope = scope
             self.items = items; self.suggestions = suggestions; self.workflow = workflow; self.priority = priority
-            self.due = due; self.deps = deps; self.note = note; self.by = by
+            self.due = due; self.deps = deps; self.related = related; self.note = note; self.by = by
         }
     }
 
@@ -76,6 +78,14 @@ extension SuperagentEngine {
                 try store.saveSuggestions(task: t.id, d.suggestions)
                 let list = d.suggestions.keys.sorted().map { "\($0) → \(d.suggestions[$0]!)" }.joined(separator: "，")
                 try store.log(nil, "suggest", "\(d.by)建议谁来做：\(list)（未分配）", at: at, task: t.id)
+            }
+            if !d.related.isEmpty {
+                let kids = try resolveKnowledgeIDs(d.related, excludingTask: t.id, at: at)
+                for kid in kids { try store.addContextLink(taskID: t.id, knowledgeID: kid, at: at) }
+                if !kids.isEmpty {
+                    let labels = try kids.compactMap { try store.knowledgeEntry(id: $0)?.displayLabel }.joined(separator: "、")
+                    try store.log(nil, "relate", "\(d.by)关联了历史经验：\(labels)", at: at, task: t.id)
+                }
             }
             return t
         }
@@ -306,11 +316,12 @@ extension SuperagentEngine {
             }
             t = try requireTask(taskID) // 停工单可能已推进了阶段
             // 3. 交给 Agent 的项建工单（C-01：只走 createTicket）。
+            let kbContext = try knowledgeContextBlock(for: t)
             var made: [Ticket] = []
             for (k, g) in groups.enumerated() {
                 let role = roles[g.role]!
                 let mine = g.ords.map { items[index($0)] }
-                let request = Self.agentRequest(task: t, mine: mine, all: items)
+                let request = Self.agentRequest(task: t, mine: mine, all: items, knowledgeContext: kbContext)
                 let title = String("\(t.title) · \(Self.ordLabel(g.ords))".prefix(WorkTask.maxTitle))
                 // 人分配：每张工单一条「task:A-N」事件；自动接单：第一张直接挂在原事件上，其余（不会有）各建一条。
                 var trigger: Trigger
@@ -878,7 +889,9 @@ extension SuperagentEngine {
         var v = try makeView(t, items: try store.items(id), tickets: try store.tickets(task: id), links: try store.handbackLinks(),
                              detached: try store.detachedHandbacks(), target: linkTarget)
         v.syncConflicts = try store.orgConflicts(taskIDs: [id])[id] ?? [] // 组织同步（第 3 期）
-        return v
+        var list = [v]
+        try attachKnowledge(to: &list)
+        return list[0]
     }
 
     /// 打开的任务（新的在前）+ 最近结束的 `endedLimit` 个（按更新时间）；一次聚合，不 N+1（注意事项 B-11）。
@@ -892,7 +905,7 @@ extension SuperagentEngine {
         let links = try store.handbackLinks()
         let detached = try store.detachedHandbacks()
         let byID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) }) // 打开的任务都在里面：退回产生的 B 开着就查得到
-        return try tasks.map {
+        var list = try tasks.map {
             var v = try makeView($0, items: items[$0.id] ?? [], tickets: tickets[$0.id] ?? [], links: links, detached: detached) { b in
                 guard byID[b]?.isOpen == true else { return nil }
                 return (items[b] ?? []).contains { $0.assignee == .unassigned } ? .unassigned : .doing
@@ -900,6 +913,8 @@ extension SuperagentEngine {
             v.syncConflicts = conflicts[$0.id] ?? []
             return v
         }
+        try attachKnowledge(to: &list)
+        return list
     }
 
     /// 完成任务的确认单（5A）：要合并的分支（名下交付了的非评审工单，没有分支的 `branch` 为 nil）和没做完的项，见 `FinishPreview`。
@@ -1176,6 +1191,7 @@ extension SuperagentEngine {
             try store.saveTask(t)
             try store.dropEffect(.notify, t.label)
             try store.log(nil, "stage", "任务完成" + (t.resultSummary.isEmpty ? "" : "：\(Self.clip(t.resultSummary, 200))"), at: at, task: t.id)
+            _ = try upsertTaskKnowledgeInTransaction(task: t, items: try store.items(t.id), tickets: tickets, at: at, aiRefine: true)
             try handbackTargetEnded(t, at: at) // 4A：它是退回产生的 → 原任务的那一项勾掉
         case .doing, .todo:
             try store.saveTask(t)
@@ -1223,12 +1239,13 @@ extension SuperagentEngine {
     }
 
     /// 执行者看到的请求文本（§5.2）：「其余清单项」只列序号和一句话，不写谁在做、不写别人的工单号（注意事项 D-06）。
-    static func agentRequest(task t: WorkTask, mine: [Item], all: [Item]) -> String {
+    static func agentRequest(task t: WorkTask, mine: [Item], all: [Item], knowledgeContext: String = "") -> String {
         var s = "[任务 \(t.label)] \(t.title)\n原文：\(t.request)\n你负责的清单项：\n"
         s += mine.map(\.line).joined(separator: "\n") + "\n"
         let others = all.filter { o in !mine.contains { $0.id == o.id } }
         if !others.isEmpty { s += "其余清单项（不归你）：" + others.map(\.line).joined(separator: " · ") + "\n" }
         if !t.scope.isEmpty { s += "目录：\(t.scope)\n" }
+        if !knowledgeContext.isEmpty { s += knowledgeContext + "\n" }
         s += "完成一项就 `tfa report --state progress --item <n> --summary …`；全部完成报 ready。"
         return s
     }

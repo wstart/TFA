@@ -308,6 +308,12 @@ public struct TaskView: Equatable, Sendable, Identifiable {
     /// 链接项（TODOS 4C）：退回成新任务、新任务还开着、没被人改派的项（按 `ord`）。这些项的 `status` 在读视图里已换成
     /// 跟随新任务的状态（新任务还有没人做的项 → todo，否则 → doing；新任务完成时引擎把它勾掉）；不再有受阻态。
     public var linked: [Int: LinkedItem] = [:]
+    /// 本任务自身的总结沉淀知识卡（已完成或手动提炼过时有值）。
+    public var knowledge: KnowledgeEntry? = nil
+    /// 本任务显式关联的历史任务总结 / 经验卡（注入给执行者做上下文参考）。
+    public var relatedKnowledge: [RelatedKnowledgeSummary] = []
+    /// 引用了本任务总结的后续衍生任务（双向脉络）。
+    public var derivedTasks: [DerivedTaskSummary] = []
 
     public init(task: WorkTask, items: [Item], tickets: [TicketView], needsYou: [PersonAction], reviewSummary: String? = nil, reviewing: Bool = false,
                 syncConflicts: [SyncConflict] = []) {

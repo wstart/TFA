@@ -112,14 +112,40 @@ public final class SuperagentStore {
               synced_status TEXT NOT NULL DEFAULT 'todo', conflict_local TEXT, conflict_server TEXT);
             CREATE INDEX IF NOT EXISTS org_item_task ON org_item(task_id);
             CREATE INDEX IF NOT EXISTS task_origin ON task(origin, origin_id);
+            CREATE TABLE IF NOT EXISTS knowledge (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id INTEGER UNIQUE REFERENCES task(id),
+              scope TEXT NOT NULL DEFAULT '',
+              title TEXT NOT NULL,
+              tldr TEXT NOT NULL DEFAULT '',
+              outcomes TEXT NOT NULL DEFAULT '[]',
+              pitfalls TEXT NOT NULL DEFAULT '[]',
+              files TEXT NOT NULL DEFAULT '[]',
+              tags TEXT NOT NULL DEFAULT '[]',
+              pinned INTEGER NOT NULL DEFAULT 0,
+              archived INTEGER NOT NULL DEFAULT 0,
+              user_edited INTEGER NOT NULL DEFAULT 0,
+              ai_refined INTEGER NOT NULL DEFAULT 0,
+              needs_refine INTEGER NOT NULL DEFAULT 0,
+              md_path TEXT NOT NULL DEFAULT '',
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS knowledge_scope ON knowledge(archived, pinned, scope, updated_at);
+            CREATE TABLE IF NOT EXISTS task_context_link (
+              task_id INTEGER NOT NULL REFERENCES task(id),
+              knowledge_id INTEGER NOT NULL REFERENCES knowledge(id),
+              note TEXT NOT NULL DEFAULT '',
+              created_at REAL NOT NULL,
+              PRIMARY KEY (task_id, knowledge_id));
+            CREATE INDEX IF NOT EXISTS task_context_link_kb ON task_context_link(knowledge_id, task_id);
             """)
         if try (db.query("PRAGMA user_version").first?.int(0) ?? 0) < Self.schemaVersion {
             try db.exec("PRAGMA user_version=\(Self.schemaVersion)")
         }
     }
 
-    /// 表结构版本（注意事项 B-01）：1 = 工单 + 角色；2 = 工作清单；3 = 清单项的 started_at；4 = 组织同步（outbox / org_task / org_item）。
-    static let schemaVersion: Int64 = 4
+    /// 表结构版本（注意事项 B-01）：1 = 工单 + 角色；2 = 工作清单；3 = 清单项的 started_at；4 = 组织同步；5 = 任务总结与项目知识库。
+    static let schemaVersion: Int64 = 5
 
     /// 加一列；已有就跳过。App 和 tfa 可能同时打开旧库：另一个连接先加上了也不算错。
     private func addColumn(_ table: String, _ name: String, _ decl: String) throws {
@@ -721,6 +747,7 @@ public final class SuperagentStore {
         if let v = try kv("settings.modelBackend").flatMap(ModelBackendKind.init) { s.modelBackend = v }
         if let v = try kv("settings.modelName")?.trimmingCharacters(in: .whitespaces), !v.isEmpty { s.modelName = v }
         if let v = try kv("settings.codingAgent").flatMap(CodingAgentKind.init) { s.codingAgent = v }
+        if let v = try kv("settings.knowledgeSyncDir")?.trimmingCharacters(in: .whitespaces) { s.knowledgeSyncDir = v }
         return s
     }
 
@@ -736,6 +763,7 @@ public final class SuperagentStore {
             try setKV("settings.modelBackend", s.modelBackend.rawValue)
             try setKV("settings.modelName", s.modelName)
             try setKV("settings.codingAgent", s.codingAgent.rawValue)
+            try setKV("settings.knowledgeSyncDir", s.knowledgeSyncDir.trimmingCharacters(in: .whitespaces).nilIfEmpty)
         }
     }
 
@@ -878,6 +906,7 @@ public final class SuperagentStore {
     /// 只给「待领取」的占位行用（它从没被做过）：连同清单项、同步状态、时间线、上行一起删。普通任务不硬删（注意事项 B-08）。
     func deleteTask(_ id: Int64) throws {
         for sql in ["DELETE FROM item WHERE task_id=?", "DELETE FROM org_item WHERE task_id=?", "DELETE FROM org_task WHERE task_id=?",
+                    "DELETE FROM task_context_link WHERE task_id=?",
                     "DELETE FROM task_dep WHERE task_id=? OR depends_on=?", "DELETE FROM event WHERE task_id=?",
                     "DELETE FROM outbox WHERE task_id=?", "DELETE FROM task WHERE id=?"] {
             try db.run(sql, Array(repeating: SQLValue.int(id), count: sql.components(separatedBy: "?").count - 1))

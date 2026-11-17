@@ -29,6 +29,7 @@ struct TaskCard: View {
     @State private var confirmCancel = false
     @State private var confirmDrop = false
     @State private var showDeps = false
+    @State private var showRelatedKB = false
     @State private var showActivity = false
     /// 乐观更新的勾选（`Item.id` → 勾了没）：先翻状态再调引擎，失败回滚（注意事项 F-18）。
     @State private var pending: [Int64: Bool] = [:]
@@ -49,6 +50,7 @@ struct TaskCard: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
+                TaskSummaryCard(view: view)
                 checklistColumn
                 diffSection
                 detailColumn
@@ -211,12 +213,62 @@ struct TaskCard: View {
     @ViewBuilder private var detailColumn: some View {
         let t = view.task
         let request = t.request != t.title ? t.request : ""
+        let result = (t.status == .done && view.knowledge != nil) ? "" : t.resultSummary
         let sections: [(label: String, text: String)] = t.status == .done
-            ? [("结果", t.resultSummary), ("需求原文", request)]
-            : [("需求原文", request), ("上一轮结果", t.resultSummary)]
+            ? [("结果", result), ("需求原文", request)]
+            : [("需求原文", request), ("上一轮结果", result)]
         let nonEmpty = sections.filter { !$0.text.isEmpty }
-        if !nonEmpty.isEmpty || t.origin != nil {
+        if !nonEmpty.isEmpty || !view.relatedKnowledge.isEmpty || t.origin != nil {
             VStack(alignment: .leading, spacing: 18) {
+                if !view.relatedKnowledge.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        SectionLabel(title: "关联历史经验（派单自动附给 Agent）")
+                        ForEach(view.relatedKnowledge) { rel in
+                            HStack(alignment: .top, spacing: 8) {
+                                Button {
+                                    if let tid = rel.taskID {
+                                        appModel.openWorklist(task: tid)
+                                    } else {
+                                        appModel.openKnowledgeBase(entryID: rel.knowledgeID)
+                                    }
+                                } label: {
+                                    Text(rel.displayLabel)
+                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(Theme.textPrimary)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 4))
+                                }
+                                .buttonStyle(.plain)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(rel.title)
+                                        .font(.system(size: 13, weight: .medium))
+                                        .foregroundStyle(Theme.textPrimary)
+                                    if !rel.tldr.isEmpty {
+                                        Text(rel.tldr)
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(Theme.textSecondary)
+                                            .lineLimit(2)
+                                    }
+                                }
+                                Spacer(minLength: 4)
+                                if editable {
+                                    Button {
+                                        appModel.superagent.removeTaskKnowledgeLink(view.id, knowledgeID: rel.knowledgeID)
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(Theme.textTertiary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("移除这条经验关联")
+                                }
+                            }
+                        }
+                    }
+                    if !nonEmpty.isEmpty { Hairline() }
+                }
                 ForEach(Array(nonEmpty.enumerated()), id: \.element.label) { idx, section in
                     if idx > 0 { Hairline() }
                     VStack(alignment: .leading, spacing: 8) {
@@ -230,9 +282,10 @@ struct TaskCard: View {
         }
     }
 
-    /// 只有可点的才做 chip：退回来源、组织 T-128、依赖。
+    /// 只有可点的才做 chip：退回来源、组织 T-128、依赖、关联经验、后续衍生任务。
     private var hasChips: Bool {
-        view.handbackOrigin != nil || (view.task.origin != nil && view.task.originID != nil) || editable || !view.task.deps.isEmpty
+        view.handbackOrigin != nil || (view.task.origin != nil && view.task.originID != nil)
+            || editable || !view.task.deps.isEmpty || !view.relatedKnowledge.isEmpty || !view.derivedTasks.isEmpty
     }
 
     @ViewBuilder private var metaChips: some View {
@@ -263,8 +316,35 @@ struct TaskCard: View {
                                open: { id in showDeps = false; appModel.worklistTaskID = id })
                         .environment(appModel)
                 }
-        } else if !t.deps.isEmpty {
-            MetaChip(text: WorklistText.deps(t.deps, done: { sa.task($0)?.task.status == .done }))
+            let relText = view.relatedKnowledge.isEmpty
+                ? "关联经验…"
+                : "关联经验：" + view.relatedKnowledge.map(\.displayLabel).joined(separator: "、")
+            MetaChip(text: relText, faint: view.relatedKnowledge.isEmpty, action: { showRelatedKB = true })
+                .help("关联历史已完成任务或知识卡，派单时自动把上次结论和避坑点提供给执行 Agent")
+                .accessibilityLabel(relText)
+                .popover(isPresented: $showRelatedKB, arrowEdge: .bottom) {
+                    KnowledgeLinkPicker(
+                        currentTaskID: view.id,
+                        preferredScope: t.scope,
+                        selectedIDs: Binding(
+                            get: { Set(view.relatedKnowledge.map(\.knowledgeID)) },
+                            set: { sa.setTaskKnowledgeLinks(view.id, knowledgeIDs: Array($0).sorted()) }
+                        ),
+                        onOpenTask: { tid in showRelatedKB = false; appModel.worklistTaskID = tid }
+                    )
+                    .environment(appModel)
+                }
+        } else {
+            if !t.deps.isEmpty {
+                MetaChip(text: WorklistText.deps(t.deps, done: { sa.task($0)?.task.status == .done }))
+            }
+            if !view.relatedKnowledge.isEmpty {
+                MetaChip(text: "关联经验：" + view.relatedKnowledge.map(\.displayLabel).joined(separator: "、"))
+            }
+        }
+        ForEach(view.derivedTasks) { dt in
+            MetaChip(text: "后续 \(dt.label)", action: { appModel.openWorklist(task: dt.id) })
+                .help("后续关联任务：\(dt.label) \(dt.title)（\(dt.status.label)）")
         }
     }
 

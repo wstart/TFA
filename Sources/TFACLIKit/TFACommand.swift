@@ -133,6 +133,7 @@ public enum TFACommand {
         case "report": return try report(rest, c)
         case "handback": return try handback(rest, c)
         case "task": return try task(rest, c)
+        case "kb": return try kb(rest, c)
         default:
             return Outcome(code: 2, err: "tfa: 未知命令 \(head)\n\n" + help(""))
         }
@@ -502,8 +503,32 @@ public enum TFACommand {
               usage: "tfa eval decide --trigger tN --version V --rule id=match|no_match|requires_design_decision [--rule …] --decision accept|ignore [--title T] --reason 原因",
               about: "研判推断出的候选：每条启用的规则判断一次；方向不明确就 requires_design_decision 并 ignore。通过后 TFA 自己建任务（自动接单）或只记「本会接单」（只观察），不用再 accept", worker: false),
         Entry(command: "task add",
-              usage: "tfa task add --title T [--request 原文] [--scope 目录] [--item 一项]... [--items -] [--suggest 1=助理,2=开发] [--assign-all 角色] [--priority 高|中|低] [--due YYYY-MM-DD] [--dep A-11] [--note 备注]",
-              about: "把新工作加进人的清单，不建工单。原文可从 stdin 传入；--item 写可验证的结果（2–5 条），--items - 从 stdin 一行一项；--suggest 给每项建议的角色（只是默认值）；人明确说直接让 Agent 做才 --assign-all。执行终端不能用（要新任务用 tfa handback）",
+              usage: "tfa task add --title T [--request 原文] [--scope 目录] [--item 一项]... [--items -] [--suggest 1=助理,2=开发] [--assign-all 角色] [--priority 高|中|低] [--due YYYY-MM-DD] [--dep A-11] [--relate A-12,K-3] [--note 备注]",
+              about: "把新工作加进人的清单，不建工单。原文可从 stdin 传入；--item 写可验证的结果（2–5 条），--items - 从 stdin 一行一项；--suggest 给每项建议的角色（只是默认值）；--relate 关联历史已完成任务或经验卡供执行者参考；人明确说直接让 Agent 做才 --assign-all",
+              worker: false),
+        Entry(command: "task relate",
+              usage: "tfa task relate A-20 A-12 [K-3 ...] [--remove]",
+              about: "为任务关联或移除历史任务总结 / 知识卡；派发工单时自动向执行者注入精简经验与避坑提示",
+              worker: false),
+        Entry(command: "kb list",
+              usage: "tfa kb list [--scope 目录] [--tag 标签] [--pinned] [--limit N]",
+              about: "列出项目知识库（已完成任务沉淀的总结与置顶常驻经验）",
+              worker: false),
+        Entry(command: "kb search",
+              usage: "tfa kb search <关键词> [--scope 目录] [--tag 标签] [--limit N]",
+              about: "检索相关的历史任务总结、关键文件与踩坑记录；建新任务前可查一下并用 --relate 挂上",
+              worker: false),
+        Entry(command: "kb show",
+              usage: "tfa kb show <A-12 | K-3>",
+              about: "查看某条历史任务总结或知识经验卡的完整复盘（结论、交付要点、踩坑决策、涉及文件与后续关联）",
+              worker: false),
+        Entry(command: "kb add",
+              usage: "tfa kb add --title T --tldr 结论 [--scope 目录] [--outcome 要点]... [--pitfall 避坑]... [--file 路径]... [--tag 标签]... [--pin]",
+              about: "手动向知识库沉淀一条可复用的项目经验或避坑指南（加 --pin 置顶为该项目常驻参考）",
+              worker: false),
+        Entry(command: "kb summarize",
+              usage: "tfa kb summarize A-12 [--force]",
+              about: "为指定任务生成或重新提炼知识库总结卡片",
               worker: false),
         Entry(command: "task list", usage: "tfa task list [--needs-you] [--scope 目录] [--stage 阶段名]",
               about: "清单：需要你 → 进行中 → 待分配，每行 A-12 [状态] 标题 · 完成/总数 · 执行者", worker: false),
