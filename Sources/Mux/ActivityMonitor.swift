@@ -50,12 +50,17 @@ final class TerminalActivityMonitor {
             return (act, lines)
         }.value
         let now = Int(Date().timeIntervalSince1970)
-        let workingNames = Set(snap.act.filter { now - $0.value < within }.map { $0.key })
+        // `agy` TUI 空闲提示符每 ~2 秒刷新心跳，末行固定为 `? for shortcuts...`：剔除这类假忙会话，侧栏活动条与副标题才真实。
+        let agyIdleNames = Set(snap.lines.compactMap { name, line in
+            line.lowercased().hasPrefix("? for shortcuts") ? name : nil
+        })
+        let workingNames = Set(snap.act.filter { now - $0.value < within }.map { $0.key }).subtracting(agyIdleNames)
+        let filteredLines = snap.lines.filter { !agyIdleNames.contains($0.key) }
         var cacheNext: [String: (epoch: Int, line: String)] = [:]
         for (name, line) in snap.lines { if let t = snap.act[name] { cacheNext[name] = (t, line) } }
         self.lineCache = cacheNext
         if workingNames != working { working = workingNames }
-        if snap.lines != lastLine { lastLine = snap.lines }
+        if filteredLines != lastLine { lastLine = filteredLines }
     }
 
     /// True when this (local) session produced output within the last `activeWithin` seconds.

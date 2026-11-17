@@ -117,18 +117,23 @@ struct TicketBar: View {
         }
         switch stage {
         case .person(.review):
+            Button("重试") { sa.retry(t.id) }
+                .help("重新让工单 #\(t.id) 检查并运行一轮")
             Button("打回…") { appModel.ticketFeedback = .init(ticketID: t.id, kind: .reject) }
-            // 工单级的通过写明对象（设计评审 2026-11-08，5A）：和任务卡上的「完成任务…」分得开。
             Button(sa.merging.contains(t.id) ? "合并中…" : "通过工单 #\(t.id)") { sa.approve(t.id) }.buttonStyle(.borderedProminent)
                 .disabled(sa.merging.contains(t.id))
                 .help(t.branch.isEmpty ? "结单" : "把 \(t.branch) 合并进主仓库当前分支，然后结单")
         case .person(.answer):
+            Button("重试") { sa.retry(t.id) }
+                .help("断网或卡住时重新执行工单 #\(t.id)")
             Button("回答…") { appModel.ticketFeedback = .init(ticketID: t.id, kind: .answer) }.buttonStyle(.borderedProminent)
         case .person(.blocked), .person(.failed), .person(.delivery), .person(.stalled), .idle:
             Button("补充…") { appModel.ticketFeedback = .init(ticketID: t.id, kind: .add) }
             Button("重试") { sa.retry(t.id) }.buttonStyle(.borderedProminent)
         case .working:
             Button("补充…") { appModel.ticketFeedback = .init(ticketID: t.id, kind: .add) }
+            Button("重试") { sa.retry(t.id) }
+                .help("若因断网或异常卡住，中断挂起请求并从当前进度重试")
         case .ended(let status):
             if status != .stopped {
                 Button("再提要求…") { appModel.ticketFeedback = .init(ticketID: t.id, kind: .add) }

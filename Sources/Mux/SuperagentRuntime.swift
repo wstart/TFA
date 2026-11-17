@@ -102,6 +102,8 @@ final class SuperagentRuntime {
     @ObservationIgnored private var notifyToken: Int32 = 0
     @ObservationIgnored private var lostPasses: [Int64: Int] = [:]
     @ObservationIgnored private var exitedPasses: [Int64: Int] = [:]
+    /// `agy` 窗格进入空闲提示符（`? for shortcuts`）的起始时刻：弥补 `agy` 每 2 秒刷新 `window_activity` 导致无法统计静默时长的问题。
+    @ObservationIgnored private var agyIdleSince: [Int64: Double] = [:]
     /// 副作用第一次撞上对话框的时间（-1 = 已经报过）。
     @ObservationIgnored private var dialogSince: [String: Double] = [:]
     /// 往已有终端里重新打启动命令的时间（按窗格）：30 秒内不叠着再打。
@@ -262,9 +264,19 @@ final class SuperagentRuntime {
         if let task = task(ofTicket: id)?.id { noteEcho(task, "已发送 · 工单 #\(id)") }
     }
     func stop(_ id: Int64) { act(task: task(ofTicket: id)?.id) { try $0.stop(id, by: "你") } }
-    func retry(_ id: Int64) {
+    func retry(_ id: Int64, force: Bool = true) {
         let task = task(ofTicket: id)?.id
-        if act(task: task, { try $0.retry(id) }), let task { noteEcho(task, "已重试 · 工单 #\(id)") }
+        agyIdleSince[id] = nil
+        if act(task: task, { try $0.retry(id, force: force) }), let task { noteEcho(task, "已重试 · 工单 #\(id)") }
+    }
+    /// 任务级一键重试：断网、卡住或工单中断时一键恢复该任务名下的执行工单。
+    func retryTask(_ id: Int64) {
+        var ids: [Int64] = []
+        if act(task: id, { ids = try $0.retryTask(id) }) {
+            for tid in ids { agyIdleSince[tid] = nil }
+            let suffix = ids.isEmpty ? "" : " · 工单 " + ids.map { "#\($0)" }.joined(separator: "、")
+            noteEcho(id, "已重试\(suffix)")
+        }
     }
     func setRules(_ r: [Rule]) { act { try $0.setRules(r) } }
     func setMode(_ m: AcceptMode) { act { try $0.setMode(m) } }
@@ -538,14 +550,20 @@ final class SuperagentRuntime {
         let ready = ((try? store.dueEffects(now: clock())) ?? []).sorted {
             (order.firstIndex(of: $0.kind)!, $0.createdAt) < (order.firstIndex(of: $1.kind)!, $1.createdAt)
         }
+        var spawnedMore = false
         for e in ready {
             let outcome = await perform(e, snap: snap)
             switch outcome {
-            case .done: try? store.completeEffect(e)
+            case .done:
+                try? store.completeEffect(e)
+                if e.kind == .launch || e.kind == .stop { spawnedMore = true }
             case .later(let s): try? store.deferEffect(e, until: clock() + s)
             case .failed(let msg):
                 if let n = try? store.failEffect(e, error: msg, now: clock()) { try? engine.effectFailed(e, error: msg, attempts: n) }
             }
+        }
+        if spawnedMore, !((try? store.dueEffects(now: clock())) ?? []).isEmpty {
+            again = true
         }
         await reloadInBackground()
     }
@@ -558,12 +576,12 @@ final class SuperagentRuntime {
         let launching = Set(((try? engine.store.effects()) ?? []).filter { $0.kind == .launch }.compactMap { Int64($0.key) })
         for t in open {
             guard let view = try? engine.view(t), let a = view.assignment, a.state == .running, !launching.contains(t.id) else {
-                lostPasses[t.id] = nil; exitedPasses[t.id] = nil
+                lostPasses[t.id] = nil; exitedPasses[t.id] = nil; agyIdleSince[t.id] = nil
                 continue
             }
             guard let pane = pane(for: t, in: snap) else {
                 lostPasses[t.id, default: 0] += 1
-                if lostPasses[t.id]! >= 2 { lostPasses[t.id] = nil; try? engine.sessionLost(t.id) }
+                if lostPasses[t.id]! >= 2 { lostPasses[t.id] = nil; agyIdleSince[t.id] = nil; try? engine.sessionLost(t.id) }
                 continue
             }
             lostPasses[t.id] = nil
@@ -571,15 +589,36 @@ final class SuperagentRuntime {
                 exitedPasses[t.id, default: 0] += 1
                 if exitedPasses[t.id]! >= 2 {
                     exitedPasses[t.id] = nil
+                    agyIdleSince[t.id] = nil
                     let tail = await tailOf(pane.pane)
                     try? engine.agentExited(t.id, lastOutput: tail)
                 }
                 continue
             }
             exitedPasses[t.id] = nil
-            guard view.stage == .working(queued: false), view.pendingInputs == 0 else { continue }
-            let quiet = now - Double(pane.activity)
+            guard view.stage == .working(queued: false), view.pendingInputs == 0 else {
+                agyIdleSince[t.id] = nil
+                continue
+            }
             let sinceTurn = now - (t.turnAt ?? a.startedAt ?? now)
+            if pane.matches(codingAgent: .antigravity) {
+                let tmux = self.tmux
+                let screen = await Task.detached(priority: .utility) { tmux.capture(pane.pane, lines: 24) }.value
+                guard SuperagentTmux.isAgyIdle(screen) else {
+                    agyIdleSince[t.id] = nil
+                    continue
+                }
+                let start = agyIdleSince[t.id] ?? { agyIdleSince[t.id] = now; return now }()
+                let quiet = now - start
+                let threshold = SuperagentTmux.hasNetworkError(screen) ? min(15, settings.idleSeconds) : settings.idleSeconds
+                if quiet >= threshold, sinceTurn >= min(15, settings.idleSeconds) {
+                    agyIdleSince[t.id] = nil
+                    let tail = await tailOf(pane.pane)
+                    try? engine.workerIdle(t.id, lastOutput: tail)
+                }
+                continue
+            }
+            let quiet = now - Double(pane.activity)
             if quiet >= settings.idleSeconds, sinceTurn >= settings.idleSeconds {
                 let tail = await tailOf(pane.pane)
                 try? engine.workerIdle(t.id, lastOutput: tail)
@@ -633,9 +672,10 @@ final class SuperagentRuntime {
     }
 
     /// 终端能不能落键：agent 在跑、此刻没输出、人最近没在里面打字。
+    /// `agy` 空闲时每 ~2 秒刷新心跳使 `window_activity` 持续变化，因此对 `agy` 跳过此处的 `busyWindow` 预筛，由 `typeAndCheck` 读屏幕底栏精确判断。
     private func gate(_ pane: SuperagentPane) -> Outcome? {
         if pane.isPlainShell { return .later(5) }
-        if clock() - Double(pane.activity) < Self.busyWindow { return .later(2) }
+        if !pane.matches(codingAgent: .antigravity), clock() - Double(pane.activity) < Self.busyWindow { return .later(2) }
         if userTypedRecently?(pane.session) == true { return .later(5) }
         return nil
     }
@@ -878,23 +918,32 @@ final class SuperagentRuntime {
 
     nonisolated static func typeAndCheck(_ tmux: SuperagentTmux, _ target: String, text: String, marker: String, wait: Double) -> Typed {
         // 快照可能是十几秒前的：落键前再确认一次 agent 还在、此刻没在出字。
-        guard let state = tmux.paneState(target), !SuperagentPane.isShell(state.command),
-              Date().timeIntervalSince1970 - Double(state.activity) >= busyWindow else { return .notReady }
+        guard let state = tmux.paneState(target), !SuperagentPane.isShell(state.command) else { return .notReady }
+        let screen = tmux.capture(target, lines: 40)
+        let lowerCmd = state.command.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let isAgy = lowerCmd == "agy" || lowerCmd.hasPrefix("agy ") || lowerCmd.hasSuffix("/agy")
+        if isAgy {
+            guard SuperagentTmux.isAgyIdle(screen) else { return .notReady }
+        } else {
+            guard Date().timeIntervalSince1970 - Double(state.activity) >= busyWindow else { return .notReady }
+        }
         // 对话框（信任文件夹 / 权限确认）开着：打字 + 回车会替人选项，等人处理完。
-        if SuperagentTmux.showsDialog(tmux.capture(target, lines: 40)) { return .dialog }
+        if SuperagentTmux.showsDialog(screen) { return .dialog }
         tmux.type(target, text)
         Thread.sleep(forTimeInterval: wait)
         return tmux.capture(target, lines: 400).contains(marker) ? .delivered : .notEchoed
     }
 
     nonisolated static func interrupt(_ tmux: SuperagentTmux, _ target: String) {
-        if tmux.paneState(target)?.command.lowercased().contains("axis-claude") == true {
+        guard let cmd = tmux.paneState(target)?.command, !SuperagentPane.isShell(cmd) else { return }
+        if cmd.lowercased().contains("axis-claude") {
             tmux.sendKey(target, "C-c")
             return
         }
         tmux.sendKey(target, "Escape")
         Thread.sleep(forTimeInterval: 0.3)
         tmux.sendKey(target, "Escape")
+        Thread.sleep(forTimeInterval: 0.4)
     }
 
     typealias Launched = (session: String, dir: String, branch: String, started: Bool, created: Bool)

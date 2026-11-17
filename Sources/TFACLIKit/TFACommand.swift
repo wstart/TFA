@@ -255,10 +255,10 @@ public enum TFACommand {
 
     private static func retry(_ args: ArraySlice<String>, _ c: Context) throws -> Outcome {
         let cmd = "retry"
-        let a = try parse(args, cmd)
+        let a = try parse(args, cmd, flags: ["force"])
         let id = try ticketID(onePositional(a, cmd, "工单号"), cmd)
         let engine = try c.engine()
-        try engine.retry(id, by: "主管")
+        try engine.retry(id, by: "主管", force: a.flags.contains("force"))
         return Outcome(out: "已重试 \(try name(engine, id))：会重新派给执行终端。\n", changed: true)
     }
 

@@ -849,13 +849,13 @@ struct TaskRow: View {
     }
 
     private var hasActions: Bool {
-        view.task.syncState == "claimable" || (view.task.isOpen && (!view.needsYou.isEmpty || view.unassignedCount > 0))
+        view.task.syncState == "claimable"
+            || (view.task.isOpen && (!view.needsYou.isEmpty || view.unassignedCount > 0 || view.canRetry))
     }
 
-    /// 该阶段的一两个动作（和任务卡的需要你条同一套 `TaskNeedActions`；按钮最少 28pt 高，Pass 6）。
+    /// 该阶段的一两个动作（和任务卡的需要你条同一套 `TaskNeedActions`；进行中或中断的任务直接提供一键重试）。
     @ViewBuilder private var actions: some View {
         if view.task.syncState == "claimable" {
-            // 组织的待领取（第 3 期）：领到手才是你的任务。
             let org = appModel.superagent.org
             Button("领取") { claim() }
                 .buttonStyle(.borderedProminent)
@@ -866,7 +866,23 @@ struct TaskRow: View {
             if !view.needsYou.isEmpty {
                 TaskNeedActions(view: view, assign: assign, reassign: reassign, finish: finish)
             } else if view.unassignedCount > 0 {
+                if view.canRetry {
+                    Button { appModel.superagent.retryTask(view.id) } label: {
+                        Label("重试", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(minHeight: 28)
+                    .help("网络断开或任务卡住时一键重试当前执行工单")
+                }
                 Button("谁来做…", action: assign).buttonStyle(.borderedProminent).frame(minHeight: 28)
+            } else if view.canRetry {
+                Button { appModel.superagent.retryTask(view.id) } label: {
+                    Label("重试", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .frame(minHeight: 28)
+                .help("网络断开或任务卡住时一键重试当前执行工单")
+                .accessibilityLabel("重试任务 \(view.task.label)")
             }
         }
     }
@@ -922,6 +938,8 @@ struct TaskNeedActions: View {
             }
         case .answer?:
             if let t = view.ticket(needing: .answer) {
+                plain("重试") { sa.retry(t.id) }
+                    .help("若因断网或状态过时，重新让工单 #\(t.id) 检查并继续")
                 prominent("回答…") { appModel.ticketFeedback = TicketFeedbackRequest(ticketID: t.id, kind: .answer) }
             }
         case .blocked?, .failed?, .delivery?, .stalled?:

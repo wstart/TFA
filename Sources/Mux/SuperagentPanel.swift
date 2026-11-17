@@ -241,9 +241,9 @@ struct WorkingRow: View {
                 Text(line).font(Theme.Font.rowSubtitle).foregroundStyle(Theme.textSecondary).lineLimit(1).help(line)
             }
             Spacer(minLength: Theme.Space.sm)
-            if item.stage == .idle {
-                Button("重试") { appModel.superagent.retry(t.id) }.controlSize(.small)
-            }
+            Button("重试") { appModel.superagent.retry(t.id) }
+                .controlSize(.small)
+                .help("网络断开或工单卡住时一键重试")
             Button("前往") { appModel.goToTicket(t.id) }.controlSize(.small).disabled(t.session.isEmpty)
         }
         .contentShape(Rectangle())

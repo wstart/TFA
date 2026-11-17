@@ -130,6 +130,13 @@ extension TaskView {
         return seen
     }
 
+    /// 该任务当前是否有一键可重试的 Agent 工作（存在打开工单，或存在未完成且分配给角色的非链接清单项）。
+    var canRetry: Bool {
+        guard task.isOpen, task.syncState != "claimable" else { return false }
+        if tickets.contains(where: \.ticket.isOpen) { return true }
+        return items.contains { $0.status != .done && $0.assignee.role != nil && linked[$0.ord] == nil }
+    }
+
     /// 需要你条的正文：阶段名加粗 + 一句话。工单的回报固定前缀「工单 #12 回报：」（设计评审 2026-11-08，Pass 3）：
     /// 「通过：…」不再紧挨着「通过」按钮被读成已通过。
     var needLine: (title: String, body: String)? { needLine(handbackTarget: nil) }

@@ -523,6 +523,24 @@ private struct ItemRow: View {
                             .overlay(RoundedRectangle(cornerRadius: 5).stroke(Theme.border, lineWidth: 1))
                             .help("前往工单 #\(id) 的终端")
                     }
+                    if status != .done, view.task.isOpen, item.assignee.role != nil {
+                        Button {
+                            retryItem()
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.clockwise").font(.system(size: 9, weight: .semibold))
+                                Text("重试").font(.system(size: 11, weight: .medium))
+                            }
+                            .foregroundStyle(Theme.textSecondary)
+                            .padding(.horizontal, 7)
+                            .frame(height: 22)
+                            .background(Theme.chrome, in: RoundedRectangle(cornerRadius: 5))
+                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Theme.border, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .help("重试第 \(item.ord) 项对应的执行工单")
+                        .accessibilityLabel("重试第 \(item.ord) 项")
+                    }
                 }
                 if let handback {
                     Button(word.text) { appModel.openWorklist(task: handback.toTaskID) }
@@ -547,6 +565,10 @@ private struct ItemRow: View {
         .contentShape(Rectangle())
         .contextMenu {
             if editable {
+                if status != .done, item.assignee.role != nil, handback == nil {
+                    Button("重试此项") { retryItem() }
+                    Divider()
+                }
                 Button("改文字…", action: edit)
                 Button("删除…", role: .destructive, action: remove).disabled(item.ticketID != nil)
                 if item.ticketID != nil { Text("有工单的项先取消工单才能删") }
@@ -554,6 +576,21 @@ private struct ItemRow: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("第 \(item.ord) 项，\(item.assignee.spoken)，\(word.text)：\(item.text)")
+    }
+
+    private func retryItem() {
+        let sa = appModel.superagent
+        if let id = item.ticketID {
+            if let tv = view.ticket(id), tv.ticket.isOpen {
+                sa.retry(id)
+            } else if let tv = view.ticket(id), tv.ticket.status != .stopped {
+                sa.feedback(id, "请重试并继续完成第 \(item.ord) 项（若因网络断开中断请从当前进度继续）。")
+            } else {
+                sa.retryTask(view.id)
+            }
+        } else {
+            sa.retryTask(view.id)
+        }
     }
 
     /// 你的项可点（乐观更新），Agent 的只读。

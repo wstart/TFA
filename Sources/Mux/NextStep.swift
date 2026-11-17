@@ -302,14 +302,29 @@ struct NextStepBanner: View {
                 }
             }
             Spacer(minLength: 0)
-            if let id = step.ticket {
-                HStack(spacing: 12) {
+            HStack(spacing: 10) {
+                if let id = step.ticket {
                     Button("打开终端") { appModel.goToTicket(id) }.buttonStyle(BannerButtonStyle(kind: .text))
                     Button("补充…") { appModel.ticketFeedback = TicketFeedbackRequest(ticketID: id, kind: .add) }
                         .buttonStyle(BannerButtonStyle(kind: .text))
                 }
-                .fixedSize()
+                if view.canRetry {
+                    Button {
+                        if let id = step.ticket {
+                            appModel.superagent.retry(id)
+                        } else {
+                            appModel.superagent.retryTask(view.id)
+                        }
+                    } label: {
+                        Label("重试", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("网络中断或执行卡住时，从当前进度重新唤醒执行")
+                    .accessibilityLabel("重试")
+                }
             }
+            .fixedSize()
         }
         .padding(.vertical, 12)
         .padding(.horizontal, 16)

@@ -481,6 +481,63 @@ extension SuperagentEngine {
         }
     }
 
+    /// 任务级一键重试（断网恢复 / 卡住续跑）：优先重试已报异常或停下的工单；若没有则强制重试名下所有打开的工单；
+    /// 若名下已无打开工单但仍有未完成的 Agent 清单项，则唤醒原工单或重新派单。返回本次触发的工单号列表。
+    @discardableResult
+    public func retryTask(_ id: Int64, by: String = "你") throws -> [Int64] {
+        try store.transaction {
+            let t = try requireTask(id)
+            guard t.status == .open else { throw SuperagentError("任务 \(t.label) \(t.status.label)，不能重试") }
+            let at = now()
+            let openTickets = try store.tickets(task: id).filter(\.isOpen)
+            let stuckTickets = try openTickets.filter { tk in
+                switch try view(tk).stage {
+                case .person(.blocked), .person(.failed), .person(.delivery), .person(.stalled), .idle: return true
+                default: return false
+                }
+            }
+            let targets = (stuckTickets.isEmpty ? openTickets : stuckTickets).map(\.id)
+            if !targets.isEmpty {
+                for tid in targets {
+                    try retry(tid, by: by, force: true)
+                }
+                try store.log(nil, "retry", "\(by)重试了任务（工单 \(targets.map { "#\($0)" }.joined(separator: "、"))）", at: at, task: id)
+                try orgChanged(id)
+                return targets
+            }
+
+            // 没有打开的工单，但还有未完成的 Agent 清单项：优先唤醒未停止的旧工单，否则重新建单。
+            let items = try store.items(id)
+            var resumable: [Int64] = []
+            var freshAllocations: [Allocation] = []
+            for item in items where item.status != .done {
+                if try !liveLinks(id, ord: item.ord).isEmpty { continue }
+                guard case .agent(let role) = item.assignee else { continue }
+                if let tid = item.ticketID, let old = try store.ticket(tid), old.status != .stopped {
+                    if !resumable.contains(tid) { resumable.append(tid) }
+                } else {
+                    freshAllocations.append(Allocation(ord: item.ord, to: .agent(role: role)))
+                }
+            }
+            var acted: [Int64] = []
+            for tid in resumable {
+                try feedback(tid, text: "\(by)要求重试并继续完成未完的清单项（若因断网中断请从当前进度继续）。", by: by)
+                try applyFollowUpToTask(try requireTicket(tid), by: by, at: at)
+                acted.append(tid)
+            }
+            if !freshAllocations.isEmpty {
+                let spawned = try assign(id, freshAllocations, oneTicket: true, by: by)
+                acted.append(contentsOf: spawned.map(\.id))
+            }
+            guard !acted.isEmpty else {
+                throw SuperagentError("任务 \(t.label) 当前没有可重试的工单或 Agent 清单项")
+            }
+            try store.log(nil, "retry", "\(by)重试了任务（工单 \(acted.map { "#\($0)" }.joined(separator: "、"))）", at: at, task: id)
+            try orgChanged(id)
+            return acted
+        }
+    }
+
     /// 取消：`status = cancelled`；名下打开的工单 `stop`（常驻角色正在做别的单时不中断，现有规则）；
     /// 依赖它的任务的清单项标 blocked 并进需要你（注意事项 C-09 / C-14）。
     public func cancelTask(_ id: Int64, by: String = "你") throws {

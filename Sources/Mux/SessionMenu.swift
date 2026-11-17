@@ -46,6 +46,13 @@ struct SessionMenuItems: View {
 
     @ViewBuilder private var liveItems: some View {
         let menu = appModel.sessionMenu
+        if let tv = appModel.ticket(for: conn), tv.ticket.isOpen {
+            Button("重试工单 #\(tv.id)") { appModel.superagent.retry(tv.id) }
+            if let taskID = tv.ticket.taskID {
+                Button("打开所属任务 A-\(taskID)") { appModel.openWorklist(task: taskID) }
+            }
+            Divider()
+        }
         Button("重命名…") { menu.renameText = conn.title; menu.renameTarget = conn }
         Divider()
 

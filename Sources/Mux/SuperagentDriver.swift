@@ -207,6 +207,29 @@ struct SuperagentTmux: Sendable {
                                 "Do you trust", "trust this folder", "Trust this folder",
                                 "Choose your color scheme", "Terms of Service & Data Use", "↑/↓ Navigate"]
 
+    /// Antigravity CLI (`agy`) TUI 空闲状态识别：
+    /// `agy` 在空闲提示符下每 ~2 秒刷新一次终端心跳，导致 `window_activity` 恒小于 `busyWindow` / `idleSeconds`。
+    /// 其底栏在执行中显示 `esc to cancel`，空闲等待输入（含断网/报错中断后停在提示符）显示 `? for shortcuts`。
+    static func isAgyIdle(_ screen: String) -> Bool {
+        let lines = screen.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let tail = lines.suffix(12).joined(separator: "\n")
+        let lower = tail.lowercased()
+        if lower.contains("esc to cancel") { return false }
+        return lower.contains("? for shortcuts") && !showsDialog(screen)
+    }
+
+    /// 终端最近输出是否包含明确的网络断开或上游服务不可用报错（用于在 Agent 因断网中断停在提示符时加速提醒或标记待重试）。
+    static func hasNetworkError(_ screen: String) -> Bool {
+        let tail = screen.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }.suffix(20).joined(separator: "\n").lowercased()
+        return networkErrorMarkers.contains { tail.contains($0) }
+    }
+    private static let networkErrorMarkers = [
+        "agy_error", "network error", "connection reset", "connection lost", "connection refused",
+        "econnreset", "etimedout", "enotfound", "tls handshake", "stream error", "deadline exceeded",
+        "网络连接已中断", "网络异常", "连接超时", "502 bad gateway", "503 service unavailable",
+    ]
+
     /// 在已有名字之外取一个可用的会话名（tmux 会话名不能含 `.` 和 `:`）。
     static func sessionName(_ base: String, taken: Set<String>) -> String {
         var clean = base.replacingOccurrences(of: ".", with: "·").replacingOccurrences(of: ":", with: "：")

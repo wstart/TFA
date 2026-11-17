@@ -169,18 +169,25 @@ public final class SuperagentEngine {
     }
 
     /// 重试：受阻 / 失败 / 送达失败 / 停下未回报 / 空闲的工单开一个新的 Assignment（沿用同一终端和目录）。
-    public func retry(_ id: Int64, by: String = "你") throws {
+    /// `force == true`（界面一键重试）：允许对任意打开中的工单（包括因断网或卡死仍停在「工作中」的工单）先中断当前挂起轮次再从断点重试。
+    public func retry(_ id: Int64, by: String = "你", force: Bool = false) throws {
         try store.transaction {
             var t = try requireTicket(id)
             guard t.status == .open else { throw SuperagentError("工单 #\(id) 已经结束") }
             let stage = try view(t).stage
             let launchQueued = try store.effect(.launch, String(id)) != nil
-            switch stage {
-            case .person(.blocked), .person(.failed), .person(.delivery), .person(.stalled), .idle: break
-            case .working(queued: true) where !launchQueued: break // 排队却没有启动在排：卡住了
-            default: throw SuperagentError("工单 #\(id) 现在是「\(stage.label)」，不需要重试")
+            if !force {
+                switch stage {
+                case .person(.blocked), .person(.failed), .person(.delivery), .person(.stalled), .idle: break
+                case .working(queued: true) where !launchQueued: break // 排队却没有启动在排：卡住了
+                default: throw SuperagentError("工单 #\(id) 现在是「\(stage.label)」，不需要重试")
+                }
             }
             let at = now()
+            let wasWorking: Bool = {
+                if case .working(queued: false) = stage { return true }
+                return false
+            }()
             let last = t.reportState.map { "上次回报 \($0.rawValue)：\(t.reportSummary)" } ?? "上次没有回报"
             if let a = try store.latestAssignment(id), a.state != .ended { try store.setAssignment(a.id, state: .ended, at: at, reason: "retry") }
             t.deliveryError = nil
@@ -189,7 +196,11 @@ public final class SuperagentEngine {
             t.updatedAt = at
             try store.saveTicket(t)
             _ = try store.insertAssignment(ticketID: id, reason: "retry", at: at)
-            _ = try store.insertInput(ticketID: id, kind: .system, text: "\(by)要求重试工单 #\(id)。\(last)", at: at)
+            let resumeNote = "\(by)要求重试工单 #\(id)（若上一轮因网络中断或异常停下，请先检查当前目录与已有进展，从断点继续完成并回报）。\(last)"
+            _ = try store.insertInput(ticketID: id, kind: .system, text: resumeNote, at: at)
+            if force && wasWorking {
+                try store.enqueue(.stop, String(id), at: at)
+            }
             try store.enqueue(.launch, String(id), at: at)
             try store.log(id, "retry", "\(by) 重试", at: at)
             try applyFollowUpToTask(t, by: by, at: at) // 工作清单：受阻的清单项回到工作中
