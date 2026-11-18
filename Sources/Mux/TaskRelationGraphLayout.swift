@@ -20,7 +20,7 @@ enum TaskRelationGraphLayout {
             let cardHeight: CGFloat = 114
             let rowGap: CGFloat = 14
             let headerHeight: CGFloat = 28
-            let canvasPaddingX: CGFloat = 12
+            let canvasPaddingX: CGFloat = 18
             let canvasPaddingY: CGFloat = 12
 
             let cardWidth: CGFloat
@@ -30,8 +30,8 @@ enum TaskRelationGraphLayout {
                 cardWidth = 248
                 columnGap = 72
             } else if columnCount == 3 {
-                columnGap = 60
-                let usable = availableWidth - canvasPaddingX * 2 - columnGap * 2 - 8
+                columnGap = 58
+                let usable = availableWidth - canvasPaddingX * 2 - columnGap * 2 - 4
                 cardWidth = max(208, min(228, floor(usable / 3)))
             } else {
                 cardWidth = 218
