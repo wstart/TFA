@@ -340,19 +340,35 @@ struct RolesCard: View {
         let sa = appModel.superagent
         VStack(alignment: .leading, spacing: Theme.Space.md) {
             Text("角色").font(Theme.Font.rowTitle)
-            Text("主管按「接什么」选角色，再交给这个角色的 Agent；常驻角色一个终端接多张单。没有合适的，主管会先和你对焦再新建。")
+            Text("主管按「接什么」选角色，再交给这个角色的 Agent；常驻角色可按并发上限开多个实例接单。没有合适的，主管会先和你对焦再新建。")
                 .font(.caption).foregroundStyle(Theme.textTertiary)
             ForEach(sa.roles) { r in
+                let load = sa.roleLoad(for: r.name)
                 Hairline()
                 HStack(alignment: .top, spacing: Theme.Space.md) {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: Theme.Space.sm) {
                             Text(r.name).font(Theme.Font.rowTitle).lineLimit(1)
-                            Text(r.traits).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                            Text("\(r.modeAndConcurrency) · \(r.edits ? "能改文件" : "只读") · \(r.review ? "待评审" : "直接交付")")
+                                .font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                            if load.running > 0 {
+                                StateTag(text: "运行中 \(load.running)/\(r.maxConcurrency)", tint: Theme.Status.positive)
+                            }
+                            if load.queued > 0 {
+                                StateTag(text: "排队 \(load.queued)", tint: Theme.Status.attention)
+                            }
+                            if load.running == 0 && load.queued == 0 {
+                                StateTag(text: "空闲", tint: Theme.Status.neutral)
+                            }
                         }
                         Text(r.scope).font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(2).help(r.scope)
                     }
                     Spacer(minLength: Theme.Space.sm)
+                    if r.standing {
+                        Button { sa.reloadIdleStandingTerminals(role: r.name) } label: { Image(systemName: "arrow.clockwise") }
+                            .buttonStyle(.borderless)
+                            .help("重载空闲终端：关闭当前未在跑工单的常驻终端，下次或立即拉起时加载最新提示词与模型配置")
+                    }
                     Button { editing = RoleDraft(role: r, isNew: false) } label: { Image(systemName: "pencil") }
                         .buttonStyle(.borderless).help("编辑")
                     if !r.isBuiltin {
@@ -414,13 +430,23 @@ private struct RoleSheet: View {
                 TextEditor(text: $role.behavior).editorBox().frame(height: 140)
             }
             VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                Toggle("常驻：一个终端先后接这个角色的所有单（追问带上下文）", isOn: $role.standing)
+                Toggle("常驻：终端先后接这个角色的工单（追问带上下文）", isOn: $role.standing)
                 Toggle("能改文件（否则只读）", isOn: $role.edits)
                 Toggle("交付后待评审（否则交付即结单）", isOn: $role.review)
             }
             .toggleStyle(.checkbox).font(.callout).disabled(builtin)
+            VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                Stepper(value: $role.maxConcurrency, in: 1...6) {
+                    Text("并发上限：\(role.maxConcurrency)").monospacedDigit()
+                }
+                .font(.callout)
+                Text(role.standing
+                     ? "常驻角色最多同时开 \(role.maxConcurrency) 个同角色终端实例并发接单；超出时新单排队。"
+                     : "每单角色最多同时运行 \(role.maxConcurrency) 张该角色工单（仍受全局并发槽位限制）。")
+                    .font(.caption).foregroundStyle(Theme.textTertiary)
+            }
             HStack(alignment: .firstTextBaseline) {
-                Text(builtin ? "内置角色的运行方式固定。" : "每单一个终端、能改文件的角色会建 git worktree。").foregroundStyle(Theme.textTertiary)
+                Text(builtin ? "内置角色的运行方式固定（可调并发上限）。" : "每单一个终端、能改文件的角色会建 git worktree。").foregroundStyle(Theme.textTertiary)
                 Spacer()
                 Text("\(role.behavior.count) / \(Role.maxBehavior)").monospacedDigit()
                     .foregroundStyle(role.behavior.count > Role.maxBehavior ? Theme.Status.error : Theme.textTertiary)

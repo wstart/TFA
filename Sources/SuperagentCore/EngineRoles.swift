@@ -23,6 +23,9 @@ extension SuperagentEngine {
         guard r.scope.count <= Role.maxScope else { throw SuperagentError("「接什么」最多 \(Role.maxScope) 字") }
         guard !r.behavior.isEmpty else { throw SuperagentError("角色「\(r.name)」缺少主要行为") }
         guard r.behavior.count <= Role.maxBehavior else { throw SuperagentError("主要行为最多 \(Role.maxBehavior) 字") }
+        guard (1...Role.maxConcurrencyLimit).contains(r.maxConcurrency) else {
+            throw SuperagentError("并发上限必须在 1 到 \(Role.maxConcurrencyLimit) 之间")
+        }
         return try store.transaction {
             var list = try store.roles()
             let old = list.firstIndex { $0.name == r.name }
@@ -74,9 +77,28 @@ extension SuperagentEngine {
             && (t.reportState == nil || t.reportState == .progress)
     }
 
-    /// 常驻角色的 Agent 正在做别的单：新单和跟进先排队，一次只交给它一张。
+    /// 某角色当前正在运行中的工单数（已进入本轮、尚未给出结论或问题）。
+    public func runningCount(role: String, excluding ticketID: Int64? = nil) throws -> Int {
+        try store.tickets(endedLimit: 0)
+            .filter { $0.id != ticketID && $0.role == role }
+            .map(view)
+            .filter(inTurn)
+            .count
+    }
+
+    /// 某角色当前正在被运行中工单占用的 tmux 会话名集合。
+    public func busySessions(role: String, excluding ticketID: Int64? = nil) throws -> Set<String> {
+        let active = try store.tickets(endedLimit: 0)
+            .filter { $0.id != ticketID && $0.role == role && !$0.session.isEmpty }
+            .map(view)
+            .filter(inTurn)
+        return Set(active.map { $0.ticket.session })
+    }
+
+    /// 某角色的运行中工单数已达到并发上限（`role.maxConcurrency`）：新单和跟进先排队。
     public func agentBusy(_ role: String, excluding id: Int64) throws -> Bool {
-        try store.tickets(endedLimit: 0).filter { $0.id != id && $0.role == role }.map(view).contains(where: inTurn)
+        let limit = try store.role(role)?.maxConcurrency ?? 1
+        return try runningCount(role: role, excluding: id) >= limit
     }
 
     /// 常驻终端里没写 `--ticket` 时，它此刻在做的那张单（恰好一张才算）。

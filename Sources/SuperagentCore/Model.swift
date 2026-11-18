@@ -339,16 +339,32 @@ public struct Role: Equatable, Sendable, Codable, Identifiable {
     public var scope: String
     /// 主要行为。
     public var behavior: String
-    /// 常驻：一个终端串行处理这个角色的所有工单，追问自带上下文；否则每单一个终端 + 目录。
+    /// 常驻：终端先后处理这个角色的工单，追问自带上下文；否则每单一个终端 + 目录。
     public var standing: Bool
     /// 能改文件（全部放行）；否则禁用编辑类工具，只读。
     public var edits: Bool
     /// ready 后进「待评审」等人通过；否则 ready 就是交付，工单自动结束。
     public var review: Bool
+    /// 并发上限（1...8）：常驻角色最多同时开的终端实例数；每单角色最多同时运行的工单数。
+    public var maxConcurrency: Int
 
-    public init(name: String, scope: String, behavior: String, standing: Bool, edits: Bool, review: Bool) {
+    public init(name: String, scope: String, behavior: String, standing: Bool, edits: Bool, review: Bool,
+                maxConcurrency: Int = 1) {
         self.name = name; self.scope = scope; self.behavior = behavior
         self.standing = standing; self.edits = edits; self.review = review
+        self.maxConcurrency = min(max(maxConcurrency, 1), Self.maxConcurrencyLimit)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        scope = try c.decode(String.self, forKey: .scope)
+        behavior = try c.decode(String.self, forKey: .behavior)
+        standing = try c.decode(Bool.self, forKey: .standing)
+        edits = try c.decode(Bool.self, forKey: .edits)
+        review = try c.decode(Bool.self, forKey: .review)
+        let rawMax = try c.decodeIfPresent(Int.self, forKey: .maxConcurrency) ?? 1
+        maxConcurrency = min(max(rawMax, 1), Self.maxConcurrencyLimit)
     }
 
     public var id: String { name }
@@ -359,9 +375,15 @@ public struct Role: Equatable, Sendable, Codable, Identifiable {
         [standing ? "常驻" : "每单一个终端", edits ? "能改文件" : "只读", review ? "待评审" : "直接交付"].joined(separator: " · ")
     }
 
+    /// 「常驻 · 并发 2」或「每单 · 上限 3」
+    public var modeAndConcurrency: String {
+        standing ? "常驻 · 并发 \(maxConcurrency)" : "每单 · 上限 \(maxConcurrency)"
+    }
+
     public static let maxName = 12
     public static let maxScope = 200
     public static let maxBehavior = 2000
+    public static let maxConcurrencyLimit = 8
 
     public static let assistant = "助理"
     public static let developer = "开发"
@@ -378,14 +400,14 @@ public struct Role: Equatable, Sendable, Codable, Identifiable {
              - 发现要改代码或文件才能完成，用 tfa handback 退回，由主管改派「开发」。
              - 追问不重新从头查：先用前面的结果，只补查新问的部分。
              """,
-             standing: true, edits: false, review: false),
+             standing: true, edits: false, review: false, maxConcurrency: 1),
         Role(name: developer,
              scope: "要提交的改动：代码、配置、脚本、仓库里的文档。每单一个终端和 git worktree，改完待评审。",
              behavior: """
              - 用项目已有的模式、库和工具函数，只改请求需要的部分，改动小而聚焦。
              - 修 bug 先复现再修；改动前后跑相关的构建和测试，没跑的检查在回报里写明原因。
              """,
-             standing: false, edits: true, review: true),
+             standing: false, edits: true, review: true, maxConcurrency: 3),
         Role(name: reviewer,
              scope: "开发工单交付后的核对：对照原始请求和人的追问，检查改动是否完整、相关改动有没有合并、能否构建运行。只读，不改代码。",
              behavior: """
@@ -393,7 +415,7 @@ public struct Role: Equatable, Sendable, Codable, Identifiable {
              - 只报真实问题，附复现步骤或证据；不提风格偏好。
              - 结论第一句写「通过」或「有问题」，再列要点（写「有问题」将自动退回开发工单返工）；没问题就一句「通过：…」。
              """,
-             standing: true, edits: false, review: false),
+             standing: true, edits: false, review: false, maxConcurrency: 1),
     ]
 }
 
