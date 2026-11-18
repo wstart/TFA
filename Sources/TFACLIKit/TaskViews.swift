@@ -146,6 +146,8 @@ extension Views {
         if let of = t.reviewOf { return s + "你负责的清单项：没有（这张单核对 #\(of) 的交付）\n" }
         let mine = try engine.store.items(taskID).filter { t.itemIDs.contains($0.id) }
         s += mine.isEmpty ? "你负责的清单项：没有\n" : "你负责的清单项：\n" + mine.map { $0.line + "\n" }.joined()
+        let priorBlock = try engine.priorCompletedItemsContext(taskID: taskID, mineItemIDs: Set(t.itemIDs))
+        if !priorBlock.isEmpty { s += priorBlock + "\n" }
         if let taskObj {
             let kbBlock = try engine.knowledgeContextBlock(for: taskObj)
             if !kbBlock.isEmpty { s += kbBlock + "\n" }

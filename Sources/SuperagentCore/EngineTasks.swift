@@ -321,7 +321,8 @@ extension SuperagentEngine {
             for (k, g) in groups.enumerated() {
                 let role = roles[g.role]!
                 let mine = g.ords.map { items[index($0)] }
-                let request = Self.agentRequest(task: t, mine: mine, all: items, knowledgeContext: kbContext)
+                let priorContext = try priorCompletedItemsContext(taskID: t.id, mineItemIDs: Set(mine.map(\.id)))
+                let request = Self.agentRequest(task: t, mine: mine, all: items, knowledgeContext: kbContext, priorContext: priorContext)
                 let title = String("\(t.title) · \(Self.ordLabel(g.ords))".prefix(WorkTask.maxTitle))
                 // 人分配：每张工单一条「task:A-N」事件；自动接单：第一张直接挂在原事件上，其余（不会有）各建一条。
                 var trigger: Trigger
@@ -553,38 +554,57 @@ extension SuperagentEngine {
     }
 
     /// 取消：`status = cancelled`；名下打开的工单 `stop`（常驻角色正在做别的单时不中断，现有规则）；
-    /// 依赖它的任务的清单项标 blocked 并进需要你（注意事项 C-09 / C-14）。
+    /// 依赖它的任务的清单项标 blocked 并进需要你（注意事项 C-09 / C-14）；
+    /// 名下通过 `handbackLinks` 衍生出且仍打开的未脱离退回子任务一并级联取消。
     public func cancelTask(_ id: Int64, by: String = "你") throws {
         try store.transaction {
-            var t = try requireTask(id)
+            let t = try requireTask(id)
             guard t.status == .open else { throw SuperagentError("任务 \(t.label) \(t.status.label)，不用取消") }
-            let at = now()
-            t.status = .cancelled
-            t.notifiedStage = nil
-            t.updatedAt = at
-            try store.saveTask(t) // 先置取消，再停工单（停工单会尝试推进任务，取消的任务不动）
-            let open = try store.tickets(task: id).filter(\.isOpen)
-            for ticket in open { try stop(ticket.id, by: by, reason: "任务 \(t.label) 已取消") }
-            try store.dropEffect(.notify, t.label)
-            try store.log(nil, "cancelled", "\(by)取消了任务" + (open.isEmpty ? "" : "，停止了工单 " + open.map { "#\($0.id)" }.joined(separator: "、")),
-                          at: at, task: id)
-            try handbackTargetEnded(t, at: at) // 4A：退回产生的任务 → 原任务的那一项回到待分配
-            // 依赖它的任务：没在做的项标受阻，进「需要你」（正在被工单做的项由工单自己管）。
-            for dep in try store.dependents(of: id) {
-                guard let d = try store.task(dep), d.status == .open else { continue }
-                var blocked: [Int] = []
-                for var i in try store.items(dep) where i.status == .todo || i.status == .doing {
-                    if let tid = i.ticketID, let tk = try store.ticket(tid), tk.isOpen { continue }
-                    i.status = .blocked
-                    try store.saveItem(i)
-                    blocked.append(i.ord)
-                }
-                guard !blocked.isEmpty else { continue }
-                try store.log(nil, "blocked", "前置任务 \(t.label) 已取消，\(Self.ordLabel(blocked))受阻", at: at, task: dep)
-                try store.enqueue(.notify, d.label, at: at)
-            }
-            try orgChanged(id) // 组织任务：本地取消 = 这个节点放弃，上行
+            var visited: Set<Int64> = []
+            try cancelTaskInternal(id, by: by, cascadeNote: nil, at: now(), visited: &visited)
         }
+    }
+
+    private func cancelTaskInternal(_ id: Int64, by: String, cascadeNote: String?, at: Double, visited: inout Set<Int64>) throws {
+        guard !visited.contains(id) else { return }
+        visited.insert(id)
+        var t = try requireTask(id)
+        guard t.status == .open else { return }
+        t.status = .cancelled
+        t.notifiedStage = nil
+        t.updatedAt = at
+        try store.saveTask(t) // 先置取消，再停工单（停工单会尝试推进任务，取消的任务不动）
+        let open = try store.tickets(task: id).filter(\.isOpen)
+        for ticket in open { try stop(ticket.id, by: by, reason: "任务 \(t.label) 已取消") }
+        try store.dropEffect(.notify, t.label)
+        let prefix = cascadeNote ?? "\(by)取消了任务"
+        try store.log(nil, "cancelled", prefix + (open.isEmpty ? "" : "，停止了工单 " + open.map { "#\($0.id)" }.joined(separator: "、")),
+                      at: at, task: id)
+        try handbackTargetEnded(t, at: at) // 4A：退回产生的任务 → 原任务的那一项回到待分配
+        // 依赖它的任务：没在做的项标受阻，进「需要你」（正在被工单做的项由工单自己管）。
+        for dep in try store.dependents(of: id) {
+            guard let d = try store.task(dep), d.status == .open else { continue }
+            var blocked: [Int] = []
+            for var i in try store.items(dep) where i.status == .todo || i.status == .doing {
+                if let tid = i.ticketID, let tk = try store.ticket(tid), tk.isOpen { continue }
+                i.status = .blocked
+                try store.saveItem(i)
+                blocked.append(i.ord)
+            }
+            guard !blocked.isEmpty else { continue }
+            try store.log(nil, "blocked", "前置任务 \(t.label) 已取消，\(Self.ordLabel(blocked))受阻", at: at, task: dep)
+            try store.enqueue(.notify, d.label, at: at)
+        }
+        // 级联取消名下未脱离且仍打开的退回衍生子任务
+        let detached = try store.detachedHandbacks()
+        let childIDs = try store.handbackLinks()
+            .filter { $0.fromTaskID == id && !detached.contains($0.toTaskID) }
+            .map(\.toTaskID)
+        for childID in childIDs {
+            guard let child = try store.task(childID), child.status == .open else { continue }
+            try cancelTaskInternal(childID, by: by, cascadeNote: "因原任务 A-\(id) 已取消，一并取消", at: at, visited: &visited)
+        }
+        try orgChanged(id) // 组织任务：本地取消 = 这个节点放弃，上行
     }
 
     /// 已放弃（§4.1、§5.3、注意事项 D-04）：Agent 把它的项都报了 dropped、人确认。只在「所有项都未分配且没有一项 done」时允许，
@@ -645,6 +665,8 @@ extension SuperagentEngine {
         let summary = Self.clip(r.summary, 400)
         var relay: String?
         var finished: [Int] = []
+        var autoBouncedDevID: Int64?
+        var autoBouncedRound = 0
         switch r.state {
         case .progress:
             if let ord = r.item {
@@ -698,8 +720,27 @@ extension SuperagentEngine {
                     try store.saveItem(updated)
                 }
             }
-            if t.reviewOf != nil {
+            if let devID = t.reviewOf {
                 try store.log(t.id, "review", "评审结论（工单 #\(t.id)）：\(summary)", at: at, task: taskID)
+                let roundKey = "review.round.\(devID)"
+                if Self.isReviewRejected(r.summary),
+                   let devTicket = try store.ticket(devID),
+                   devTicket.status != .stopped {
+                    let currentRound = try store.kvInt(roundKey) ?? 0
+                    if currentRound < 2 {
+                        let nextRound = currentRound + 1
+                        try store.setKV(roundKey, String(nextRound))
+                        try feedback(devTicket.id,
+                                     text: "自动评审发现问题（第 \(nextRound) 轮），请修复后重新回报：\n\(r.summary)",
+                                     by: "评审")
+                        try applyFollowUpToTask(try requireTicket(devTicket.id), by: "评审", at: at, redo: true)
+                        try store.log(t.id, "review", "自动评审第 \(nextRound) 轮不通过，已退回工单 #\(devTicket.id) 返工", at: at, task: taskID)
+                        autoBouncedDevID = devTicket.id
+                        autoBouncedRound = nextRound
+                    }
+                } else if !Self.isReviewRejected(r.summary) {
+                    try store.setKV(roundKey, nil)
+                }
             } else {
                 try store.log(t.id, "item", "工单 #\(t.id)（\(t.role)）交付" + (finished.isEmpty ? "" : "，\(Self.ordLabel(finished))完成") + "：\(summary)", at: at, task: taskID)
                 if let role = try store.role(t.role), role.edits, role.review { try autoReview(for: t, at: at) }
@@ -721,25 +762,29 @@ extension SuperagentEngine {
         case .waiting:
             break // 由 TFA 自己记（D-05），不进 report()
         }
-        try advanceIfComplete(taskID, at: at)
+        if autoBouncedDevID == nil { try advanceIfComplete(taskID, at: at) }
         if r.state == .ready, delivered {
-            let after = try requireTask(taskID)
-            let open = try store.tickets(task: taskID).filter(\.isOpen)
-            let lead = t.reviewOf != nil
-                ? "评审结论（工单 #\(t.id)）：\(Self.sentence(summary))"
-                : "\(Self.ordLabel(finished.isEmpty ? mine.map(\.ord) : finished))已完成（工单 #\(t.id)，\(t.role)）：\(Self.sentence(summary))"
-            let tail: String
-            if let review = open.first(where: { $0.reviewOf == t.id }) {
-                tail = "已派评审（工单 #\(review.id)），结论出来会进「待评审」"
-            } else if after.status == .done {
-                tail = "任务已完成"
-            } else if after.stageKind == .review {
-                tail = "已进入待评审，在「需要你」里等人通过"
+            if let devID = autoBouncedDevID {
+                relay = "\(head)评审工单 #\(t.id) 发现问题（第 \(autoBouncedRound) 轮），已自动退回工单 #\(devID) 返工：\(Self.sentence(summary))"
             } else {
-                let left = try store.items(taskID).filter { $0.status != .done }.map(\.ord)
-                tail = left.isEmpty ? "等自动评审的结论" : "清单还有\(Self.ordLabel(left))没完成"
+                let after = try requireTask(taskID)
+                let open = try store.tickets(task: taskID).filter(\.isOpen)
+                let lead = t.reviewOf != nil
+                    ? "评审结论（工单 #\(t.id)）：\(Self.sentence(summary))"
+                    : "\(Self.ordLabel(finished.isEmpty ? mine.map(\.ord) : finished))已完成（工单 #\(t.id)，\(t.role)）：\(Self.sentence(summary))"
+                let tail: String
+                if let review = open.first(where: { $0.reviewOf == t.id }) {
+                    tail = "已派评审（工单 #\(review.id)），结论出来会进「待评审」"
+                } else if after.status == .done {
+                    tail = "任务已完成"
+                } else if after.stageKind == .review {
+                    tail = "已进入待评审，在「需要你」里等人通过"
+                } else {
+                    let left = try store.items(taskID).filter { $0.status != .done }.map(\.ord)
+                    tail = left.isEmpty ? "等自动评审的结论" : "清单还有\(Self.ordLabel(left))没完成"
+                }
+                relay = "\(head)\(lead)。\(tail)。"
             }
-            relay = "\(head)\(lead)。\(tail)。"
         }
         if let relay { try queueRelay(t.id, relay, at: at) }
         if ask != nil || r.state == .blocked || r.state == .failed { try store.enqueue(.notify, task.label, at: at) }
@@ -791,7 +836,7 @@ extension SuperagentEngine {
         if !items.isEmpty { s += "工单 #\(dev.id) 负责的清单项：\n" + items.map(\.line).joined(separator: "\n") + "\n" }
         s += "工单 #\(dev.id) 的回报：\(dev.reportSummary)\n"
         s += "工作目录：\(dir)" + (dev.branch.isEmpty ? "" : "（分支 \(dev.branch)）") + "\n"
-        s += "对照原文和清单项核对：改动是否完整、相关改动有没有合并、能否构建运行。只读，不改文件。结论第一句写「通过」或「有问题」。"
+        s += "对照原文和清单项核对：改动是否完整、相关改动有没有合并、能否构建运行。只读，不改文件。结论第一句写「通过」或「有问题」（写「有问题」将自动退回开发工单返工）。"
         var trigger = Trigger(id: try store.nextTriggerID(), source: "review:#\(dev.id)", strength: .explicit, text: s,
                               repo: dir, status: .pending, ticketID: nil, createdAt: at)
         try store.insertTrigger(trigger)
@@ -1271,12 +1316,56 @@ extension SuperagentEngine {
         guard isDir.boolValue else { throw SuperagentError("任务 \(t.label) 的范围不是目录：\(t.scope)") }
     }
 
+    /// 评审结论是否表示不通过：去掉首尾空白后，不以「通过」开头，且首行包含打回关键词。
+    static func isReviewRejected(_ summary: String) -> Bool {
+        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.hasPrefix("通过") { return false }
+        let firstLine = trimmed.split(whereSeparator: \.isNewline).first.map(String.init) ?? trimmed
+        let keywords = ["有问题", "不通过", "未通过", "需修改", "拒绝", "驳回"]
+        return keywords.contains { firstLine.contains($0) }
+    }
+
+    /// 同任务内前序已完成清单项的结论摘要（供后续执行者接力，不暴露他人角色/工单号，符合 D-06）。
+    public func priorCompletedItemsContext(taskID: Int64, mineItemIDs: Set<Int64>) throws -> String {
+        let doneOthers = try store.items(taskID)
+            .filter { !mineItemIDs.contains($0.id) && $0.status == .done }
+            .sorted { $0.ord < $1.ord }
+        var lines: [String] = []
+        for item in doneOthers {
+            var text = item.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.isEmpty, let tid = item.ticketID, let tk = try store.ticket(tid) {
+                text = tk.reportSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard !text.isEmpty else { continue }
+            let clipped = Self.clip(text, 160)
+            lines.append("- 第 \(item.ord) 项（\(item.text)）：\(clipped)")
+        }
+        guard !lines.isEmpty else { return "" }
+        let header = "前序已完成清单项结论：\n"
+        var body = ""
+        let budget = max(0, 500 - header.count)
+        for line in lines {
+            let candidate = body.isEmpty ? line : body + "\n" + line
+            if candidate.count <= budget {
+                body = candidate
+            } else {
+                if body.isEmpty, budget > 0 {
+                    body = String(line.prefix(max(0, budget - 1))) + "…"
+                }
+                break
+            }
+        }
+        return body.isEmpty ? "" : header + body
+    }
+
     /// 执行者看到的请求文本（§5.2）：「其余清单项」只列序号和一句话，不写谁在做、不写别人的工单号（注意事项 D-06）。
-    static func agentRequest(task t: WorkTask, mine: [Item], all: [Item], knowledgeContext: String = "") -> String {
+    static func agentRequest(task t: WorkTask, mine: [Item], all: [Item], knowledgeContext: String = "", priorContext: String = "") -> String {
         var s = "[任务 \(t.label)] \(t.title)\n原文：\(t.request)\n你负责的清单项：\n"
         s += mine.map(\.line).joined(separator: "\n") + "\n"
         let others = all.filter { o in !mine.contains { $0.id == o.id } }
         if !others.isEmpty { s += "其余清单项（不归你）：" + others.map(\.line).joined(separator: " · ") + "\n" }
+        if !priorContext.isEmpty { s += priorContext + "\n" }
         if !t.scope.isEmpty { s += "目录：\(t.scope)\n" }
         if !knowledgeContext.isEmpty { s += knowledgeContext + "\n" }
         s += "完成一项就 `tfa report --state progress --item <n> --summary …`；全部完成报 ready。"

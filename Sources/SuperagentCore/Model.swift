@@ -391,7 +391,7 @@ public struct Role: Equatable, Sendable, Codable, Identifiable {
              behavior: """
              - 只审不改：到工单写明的工作目录里读 diff、跑构建和测试，不改任何文件。
              - 只报真实问题，附复现步骤或证据；不提风格偏好。
-             - 结论第一句写「通过」或「有问题」，再列要点；没问题就一句「通过：…」。
+             - 结论第一句写「通过」或「有问题」，再列要点（写「有问题」将自动退回开发工单返工）；没问题就一句「通过：…」。
              """,
              standing: true, edits: false, review: false),
     ]
