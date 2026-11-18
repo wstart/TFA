@@ -120,16 +120,39 @@ public struct TaskRelationNode: Equatable, Sendable, Identifiable {
     public var isStandaloneKnowledge: Bool { taskID == nil && knowledgeID != nil }
 }
 
+/// 脉络图中的有向无环边（`fromID` 位于上游，`toID` 位于下游）。
+public struct TaskRelationEdge: Equatable, Hashable, Sendable, Identifiable {
+    public var fromID: String
+    public var toID: String
+    public var kind: TaskRelationKind
+
+    public init(fromID: String, toID: String, kind: TaskRelationKind) {
+        self.fromID = fromID
+        self.toID = toID
+        self.kind = kind
+    }
+
+    public var id: String { "\(fromID)->\(toID)" }
+}
+
 /// 围绕 `focusTaskID` 构建的多跳关联清单树容器。
 public struct TaskRelationTree: Equatable, Sendable, Identifiable {
     public var focusTaskID: Int64
     public var roots: [TaskRelationNode]
+    /// 连通子图经确定性去环后的全部有向边（保留多父汇聚边与菱形边）。
+    public var edges: [TaskRelationEdge]
     /// 除焦点任务自身外的关联节点总数。
     public var totalRelatedCount: Int
 
-    public init(focusTaskID: Int64, roots: [TaskRelationNode], totalRelatedCount: Int) {
+    public init(
+        focusTaskID: Int64,
+        roots: [TaskRelationNode],
+        edges: [TaskRelationEdge] = [],
+        totalRelatedCount: Int
+    ) {
         self.focusTaskID = focusTaskID
         self.roots = roots
+        self.edges = edges
         self.totalRelatedCount = totalRelatedCount
     }
 
@@ -328,12 +351,76 @@ extension SuperagentEngine {
         var outgoing: [RelationNodeKey: [(to: RelationNodeKey, kind: TaskRelationKind)]] = [:]
         var inDegree: [RelationNodeKey: Int] = Dictionary(uniqueKeysWithValues: validNodes.map { ($0, 0) })
 
+        struct CandidateEdge {
+            let from: RelationNodeKey
+            let to: RelationNodeKey
+            let kind: TaskRelationKind
+        }
+        var candidateEdges: [CandidateEdge] = []
+        candidateEdges.reserveCapacity(edgeKinds.count)
+
         for (edge, kind) in edgeKinds where validNodes.contains(edge.from) && validNodes.contains(edge.to) {
             outgoing[edge.from, default: []].append((edge.to, kind))
             inDegree[edge.to, default: 0] += 1
+            candidateEdges.append(CandidateEdge(from: edge.from, to: edge.to, kind: kind))
         }
         for key in outgoing.keys {
             outgoing[key]?.sort { $0.to < $1.to }
+        }
+
+        // 4b. 构建确定性去环有向无环边集 edges（Cycle-safe DAG）：
+        //     - 无环图 100% 保留全部多父汇聚边、菱形依赖与侧支连线；
+        //     - 有向环出现时，按确定性优先级逐条加入 dagAdj（加入 u -> v 前检查是否已存在路径 v ~> u）。
+        candidateEdges.sort { a, b in
+            let aTouchesFocus = (a.from == focusKey || a.to == focusKey)
+            let bTouchesFocus = (b.from == focusKey || b.to == focusKey)
+            if aTouchesFocus != bTouchesFocus {
+                return aTouchesFocus
+            }
+            let aMinDist = min(distances[a.from] ?? Int.max, distances[a.to] ?? Int.max)
+            let bMinDist = min(distances[b.from] ?? Int.max, distances[b.to] ?? Int.max)
+            if aMinDist != bMinDist {
+                return aMinDist < bMinDist
+            }
+            if a.kind.priorityRank != b.kind.priorityRank {
+                return a.kind.priorityRank > b.kind.priorityRank
+            }
+            if a.from != b.from {
+                return a.from < b.from
+            }
+            return a.to < b.to
+        }
+
+        var dagAdj: [RelationNodeKey: [RelationNodeKey]] = [:]
+        func hasDirectedPath(from start: RelationNodeKey, to target: RelationNodeKey) -> Bool {
+            if start == target { return true }
+            var seen = Set<RelationNodeKey>([start])
+            var stack: [RelationNodeKey] = [start]
+            while let curr = stack.popLast() {
+                for next in dagAdj[curr] ?? [] {
+                    if next == target { return true }
+                    if seen.insert(next).inserted {
+                        stack.append(next)
+                    }
+                }
+            }
+            return false
+        }
+
+        var acceptedEdges: [CandidateEdge] = []
+        acceptedEdges.reserveCapacity(candidateEdges.count)
+        for cand in candidateEdges {
+            guard cand.from != cand.to, !hasDirectedPath(from: cand.to, to: cand.from) else { continue }
+            dagAdj[cand.from, default: []].append(cand.to)
+            acceptedEdges.append(cand)
+        }
+
+        acceptedEdges.sort { lhs, rhs in
+            if lhs.from != rhs.from { return lhs.from < rhs.from }
+            return lhs.to < rhs.to
+        }
+        let dagEdges = acceptedEdges.map {
+            TaskRelationEdge(fromID: $0.from.idString, toID: $0.to.idString, kind: $0.kind)
         }
 
         // 5. 选定无环生成森林的根集合：
@@ -444,7 +531,12 @@ extension SuperagentEngine {
         }
 
         let relatedCount = max(0, visited.count - 1)
-        return TaskRelationTree(focusTaskID: focusTaskID, roots: roots, totalRelatedCount: relatedCount)
+        return TaskRelationTree(
+            focusTaskID: focusTaskID,
+            roots: roots,
+            edges: dagEdges,
+            totalRelatedCount: relatedCount
+        )
     }
 
     // MARK: - 状态与高信噪比简介提取
