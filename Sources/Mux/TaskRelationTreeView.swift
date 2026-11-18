@@ -152,13 +152,13 @@ struct TaskRelationTreeCard: View {
         HStack(alignment: .center, spacing: 12) {
             HStack(spacing: 5) {
                 LegendSampleLine(dashed: false)
-                Text("依赖 / 退回")
+                Text("任务清单（依赖 / 退回）")
                     .font(.system(size: 10.5))
                     .foregroundStyle(Theme.textTertiary)
             }
             HStack(spacing: 5) {
                 LegendSampleLine(dashed: true)
-                Text("经验参考")
+                Text("✦ 经验参考 / 衍生")
                     .font(.system(size: 10.5))
                     .foregroundStyle(Theme.textTertiary)
             }
@@ -428,26 +428,51 @@ struct TaskRelationTreeCard: View {
                 let isAdjacentHovered = hoveredNodeID != nil && connectedIDs.contains(positioned.id)
                 let isDimmed = hoveredNodeID != nil && !connectedIDs.contains(positioned.id)
 
-                TaskRelationNodeCard(
-                    positioned: positioned,
-                    editable: editable,
-                    isSelfHovered: isSelfHovered,
-                    isAdjacentHovered: isAdjacentHovered,
-                    isDimmed: isDimmed,
-                    onHoverChanged: { hovering in
-                        withAnimation(.easeOut(duration: 0.14)) {
-                            if hovering {
-                                hoveredNodeID = positioned.id
-                            } else if hoveredNodeID == positioned.id {
-                                hoveredNodeID = nil
+                Group {
+                    if positioned.isExperienceStyle {
+                        ExperienceRelationCard(
+                            positioned: positioned,
+                            editable: editable,
+                            isSelfHovered: isSelfHovered,
+                            isAdjacentHovered: isAdjacentHovered,
+                            isDimmed: isDimmed,
+                            onHoverChanged: { hovering in
+                                withAnimation(.easeOut(duration: 0.14)) {
+                                    if hovering {
+                                        hoveredNodeID = positioned.id
+                                    } else if hoveredNodeID == positioned.id {
+                                        hoveredNodeID = nil
+                                    }
+                                }
+                            },
+                            onNavigate: { navigate(to: positioned.node) },
+                            onUnlink: { kid in
+                                sa.removeTaskKnowledgeLink(view.id, knowledgeID: kid)
                             }
-                        }
-                    },
-                    onNavigate: { navigate(to: positioned.node) },
-                    onUnlink: { kid in
-                        sa.removeTaskKnowledgeLink(view.id, knowledgeID: kid)
+                        )
+                    } else {
+                        TaskRelationNodeCard(
+                            positioned: positioned,
+                            editable: editable,
+                            isSelfHovered: isSelfHovered,
+                            isAdjacentHovered: isAdjacentHovered,
+                            isDimmed: isDimmed,
+                            onHoverChanged: { hovering in
+                                withAnimation(.easeOut(duration: 0.14)) {
+                                    if hovering {
+                                        hoveredNodeID = positioned.id
+                                    } else if hoveredNodeID == positioned.id {
+                                        hoveredNodeID = nil
+                                    }
+                                }
+                            },
+                            onNavigate: { navigate(to: positioned.node) },
+                            onUnlink: { kid in
+                                sa.removeTaskKnowledgeLink(view.id, knowledgeID: kid)
+                            }
+                        )
                     }
-                )
+                }
                 .position(x: positioned.frame.midX, y: positioned.frame.midY)
             }
         }
@@ -537,7 +562,143 @@ private extension TaskRelationGraphLayout.PositionedNode {
     var nodeKeyForFoldLayer: String { "fold:\(id)" }
 }
 
-// MARK: - 四层定宽节点卡片
+// MARK: - 极简「经验参考 / 经验衍生」轻量便签卡（与工作清单实体卡片明显区分）
+
+private struct ExperienceRelationCard: View {
+    let positioned: TaskRelationGraphLayout.PositionedNode
+    let editable: Bool
+    let isSelfHovered: Bool
+    let isAdjacentHovered: Bool
+    let isDimmed: Bool
+    let onHoverChanged: (Bool) -> Void
+    let onNavigate: () -> Void
+    let onUnlink: (Int64) -> Void
+
+    private var node: TaskRelationNode { positioned.node }
+
+    private var badgeText: String {
+        let base: String
+        if positioned.relativeStep > 0 {
+            base = "经验衍生"
+        } else if node.isStandaloneKnowledge {
+            base = "经验卡"
+        } else {
+            base = "经验参考"
+        }
+        return node.isIndirect ? "\(base)·间接" : base
+    }
+
+    var body: some View {
+        let summaryText = node.summary.isEmpty ? "点击查看经验摘要" : node.summary
+
+        VStack(alignment: .leading, spacing: 5) {
+            // 第 1 行：✦ 经验轻标签 + 编号 + 单行标题 + 悬停移除按钮
+            HStack(alignment: .center, spacing: 5) {
+                HStack(spacing: 2.5) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 8.5, weight: .semibold))
+                    Text(badgeText)
+                        .font(.system(size: 9.5, weight: .medium))
+                }
+                .foregroundStyle(Theme.textSecondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1.5)
+                .background(Theme.accent.opacity(0.38), in: RoundedRectangle(cornerRadius: 4))
+                .fixedSize()
+
+                Text(node.label)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Theme.textTertiary)
+                    .fixedSize()
+
+                Text(node.title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if editable, let unlinkKBID = node.canUnlinkFromFocus {
+                    Button {
+                        onUnlink(unlinkKBID)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(width: 16, height: 16)
+                            .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 4))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .opacity(isSelfHovered ? 1 : 0)
+                    .allowsHitTesting(isSelfHovered)
+                    .help("移除当前清单与 \(node.label) 的经验关联")
+                    .accessibilityLabel("移除 \(node.label) 经验关联")
+                }
+            }
+
+            // 第 2 行：一句话核心经验（极简 1 行，无进度条与状态框干扰）
+            Text(summaryText)
+                .font(.system(size: 11))
+                .foregroundStyle(node.summary.isEmpty ? Theme.textTertiary.opacity(0.7) : Theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 10)
+        .padding(.vertical, 8)
+        .frame(width: positioned.frame.width, height: positioned.frame.height, alignment: .center)
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                    .fill(Theme.canvas)
+                RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                    .fill(Theme.accent.opacity(isSelfHovered ? 0.28 : 0.16))
+            }
+        }
+        .overlay(alignment: .leading) {
+            UnevenRoundedRectangle(
+                topLeadingRadius: Theme.Radius.sm,
+                bottomLeadingRadius: Theme.Radius.sm,
+                bottomTrailingRadius: 0,
+                topTrailingRadius: 0
+            )
+            .fill(Theme.accent)
+            .frame(width: 3.5)
+            .allowsHitTesting(false)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                .strokeBorder(
+                    isSelfHovered || isAdjacentHovered ? Theme.brand.opacity(0.65) : Theme.borderStrong.opacity(0.85),
+                    style: StrokeStyle(
+                        lineWidth: isSelfHovered || isAdjacentHovered ? 1.25 : 1.0,
+                        lineCap: .round,
+                        dash: [4, 3]
+                    )
+                )
+        )
+        .opacity(isDimmed ? 0.52 : 1.0)
+        .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
+        .onHover(perform: onHoverChanged)
+        .onTapGesture(perform: onNavigate)
+        .help(tooltipText)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(badgeText)，\(node.label) \(node.title)，\(node.summary)")
+    }
+
+    private var tooltipText: String {
+        let header = "[\(badgeText)] \(node.label) \(node.title)"
+        let actionHint = node.isStandaloneKnowledge ? "点击在知识库中查看 \(node.label)" : "点击查看历史任务 \(node.label)"
+        if node.summary.isEmpty {
+            return "\(header)\n\n\(actionHint)"
+        }
+        return "\(header)\n\(node.summary)\n\n\(actionHint)"
+    }
+}
+
+// MARK: - 四层定宽任务工作清单卡片
 
 private struct TaskRelationNodeCard: View {
     let positioned: TaskRelationGraphLayout.PositionedNode

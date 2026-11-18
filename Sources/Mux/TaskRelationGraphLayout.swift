@@ -10,6 +10,7 @@ enum TaskRelationGraphLayout {
     struct Metrics: Equatable, Sendable {
         var cardWidth: CGFloat
         var cardHeight: CGFloat
+        var experienceCardHeight: CGFloat = 64
         var columnGap: CGFloat
         var rowGap: CGFloat
         var headerHeight: CGFloat
@@ -18,6 +19,7 @@ enum TaskRelationGraphLayout {
 
         static func adaptive(columnCount: Int, availableWidth: CGFloat = 824) -> Metrics {
             let cardHeight: CGFloat = 114
+            let experienceCardHeight: CGFloat = 64
             let rowGap: CGFloat = 14
             let headerHeight: CGFloat = 28
             let canvasPaddingX: CGFloat = 18
@@ -41,6 +43,7 @@ enum TaskRelationGraphLayout {
             return Metrics(
                 cardWidth: cardWidth,
                 cardHeight: cardHeight,
+                experienceCardHeight: experienceCardHeight,
                 columnGap: columnGap,
                 rowGap: rowGap,
                 headerHeight: headerHeight,
@@ -66,6 +69,8 @@ enum TaskRelationGraphLayout {
         let relativeStep: Int
         let frame: CGRect
         let primaryRelation: TaskRelationKind?
+        /// 是否采用精简「经验参考 / 经验衍生」轻量卡片样式（与本任务硬工作流清单卡明确区分）。
+        let isExperienceStyle: Bool
         let upstreamFoldToken: String?
         let isUpstreamCollapsed: Bool
         let hiddenUpstreamCount: Int
@@ -344,14 +349,44 @@ enum TaskRelationGraphLayout {
         let visibleIDs = computeVisibleIDs(activeTokens: sanitizedCollapsed)
         let visibleEdges = dagEdges.filter { visibleIDs.contains($0.fromID) && visibleIDs.contains($0.toID) }
 
+        // 识别硬工作流连通集（仅沿前置依赖 dependency 与退回衍生 handback 无向可达 anchorID 的清单节点）：
+        // 凡不属于硬工作流连通集（即经由经验关联引入或衍生）或本身是独立知识卡的非焦点节点，均采用轻量「经验」卡片样式。
+        let workflowConnectedIDs: Set<String> = {
+            var wfAdj: [String: [String]] = [:]
+            for edge in dagEdges where edge.kind != .experience {
+                wfAdj[edge.fromID, default: []].append(edge.toID)
+                wfAdj[edge.toID, default: []].append(edge.fromID)
+            }
+            var visited: Set<String> = [anchorID]
+            var q: [String] = [anchorID]
+            var idx = 0
+            while idx < q.count {
+                let curr = q[idx]
+                idx += 1
+                for nxt in wfAdj[curr] ?? [] where !visited.contains(nxt) {
+                    visited.insert(nxt)
+                    q.append(nxt)
+                }
+            }
+            return visited
+        }()
+
         // 4. 分列与列内 Barycenter 重心排序
         var columnBuckets: [Int: [String]] = [:]
+        var isExperienceByID: [String: Bool] = [:]
+        var heightByID: [String: CGFloat] = [:]
         for node in orderedNodes where visibleIDs.contains(node.id) {
             let step = stepsByID[node.id] ?? 0
             columnBuckets[step, default: []].append(node.id)
         }
         let sortedSteps = columnBuckets.keys.sorted()
         let metrics = Metrics.adaptive(columnCount: sortedSteps.count, availableWidth: availableWidth)
+        for node in orderedNodes where visibleIDs.contains(node.id) {
+            let isExp = !node.isFocus && node.id != anchorID
+                && (node.isStandaloneKnowledge || !workflowConnectedIDs.contains(node.id))
+            isExperienceByID[node.id] = isExp
+            heightByID[node.id] = isExp ? metrics.experienceCardHeight : metrics.cardHeight
+        }
 
         let orderedColumns = orderNodesWithinColumns(
             sortedSteps: sortedSteps,
@@ -362,13 +397,14 @@ enum TaskRelationGraphLayout {
             originalOrder: originalOrder
         )
 
-        // 5. 计算垂直 Y 坐标（围绕水平主轴居中 + 向两侧父子重心微调 + 保序最小间距防重叠 + 顶边归一化）
+        // 5. 计算垂直 Y 坐标（支持工作清单大卡与经验轻量卡异高混排：围绕水平主轴居中 + 父子重心微调 + 保序最小间距防重叠）
         let midYByID = assignVerticalCenters(
             sortedSteps: sortedSteps,
             orderedColumns: orderedColumns,
             anchorID: anchorID,
             visibleEdges: visibleEdges,
             stepsByID: stepsByID,
+            heightByID: heightByID,
             metrics: metrics
         )
 
@@ -396,12 +432,13 @@ enum TaskRelationGraphLayout {
             for (rowIdx, nid) in colNodeIDs.enumerated() {
                 guard let node = nodeByID[nid] else { continue }
                 rowIndexByID[nid] = rowIdx
-                let midY = midYByID[nid] ?? (metrics.headerHeight + metrics.canvasPaddingY + metrics.cardHeight * 0.5)
+                let nodeHeight = heightByID[nid] ?? metrics.cardHeight
+                let midY = midYByID[nid] ?? (metrics.headerHeight + metrics.canvasPaddingY + nodeHeight * 0.5)
                 let frame = CGRect(
                     x: colX,
-                    y: midY - metrics.cardHeight * 0.5,
+                    y: midY - nodeHeight * 0.5,
                     width: metrics.cardWidth,
-                    height: metrics.cardHeight
+                    height: nodeHeight
                 )
                 let rel = resolvePrimaryRelation(
                     for: node,
@@ -424,6 +461,7 @@ enum TaskRelationGraphLayout {
                     relativeStep: step,
                     frame: frame,
                     primaryRelation: rel,
+                    isExperienceStyle: isExperienceByID[nid] ?? false,
                     upstreamFoldToken: fold.upstreamToken,
                     isUpstreamCollapsed: fold.isUpstreamCollapsed,
                     hiddenUpstreamCount: fold.hiddenUpstreamCount,
@@ -946,25 +984,36 @@ enum TaskRelationGraphLayout {
         anchorID: String,
         visibleEdges: [TaskRelationEdge],
         stepsByID: [String: Int],
+        heightByID: [String: CGFloat],
         metrics: Metrics
     ) -> [String: CGFloat] {
         let topOriginY = metrics.headerHeight + metrics.canvasPaddingY
-        let pitch = metrics.cardHeight + metrics.rowGap
-        let maxCount = max(1, sortedSteps.map { orderedColumns[$0]?.count ?? 0 }.max() ?? 1)
-        let maxColCardsHeight = CGFloat(maxCount) * metrics.cardHeight
-            + CGFloat(max(0, maxCount - 1)) * metrics.rowGap
+        func nodeHeight(_ id: String) -> CGFloat {
+            heightByID[id] ?? metrics.cardHeight
+        }
+        func columnStackHeight(_ col: [String]) -> CGFloat {
+            guard !col.isEmpty else { return 0 }
+            return col.reduce(0) { $0 + nodeHeight($1) }
+                + CGFloat(max(0, col.count - 1)) * metrics.rowGap
+        }
+
+        let maxColCardsHeight = max(
+            metrics.cardHeight,
+            sortedSteps.map { columnStackHeight(orderedColumns[$0] ?? []) }.max() ?? metrics.cardHeight
+        )
         let spineY = topOriginY + maxColCardsHeight * 0.5
 
-        // 1. 初始排布：每一列围绕统一水平中轴线 spineY 垂直居中
+        // 1. 初始排布：每一列按各自卡片实际高度围绕统一水平中轴线 spineY 垂直居中
         var midY: [String: CGFloat] = [:]
         for step in sortedSteps {
             let col = orderedColumns[step] ?? []
             guard !col.isEmpty else { continue }
-            let colHeight = CGFloat(col.count) * metrics.cardHeight
-                + CGFloat(max(0, col.count - 1)) * metrics.rowGap
-            let startTop = spineY - colHeight * 0.5
-            for (idx, id) in col.enumerated() {
-                midY[id] = startTop + metrics.cardHeight * 0.5 + CGFloat(idx) * pitch
+            let colHeight = columnStackHeight(col)
+            var cursorTop = spineY - colHeight * 0.5
+            for id in col {
+                let h = nodeHeight(id)
+                midY[id] = cursorTop + h * 0.5
+                cursorTop += h + metrics.rowGap
             }
         }
 
@@ -975,12 +1024,12 @@ enum TaskRelationGraphLayout {
             adj[e.toID, default: []].append(e.fromID)
         }
 
-        // 2. 从中心列向两侧做一轮父子重心微调 + 1D 保序最小间距防重叠投影
+        // 2. 从中心列向两侧做父子重心微调 + 异高 1D 保序最小间距防重叠投影
         let leftSteps = sortedSteps.filter { $0 < 0 }.sorted(by: >)   // -1, -2, ...
         let rightSteps = sortedSteps.filter { $0 > 0 }.sorted(by: <)  // +1, +2, ...
 
         for step in leftSteps {
-            guard let col = orderedColumns[step], !col.isEmpty, col.count < maxCount else { continue }
+            guard let col = orderedColumns[step], !col.isEmpty else { continue }
             let desired: [CGFloat] = col.map { id in
                 let rightNbrY = (adj[id] ?? []).compactMap { nbr -> CGFloat? in
                     guard let nStep = stepsByID[nbr], nStep > step else { return nil }
@@ -989,14 +1038,19 @@ enum TaskRelationGraphLayout {
                 guard !rightNbrY.isEmpty else { return midY[id] ?? spineY }
                 return rightNbrY.reduce(0, +) / CGFloat(rightNbrY.count)
             }
-            let projected = projectMinimumSpacing(desired: desired, minSpacing: pitch)
+            let heights = col.map { nodeHeight($0) }
+            let projected = projectVariableMinimumSpacing(
+                desired: desired,
+                heights: heights,
+                rowGap: metrics.rowGap
+            )
             for (id, y) in zip(col, projected) {
                 midY[id] = y
             }
         }
 
         for step in rightSteps {
-            guard let col = orderedColumns[step], !col.isEmpty, col.count < maxCount else { continue }
+            guard let col = orderedColumns[step], !col.isEmpty else { continue }
             let desired: [CGFloat] = col.map { id in
                 let leftNbrY = (adj[id] ?? []).compactMap { nbr -> CGFloat? in
                     guard let nStep = stepsByID[nbr], nStep < step else { return nil }
@@ -1005,14 +1059,19 @@ enum TaskRelationGraphLayout {
                 guard !leftNbrY.isEmpty else { return midY[id] ?? spineY }
                 return leftNbrY.reduce(0, +) / CGFloat(leftNbrY.count)
             }
-            let projected = projectMinimumSpacing(desired: desired, minSpacing: pitch)
+            let heights = col.map { nodeHeight($0) }
+            let projected = projectVariableMinimumSpacing(
+                desired: desired,
+                heights: heights,
+                rowGap: metrics.rowGap
+            )
             for (id, y) in zip(col, projected) {
                 midY[id] = y
             }
         }
 
         // 3. 全局平移使最顶卡片 minY 恰好落在 headerHeight + canvasPaddingY
-        if let minTop = midY.values.map({ $0 - metrics.cardHeight * 0.5 }).min() {
+        if let minTop = midY.map({ $0.value - nodeHeight($0.key) * 0.5 }).min() {
             let shiftY = topOriginY - minTop
             if abs(shiftY) > 1e-6 {
                 for key in midY.keys {
@@ -1024,47 +1083,50 @@ enum TaskRelationGraphLayout {
         return midY
     }
 
-    /// 1D 保序最小间距投影（Pool Adjacent Violators）：
-    /// 在严格保持节点行序并满足相邻间距 `>= minSpacing` 的约束下，使各节点 `midY` 贴合目标重心。
-    private static func projectMinimumSpacing(desired: [CGFloat], minSpacing: CGFloat) -> [CGFloat] {
-        guard desired.count > 1 else { return desired }
+    /// 异高 1D 保序最小间距投影（Pool Adjacent Violators）：
+    /// 对不同高度（如 114pt 工作清单卡与 64pt 经验卡片混排）严格保持行序且保证相邻边缘净距 `>= rowGap`。
+    private static func projectVariableMinimumSpacing(
+        desired: [CGFloat],
+        heights: [CGFloat],
+        rowGap: CGFloat
+    ) -> [CGFloat] {
+        let n = desired.count
+        guard n > 1, heights.count == n else { return desired }
 
-        struct Block {
+        var prefix = Array(repeating: CGFloat.zero, count: n)
+        for i in 1..<n {
+            prefix[i] = prefix[i - 1] + (heights[i - 1] + heights[i]) * 0.5 + rowGap
+        }
+
+        struct IsoBlock {
             var startIndex: Int
             var endIndex: Int
-            var offsetSum: CGFloat
-
+            var sum: CGFloat
             var count: Int { endIndex - startIndex + 1 }
-            var startY: CGFloat { offsetSum / CGFloat(count) }
-            func endY(spacing: CGFloat) -> CGFloat {
-                startY + CGFloat(count - 1) * spacing
-            }
+            var mean: CGFloat { sum / CGFloat(count) }
         }
 
-        var stack: [Block] = []
-        stack.reserveCapacity(desired.count)
-
-        for (i, d) in desired.enumerated() {
-            var current = Block(startIndex: i, endIndex: i, offsetSum: d)
-            while let prev = stack.last, prev.endY(spacing: minSpacing) + minSpacing > current.startY {
+        var stack: [IsoBlock] = []
+        stack.reserveCapacity(n)
+        for i in 0..<n {
+            let z = desired[i] - prefix[i]
+            var curr = IsoBlock(startIndex: i, endIndex: i, sum: z)
+            while let prev = stack.last, prev.mean > curr.mean {
                 stack.removeLast()
-                // 将 current 中的每个元素相对于 prev.startIndex 重新折算起点偏移求和
-                let shiftToPrevOrigin = CGFloat(current.startIndex - prev.startIndex) * minSpacing
-                let adjustedCurrentSum = current.offsetSum - CGFloat(current.count) * shiftToPrevOrigin
-                current = Block(
+                curr = IsoBlock(
                     startIndex: prev.startIndex,
-                    endIndex: current.endIndex,
-                    offsetSum: prev.offsetSum + adjustedCurrentSum
+                    endIndex: curr.endIndex,
+                    sum: prev.sum + curr.sum
                 )
             }
-            stack.append(current)
+            stack.append(curr)
         }
 
-        var result = Array(repeating: CGFloat.zero, count: desired.count)
+        var result = Array(repeating: CGFloat.zero, count: n)
         for block in stack {
-            let base = block.startY
+            let m = block.mean
             for idx in block.startIndex...block.endIndex {
-                result[idx] = base + CGFloat(idx - block.startIndex) * minSpacing
+                result[idx] = m + prefix[idx]
             }
         }
         return result
