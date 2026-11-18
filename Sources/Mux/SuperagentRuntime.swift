@@ -303,6 +303,46 @@ final class SuperagentRuntime {
         }
     }
 
+    /// 某个角色当前的实时负载：正在运行的工单数与排队等待中的工单数。
+    func roleLoad(for roleName: String) -> (running: Int, queued: Int) {
+        var running = 0
+        var queued = 0
+        for v in views where v.ticket.role == roleName && v.ticket.isOpen {
+            let t = v.ticket
+            if v.assignment?.state == .running && t.attention == nil && t.deliveryError == nil
+                && (t.reportState == nil || t.reportState == .progress) {
+                running += 1
+            } else if v.stage == .working(queued: true) {
+                queued += 1
+            }
+        }
+        return (running, queued)
+    }
+
+    /// 热重载常驻角色的空闲终端：同步最新提示词后，关闭当前未在跑工单的常驻终端（不打断正在跑工单的实例），
+    /// 让下次或立即拉起时加载最新角色提示词与模型配置。
+    func reloadIdleStandingTerminals(role roleName: String) {
+        guard let role = roles.first(where: { $0.name == roleName }), role.standing else { return }
+        let acceptance = settings.acceptance
+        let busySessions = (try? engine?.busySessions(role: roleName)) ?? []
+        let tmux = self.tmux
+        Task { @MainActor in
+            let killed = await Task.detached(priority: .userInitiated) { () -> [String] in
+                _ = try? SuperagentPrompts.installRole(role, acceptance: acceptance)
+                let snap = tmux.snapshot() ?? []
+                let idle = snap.filter { $0.agent == roleName && !busySessions.contains($0.session) }
+                for p in idle {
+                    _ = tmux.run(["kill-session", "-t", "=\(p.session)"])
+                }
+                return idle.map(\.session)
+            }.value
+            if !killed.isEmpty {
+                agentSessions.subtract(killed)
+            }
+            kick()
+        }
+    }
+
     /// 新建 / 更新 / 删除角色（面板）。
     func setRole(_ r: Role) {
         let acceptance = settings.acceptance
@@ -671,7 +711,10 @@ final class SuperagentRuntime {
             guard let snap else { return .later(3) }
             guard let id = Int64(e.key), let t = try? engine.store.ticket(id), let pane = pane(for: t, in: snap) else { return .done }
             // 常驻 Agent 已经在做别的单了：不打断它。
-            if role(for: t).standing, (try? engine.agentBusy(t.role, excluding: id)) ?? true { return .done }
+            if role(for: t).standing {
+                let busySessions = (try? engine.busySessions(role: t.role, excluding: id)) ?? []
+                if busySessions.contains(pane.session) { return .done }
+            }
             let tmux = self.tmux
             await Task.detached { Self.interrupt(tmux, pane.pane) }.value
             return .done
@@ -712,6 +755,9 @@ final class SuperagentRuntime {
         // 每次启动前写好角色的 prompt：角色可能刚由主管新建，或被人改过。
         if workerCommand == nil { _ = try? SuperagentPrompts.installRole(role, acceptance: settings.acceptance) }
         if role.standing { return await performStandingLaunch(t, a, role, snap: snap) }
+        let roleRunning = (try? engine.runningCount(role: role.name, excluding: id)) ?? 0
+        let roleCap = min(settings.slots, role.maxConcurrency) + (wake ? 1 : 0)
+        if roleRunning >= roleCap { return .later(3) }
 
         let tmux = self.tmux
         let root = worktreeRoot
@@ -761,7 +807,17 @@ final class SuperagentRuntime {
         // 快照可能是这一轮开头的：同一轮里前一张单也许刚建了这个角色的终端。
         let tmux = self.tmux
         let live = await Task.detached(priority: .userInitiated) { tmux.snapshot() }.value ?? snap
-        var existing = live.first { $0.agent == role.name }
+        let busySessions = (try? engine.busySessions(role: role.name, excluding: id)) ?? []
+        let idlePanes = live.filter { $0.agent == role.name && !busySessions.contains($0.session) }
+        var existing: SuperagentPane?
+        if a.reason != "accepted", !t.session.isEmpty {
+            existing = idlePanes.first { $0.session == t.session }
+        }
+        if existing == nil {
+            let alive = idlePanes.filter { !$0.isPlainShell }
+            let preferred = workerCommand == nil ? alive.first { $0.matches(codingAgent: settings.codingAgent) } : nil
+            existing = preferred ?? alive.first ?? idlePanes.first
+        }
         var taken = Set(live.map(\.session))
         // 若用户在设置里切换了执行 Agent（如 Claude ↔ Antigravity），而常驻角色空闲会话里仍跑着旧 Agent，
         // 在接新单前回收旧会话并用新 Agent 重建，确保所有角色统一运行在当前设置的 Agent 上。
@@ -844,8 +900,12 @@ final class SuperagentRuntime {
         let pending = (try? engine.store.undelivered(id)) ?? []
         guard let last = pending.last else { return .done }
         guard let pane = pane(for: t, in: snap) else { return .later(5) }
-        // 常驻 Agent 在做别的单：跟进等它这一轮结束再送。
-        if role(for: t).standing, (try? engine.agentBusy(t.role, excluding: id)) ?? true { return .later(3) }
+        // 常驻 Agent 在做别的单：跟进等它这一轮结束再送，且不打断同一会话里正在跑的另一张单。
+        if role(for: t).standing {
+            if (try? engine.agentBusy(t.role, excluding: id)) ?? true { return .later(3) }
+            let busySessions = (try? engine.busySessions(role: t.role, excluding: id)) ?? []
+            if busySessions.contains(pane.session) { return .later(3) }
+        }
         if let wait = gate(pane) { return wait }
         // 唤醒一个已经停下（交付 / 受阻 / 失败 / 未回报）的工单：占一个槽，人的跟进可以多用 1 个。
         if [.ready, .blocked, .failed, .waiting].contains(t.reportState),
@@ -1115,9 +1175,13 @@ final class SuperagentRuntime {
         await reloadInBackground()
     }
 
-    /// 工单的 agent 窗格：每单角色认 `@tfa_ticket`，常驻角色认 `@tfa_agent`。
+    /// 工单的 agent 窗格：每单角色认 `@tfa_ticket`；常驻角色优先精确匹配 `t.session`，只有 `t.session` 为空时才按 `@tfa_agent` 回退。
     func pane(for t: Ticket, in snap: [SuperagentPane]) -> SuperagentPane? {
-        role(for: t).standing ? snap.first { $0.agent == t.role } : snap.first { $0.ticket == t.id }
+        if role(for: t).standing {
+            if !t.session.isEmpty { return snap.first { $0.session == t.session } }
+            return snap.first { $0.agent == t.role }
+        }
+        return snap.first { $0.ticket == t.id }
     }
 
     func defaultWorkerCommand(_ t: Ticket, role: Role, kickoff: String, trustedDir: String? = nil) -> String {
