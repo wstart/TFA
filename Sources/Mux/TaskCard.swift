@@ -54,6 +54,7 @@ struct TaskCard: View {
                 header
                 TaskSummaryCard(view: view)
                 checklistColumn
+                TaskRelationTreeCard(view: view, editable: editable)
                 diffSection
                 detailColumn
                 footerSection
@@ -221,57 +222,8 @@ struct TaskCard: View {
             ? [("结果", result), ("需求原文", request)]
             : [("需求原文", request), ("上一轮结果", result)]
         let nonEmpty = sections.filter { !$0.text.isEmpty }
-        if !nonEmpty.isEmpty || !view.relatedKnowledge.isEmpty || t.origin != nil {
+        if !nonEmpty.isEmpty || t.origin != nil {
             VStack(alignment: .leading, spacing: 18) {
-                if !view.relatedKnowledge.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        SectionLabel(title: "关联历史经验（派单自动附给 Agent）")
-                        ForEach(view.relatedKnowledge) { rel in
-                            HStack(alignment: .top, spacing: 8) {
-                                Button {
-                                    if let tid = rel.taskID {
-                                        appModel.openWorklist(task: tid)
-                                    } else {
-                                        appModel.openKnowledgeBase(entryID: rel.knowledgeID)
-                                    }
-                                } label: {
-                                    Text(rel.displayLabel)
-                                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                        .foregroundStyle(Theme.textPrimary)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 4))
-                                }
-                                .buttonStyle(.plain)
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(rel.title)
-                                        .font(.system(size: 13, weight: .medium))
-                                        .foregroundStyle(Theme.textPrimary)
-                                    if !rel.tldr.isEmpty {
-                                        Text(rel.tldr)
-                                            .font(.system(size: 12))
-                                            .foregroundStyle(Theme.textSecondary)
-                                            .lineLimit(2)
-                                    }
-                                }
-                                Spacer(minLength: 4)
-                                if editable {
-                                    Button {
-                                        appModel.superagent.removeTaskKnowledgeLink(view.id, knowledgeID: rel.knowledgeID)
-                                    } label: {
-                                        Image(systemName: "xmark")
-                                            .font(.system(size: 10))
-                                            .foregroundStyle(Theme.textTertiary)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("移除这条经验关联")
-                                }
-                            }
-                        }
-                    }
-                    if !nonEmpty.isEmpty { Hairline() }
-                }
                 ForEach(Array(nonEmpty.enumerated()), id: \.element.label) { idx, section in
                     if idx > 0 { Hairline() }
                     VStack(alignment: .leading, spacing: 8) {
@@ -772,7 +724,7 @@ private struct ItemRow: View {
 // MARK: - 小件：分区标题、进度线、时间线圆点
 
 /// 「活动」「清单」「原文」这类小标题：12pt 半粗、略加字距、石灰。
-private struct SectionLabel: View {
+struct SectionLabel: View {
     let title: String
     var body: some View {
         Text(title).font(.system(size: 12, weight: .semibold)).tracking(1).foregroundStyle(Theme.textTertiary)

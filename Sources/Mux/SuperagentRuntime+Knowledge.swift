@@ -241,4 +241,10 @@ extension SuperagentRuntime {
             .prefix(limit)
             .map { $0 }
     }
+
+    /// 读取指定任务的多跳关联清单脉络树（包含直接与间接关联的前置依赖、退回衍生与经验关联节点）。
+    func taskRelationTree(_ taskID: Int64, maxDepth: Int = 4) -> TaskRelationTree? {
+        guard let engine else { return nil }
+        return try? engine.taskRelationTree(for: taskID, maxDepth: maxDepth)
+    }
 }

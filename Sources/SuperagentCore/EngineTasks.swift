@@ -987,8 +987,8 @@ extension SuperagentEngine {
     /// §4.3：名下打开工单的 PersonAction ∪ {review}（当前阶段是 review）∪ {blocked}（清单项受阻且没有打开的工单，或链接项的新任务
     /// 还没人做，见 `stuck`）。组织任务的「待评审」不算需要你：通过 / 打回由组织负责人在 Web 上做（第 3 期）。
     /// `links` = 全部退回链接，`detached` = 被人改派断开的（按新任务号），`target(b)` = 退回产生的任务 b 的进度（结束了为 nil）。
-    private func makeView(_ t: WorkTask, items raw: [Item], tickets: [Ticket], links: [HandbackLink], detached: Set<Int64>,
-                          target: (Int64) throws -> LinkedItem.State?) throws -> TaskView {
+    func makeView(_ t: WorkTask, items raw: [Item], tickets: [Ticket], links: [HandbackLink], detached: Set<Int64>,
+                  target: (Int64) throws -> LinkedItem.State?) throws -> TaskView {
         let views = try tickets.map(view)
         let handbacks = links.filter { $0.fromTaskID == t.id }
         let linked = try Self.linkedItems(raw, handbacks: handbacks, detached: detached, target: target)

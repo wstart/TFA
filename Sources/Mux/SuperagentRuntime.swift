@@ -62,7 +62,7 @@ final class SuperagentRuntime {
     var openTasks: [TaskView] { tasks.filter { $0.task.isOpen && $0.task.syncState != "claimable" } }
     /// 待分配的任务（设计评审 2026-11-08，1A）：打开、不需要你、还有没定谁来做的项——侧栏「N 件待分配」，不着琥珀、不计打扰。
     var unassignedTasks: [TaskView] { openTasks.filter { $0.needsYou.isEmpty && $0.unassignedCount > 0 } }
-    func task(_ id: Int64) -> TaskView? { tasks.first { $0.id == id } }
+    func task(_ id: Int64) -> TaskView? { tasks.first { $0.id == id } ?? (try? engine?.taskView(id)) }
     /// 某张工单所属的任务。
     func task(ofTicket id: Int64) -> TaskView? {
         tasks.first { $0.tickets.contains { $0.id == id } }

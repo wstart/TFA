@@ -555,6 +555,29 @@ public final class SuperagentStore {
         try tasks(rows: try db.query("SELECT \(Self.taskColumns) FROM task WHERE id=?", [.int(id)])).first
     }
 
+    /// 按指定 ID 集合批量读取任务（不局限于最近 30 条，供跨历史关联脉络树一次加载）。
+    public func tasks(ids: [Int64]) throws -> [Int64: WorkTask] {
+        var out: [Int64: WorkTask] = [:]
+        let unique = Array(Set(ids))
+        for chunk in Self.chunks(unique) {
+            let rows = try db.query("SELECT \(Self.taskColumns) FROM task WHERE id IN (\(Self.marks(chunk.count)))",
+                                    chunk.map(SQLValue.int))
+            for t in try tasks(rows: rows) { out[t.id] = t }
+        }
+        return out
+    }
+
+    /// 库中全部现存任务的 ID 集合（轻量整数查询）。
+    public func allTaskIDs() throws -> Set<Int64> {
+        Set(try db.query("SELECT id FROM task").map { $0.int(0) })
+    }
+
+    /// 全部前置任务依赖边 `(taskID, dependsOn)`（即 `dependsOn -> taskID`）。
+    public func allTaskDeps() throws -> [(taskID: Int64, dependsOn: Int64)] {
+        try db.query("SELECT task_id, depends_on FROM task_dep ORDER BY depends_on, task_id")
+            .map { ($0.int(0), $0.int(1)) }
+    }
+
     /// 打开的任务（新的在前），然后是最近结束的 `endedLimit` 个。
     public func tasks(endedLimit: Int = 30) throws -> [WorkTask] {
         let open = try db.query("SELECT \(Self.taskColumns) FROM task WHERE status='open' ORDER BY id DESC")

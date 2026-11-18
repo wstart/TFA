@@ -58,6 +58,40 @@ extension SuperagentStore {
         }
     }
 
+    /// 全部未归档知识条目的轻量 `(id, taskID)` 映射（供关联树快速建图）。
+    public func activeKnowledgeGraphMeta() throws -> [(id: Int64, taskID: Int64?)] {
+        try db.query("SELECT id, task_id FROM knowledge WHERE archived=0 ORDER BY id")
+            .map { ($0.int(0), $0.optInt(1)) }
+    }
+
+    /// 按知识条目 ID 批量读取（不局限于条数上限）。
+    public func knowledgeEntries(ids: [Int64]) throws -> [Int64: KnowledgeEntry] {
+        var out: [Int64: KnowledgeEntry] = [:]
+        let unique = Array(Set(ids))
+        for chunk in Self.chunks(unique) {
+            let rows = try db.query("SELECT \(Self.knowledgeColumns) FROM knowledge WHERE id IN (\(Self.marks(chunk.count)))",
+                                    chunk.map(SQLValue.int))
+            for e in rows.map(Self.knowledgeRow) { out[e.id] = e }
+        }
+        return out
+    }
+
+    /// 按来源任务 ID 批量读取未归档知识条目。
+    public func knowledgeEntries(taskIDs: [Int64]) throws -> [Int64: KnowledgeEntry] {
+        var out: [Int64: KnowledgeEntry] = [:]
+        let unique = Array(Set(taskIDs))
+        for chunk in Self.chunks(unique) {
+            let rows = try db.query(
+                "SELECT \(Self.knowledgeColumns) FROM knowledge WHERE archived=0 AND task_id IN (\(Self.marks(chunk.count)))",
+                chunk.map(SQLValue.int)
+            )
+            for e in rows.map(Self.knowledgeRow) {
+                if let tid = e.taskID { out[tid] = e }
+            }
+        }
+        return out
+    }
+
     public func knowledgeEntries(includeArchived: Bool = false, scope: String? = nil, pinnedOnly: Bool = false,
                                  limit: Int = 500) throws -> [KnowledgeEntry] {
         var clauses: [String] = []
