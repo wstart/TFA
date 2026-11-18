@@ -52,11 +52,11 @@ struct TaskCard: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
+                detailColumn
                 TaskSummaryCard(view: view)
                 checklistColumn
                 TaskRelationTreeCard(view: view, editable: editable)
                 diffSection
-                detailColumn
                 footerSection
             }
             .padding(.horizontal, 32)
@@ -216,11 +216,14 @@ struct TaskCard: View {
 
     @ViewBuilder private var detailColumn: some View {
         let t = view.task
-        let request = t.request != t.title ? t.request : ""
+        let trimmedReq = t.request.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTitle = t.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = trimmedReq != trimmedTitle ? trimmedReq : ""
         let result = (t.status == .done && view.knowledge != nil) ? "" : t.resultSummary
-        let sections: [(label: String, text: String)] = t.status == .done
-            ? [("结果", result), ("需求原文", request)]
-            : [("需求原文", request), ("上一轮结果", result)]
+        let sections: [(label: String, text: String)] = [
+            ("请求原文", request),
+            (t.status == .done ? "结果" : "上一轮结果", result),
+        ]
         let nonEmpty = sections.filter { !$0.text.isEmpty }
         if !nonEmpty.isEmpty || t.origin != nil {
             VStack(alignment: .leading, spacing: 18) {
@@ -777,23 +780,23 @@ private struct TimelineDot: View {
 
 // MARK: - 长文（原文 / 结果）
 
-/// 「原文：…」「结果：…」：超过 6 行（或 240 字）先收起，点「展开全部」看完。空文字不占位。
+/// 「请求原文」「结果」：超过 4 行（或 180 字）默认紧凑收起，保证首屏同时看到原文与下方清单，点「展开全部」查看全文。
 private struct LongText: View {
     let label: String
     let text: String
     @State private var expanded = false
 
-    private var long: Bool { text.count > 240 || text.filter { $0 == "\n" }.count > 5 }
+    private var long: Bool { text.count > 180 || text.filter { $0 == "\n" }.count > 3 }
 
     var body: some View {
         if !text.isEmpty {
             VStack(alignment: .leading, spacing: Theme.Space.xs) {
                 ((label.isEmpty ? Text("") : Text("\(label)：").foregroundStyle(Theme.textTertiary)) + Text(text))
                     .font(.system(size: 14)).lineSpacing(4).foregroundStyle(Theme.textPrimary)
-                    .lineLimit(long && !expanded ? 6 : nil)
+                    .lineLimit(long && !expanded ? 4 : nil)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 if long {
-                    Button(expanded ? "收起" : "展开全部") { expanded.toggle() }
+                    Button(expanded ? "收起 ▴" : "展开全部 ▾") { expanded.toggle() }
                         .buttonStyle(.plain).font(.caption).foregroundStyle(Theme.textTertiary)
                         .accessibilityLabel(expanded ? "收起\(label)" : "展开\(label)全文")
                 }
