@@ -21,6 +21,7 @@ private enum SidebarDrag {
 struct SidebarView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var filter: String = ""
 
@@ -105,10 +106,6 @@ struct SidebarView: View {
                     WorklistRow()
                         .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
                 }
-                if !showEnded && filter.isEmpty {
-                    routerRow
-                        .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
-                }
                 let ungrouped = filtered(showEnded ? appModel.visibleEndedUngroupedTerminals
                                                    : appModel.visibleUngroupedTerminals)
                 Section {
@@ -122,6 +119,7 @@ struct SidebarView: View {
                             ForEach(ungrouped) {
                                 row($0)
                                     .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
+                                    .transition(.opacity)
                             }
                         }
                     }
@@ -155,8 +153,8 @@ struct SidebarView: View {
                     }
                 } else if ungrouped.isEmpty && appModel.currentGroups.isEmpty {
                     Text(filter.isEmpty
-                         ? "No terminals on \(appModel.currentHost.label) yet — press +"
-                         : "No terminals match “\(filter)”")
+                         ? "\(appModel.currentHost.label) 还没有终端 — 点右上角 + 新建"
+                         : "没有匹配「\(filter)」的终端")
                         .font(Theme.Font.rowSubtitle)
                         .foregroundStyle(.secondary)
                 }
@@ -178,10 +176,10 @@ struct SidebarView: View {
         .onChange(of: appModel.visibleConnections.contains(where: \.isEnded)) { _, any in
             if !any { showEnded = false }
         }
-        .alert(groupRenameID == nil ? "New Group" : "Rename Group", isPresented: $groupAlertShown) {
-            TextField("Group name", text: $groupAlertName)
-            Button(groupRenameID == nil ? "Create" : "Rename") { confirmGroupAlert() }
-            Button("Cancel", role: .cancel) { groupAlertShown = false }
+        .alert(groupRenameID == nil ? "新建分组" : "重命名分组", isPresented: $groupAlertShown) {
+            TextField("分组名称", text: $groupAlertName)
+            Button(groupRenameID == nil ? "创建" : "重命名") { confirmGroupAlert() }
+            Button("取消", role: .cancel) { groupAlertShown = false }
         }
         .sheet(isPresented: $showHostSheet) {
             SSHSheet(host: $sshHost, username: $sshUser, password: $sshPassword, args: $sshArgs) {
@@ -237,6 +235,7 @@ struct SidebarView: View {
                 ForEach(members) {
                     row($0)
                         .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
+                        .transition(.opacity)
                 }
             }
         }
@@ -256,33 +255,14 @@ struct SidebarView: View {
 
     /// Toggle (and persist) a group's collapsed state — driven by tapping the folder header.
     private func toggleGroup(_ id: UUID) {
-        var ids = Set(collapsedRaw.split(separator: ",").map(String.init))
-        if ids.contains(id.uuidString) { ids.remove(id.uuidString) } else { ids.insert(id.uuidString) }
-        collapsedRaw = ids.sorted().joined(separator: ",")
+        Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+            var ids = Set(collapsedRaw.split(separator: ",").map(String.init))
+            if ids.contains(id.uuidString) { ids.remove(id.uuidString) } else { ids.insert(id.uuidString) }
+            collapsedRaw = ids.sorted().joined(separator: ",")
+        }
     }
 
     // MARK: - Rows / headers
-
-    /// The pinned「主管」row: the router terminal when it runs (selectable like any terminal), else a
-    /// one-tap 启动. Its signal column carries the count of tickets that need you.
-    @ViewBuilder
-    private var routerRow: some View {
-        if let conn = appModel.routerConnection {
-            RouterRow(conn: conn, isSelected: conn.id == appModel.selectedConnectionID, toolPaneOpen: toolPaneOpen)
-                .tag(conn.id)
-                .contextMenu {
-                    Button("重启主管") { appModel.restartRouter() }
-                    Button("打开主管面板") { appModel.openSuperagent() }
-                    Divider()
-                    SessionMenuItems(conn: conn)
-                }
-        } else {
-            RouterRow(conn: nil, isSelected: false, toolPaneOpen: toolPaneOpen)
-                .contentShape(Rectangle())
-                .onTapGesture { appModel.openRouter() }
-                .contextMenu { Button("打开主管面板") { appModel.openSuperagent() } }
-        }
-    }
 
     @ViewBuilder
     private func row(_ conn: ConnectionSession) -> some View {
@@ -341,11 +321,11 @@ struct SidebarView: View {
         )
         .contentShape(Rectangle())
         .help("点名字看分组说明 · 点箭头折叠/展开 · 拖右侧手柄重新排序")
-        .animation(.easeInOut(duration: 0.15), value: expanded)
+        .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: expanded)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel("\(group.name) group, \(expanded ? "expanded" : "collapsed")")
-        .accessibilityHint(expanded ? "Collapse group" : "Expand group")
+        .accessibilityLabel("\(group.name) 分组，\(expanded ? "已展开" : "已折叠")")
+        .accessibilityHint(expanded ? "折叠分组" : "展开分组")
         .accessibilityAction { toggleGroup(group.id) } // VoiceOver activate → toggle
         .accessibilityAction(named: "查看分组说明") { appModel.openGroupNote(group) }
         // Keyboard / VoiceOver alternative to drag-reorder.
@@ -357,8 +337,8 @@ struct SidebarView: View {
             Button("上移分组") { moveGroupBy(group.id, -1) }.disabled(i == nil || i == 0)
             Button("下移分组") { moveGroupBy(group.id, 1) }.disabled(i == nil || i == ids.count - 1)
             Divider()
-            Button("Rename Group…") { startRenameGroup(group) }
-            Button("Delete Group", role: .destructive) { appModel.deleteGroup(group.id) }
+            Button("重命名分组…") { startRenameGroup(group) }
+            Button("删除分组", role: .destructive) { appModel.deleteGroup(group.id) }
         }
     }
 
@@ -387,13 +367,21 @@ struct SidebarView: View {
             countLabel(count).frame(width: 18, alignment: .center)
         }
         .contentShape(Rectangle())
-        .onTapGesture { defaultCollapsed.toggle() }
+        .onTapGesture {
+            Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                defaultCollapsed.toggle()
+            }
+        }
         .help("未分组的终端 · 点击折叠/展开")
-        .animation(.easeInOut(duration: 0.15), value: expanded)
+        .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: expanded)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel("未分组, \(expanded ? "expanded" : "collapsed")")
-        .accessibilityAction { defaultCollapsed.toggle() }
+        .accessibilityLabel("未分组，\(expanded ? "已展开" : "已折叠")")
+        .accessibilityAction {
+            Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                defaultCollapsed.toggle()
+            }
+        }
     }
 
     /// Shared folder header label: a small, tracked, muted caps title (so the terminal names stay the
@@ -466,6 +454,7 @@ struct SidebarView: View {
 /// primary「+」menu on the right; filter text field expands smoothly on demand underneath.
 private struct SidebarHeader: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var filter: String
     let onAddHost: () -> Void
     let onManageServers: () -> Void
@@ -489,7 +478,7 @@ private struct SidebarHeader: View {
                 AttentionButton()
 
                 Button {
-                    withAnimation(.easeInOut(duration: 0.16)) {
+                    Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
                         showFilter.toggle()
                         if !showFilter { filter = "" }
                     }
@@ -509,7 +498,7 @@ private struct SidebarHeader: View {
                         }
                         .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PaperPressButtonStyle(hoverWash: true, cornerRadius: Theme.Radius.sm))
                 .help(showFilter ? "收起筛选" : "筛选终端")
                 .accessibilityLabel("筛选终端")
 
@@ -542,7 +531,7 @@ private struct SidebarHeader: View {
 
             if showFilter || !filter.isEmpty {
                 FilterField(text: $filter, onCancel: {
-                    withAnimation(.easeInOut(duration: 0.16)) {
+                    Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
                         filter = ""
                         showFilter = false
                     }
@@ -553,7 +542,7 @@ private struct SidebarHeader: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
-                .transition(.move(edge: .top).combined(with: .opacity))
+                .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
             }
         }
     }
@@ -742,7 +731,7 @@ private struct ToolDock: View {
                     }
                     .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PaperPressButtonStyle(hoverWash: !appModel.superagentToolSelected, cornerRadius: Theme.Radius.sm))
             .help("编排与全局设置")
             .accessibilityLabel("编排与全局设置")
         }
@@ -767,14 +756,16 @@ private struct ToolDock: View {
                         in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
             .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PaperPressButtonStyle(hoverWash: !selected, cornerRadius: Theme.Radius.sm))
         .help(title)
         .accessibilityLabel(title)
     }
 }
 
-/// A full-width two-way switch in the system segmented look.
+/// A full-width two-way switch in the system segmented look with sliding thumb.
 private struct SegmentedBar<Value: Hashable>: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var thumbNS
     @Binding var selection: Value
     let options: [(Value, String)]
 
@@ -782,7 +773,11 @@ private struct SegmentedBar<Value: Hashable>: View {
         HStack(spacing: 2) {
             ForEach(Array(options.enumerated()), id: \.offset) { _, option in
                 let chosen = option.0 == selection
-                Button { selection = option.0 } label: {
+                Button {
+                    Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                        selection = option.0
+                    }
+                } label: {
                     Text(option.1)
                         .font(.system(size: 12, weight: chosen ? .semibold : .regular))
                         .foregroundStyle(chosen ? Theme.textPrimary : Theme.textSecondary)
@@ -792,8 +787,8 @@ private struct SegmentedBar<Value: Hashable>: View {
                             if chosen {
                                 RoundedRectangle(cornerRadius: 6)
                                     .fill(Theme.surface)
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Theme.border, lineWidth: 1)
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.border, lineWidth: 1))
+                                    .matchedGeometryEffect(id: "sidebar-seg-thumb", in: thumbNS)
                             }
                         }
                         .contentShape(Rectangle())
@@ -802,6 +797,7 @@ private struct SegmentedBar<Value: Hashable>: View {
                 .accessibilityAddTraits(chosen ? .isSelected : [])
             }
         }
+        .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: selection)
         .padding(2)
         .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 8))
     }
@@ -858,14 +854,14 @@ private struct FilterField: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.tertiary)
-            .accessibilityLabel("Clear filter")
+            .accessibilityLabel("清除筛选")
         }
         .padding(.horizontal, Theme.Space.sm)
         .frame(maxHeight: .infinity)
         .contentShape(Rectangle())
         .onAppear { focused = true }
         .onTapGesture { focused = true }
-        .accessibilityLabel("Filter terminals")
+        .accessibilityLabel("筛选终端")
     }
 }
 
@@ -937,9 +933,9 @@ private struct TerminalRow: View {
                 Capsule().fill(Theme.brand).frame(width: 3, height: 16).offset(x: -11)
             }
         }
-        .animation(.easeInOut(duration: 0.15), value: showDot)
-        .animation(.easeInOut(duration: 0.28), value: working)
-        .animation(.easeInOut(duration: 0.2), value: attention)
+        .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: showDot)
+        .animation(Theme.Motion.value(Theme.Motion.layout, reduceMotion: reduceMotion), value: working)
+        .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: attention)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityText(status, showDot: showDot))
     }
@@ -1020,127 +1016,84 @@ private struct TerminalRow: View {
     private func accessibilityText(_ status: TerminalStatus, showDot: Bool) -> String {
         var parts = [conn.title, working ? "活动中" : status.label]
         if let folder = fullFolder { parts.append("目录 \(folder)") }
-        if showDot { parts.append("new output") }
-        return parts.joined(separator: ", ")
-    }
-}
-
-/// The pinned「主管」row: a charcoal badge (the router is an agent), the title, and one line saying
-/// where the tickets stand; the signal column shows how many need you.
-private struct RouterRow: View {
-    @Environment(AppModel.self) private var appModel
-    @Environment(\.backgroundProminence) private var prominence
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let conn: ConnectionSession?
-    let isSelected: Bool
-    let toolPaneOpen: Bool
-
-    var body: some View {
-        let sa = appModel.superagent
-        let needs = sa.needsYouOutsideTasks.count
-        let prominent = prominence == .increased
-        HStack(spacing: Theme.Space.md) {
-            Image(systemName: "person.crop.rectangle.stack")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(prominent ? Color.white : Theme.onBrand)
-                .frame(width: 22, height: 22)
-                .background(prominent ? Color.white.opacity(0.22) : Theme.brand, in: RoundedRectangle(cornerRadius: 6))
-            VStack(alignment: .leading, spacing: Theme.Space.xxs) {
-                Text("主管").font(Theme.Font.rowTitle).foregroundStyle(prominent ? Color.white : Theme.textPrimary).lineLimit(1)
-                Group {
-                    if needs > 0 {
-                        Text("\(needs) 个工单需要你").foregroundStyle(prominent ? Color.white : Theme.Status.attention)
-                    } else if conn == nil {
-                        Text("未启动 · 点击启动").foregroundStyle(.tertiary)
-                    } else {
-                        Text("运行中 · \(sa.settings.codingAgent.label)").foregroundStyle(.secondary)
-                    }
-                }
-                .font(Theme.Font.rowSubtitle)
-                .lineLimit(1)
-            }
-            Spacer(minLength: Theme.Space.xs)
-            ZStack(alignment: .center) {
-                if needs > 0 {
-                    Text("\(needs)")
-                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Color.white)
-                        .frame(minWidth: 16, minHeight: 16)
-                        .background(Theme.Status.attention, in: Capsule())
-                } else if let conn, appModel.isWorking(conn) {
-                    EqualizerBars(animated: !reduceMotion, tint: prominent ? Color.white : Theme.brand)
-                }
-            }
-            .frame(width: 18, alignment: .center)
-        }
-        .padding(.vertical, Theme.Space.xxs)
-        .overlay(alignment: .leading) {
-            if isSelected && toolPaneOpen {
-                Capsule().fill(Theme.brand).frame(width: 3, height: 16).offset(x: -11)
-            }
-        }
-        .help(conn == nil ? "启动主管终端：对它说一句，它把任务加进你的清单并建议谁来做" : "主管终端（右键可重启主管）")
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(needs > 0 ? "主管，\(needs) 个工单需要你" : "主管")
+        if showDot { parts.append("有新输出") }
+        return parts.joined(separator: "，")
     }
 }
 
 private struct WorklistRow: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovered = false
 
     var body: some View {
         let sa = appModel.superagent
         let needs = sa.tasksNeedingYou.count
+        let routerBusy = sa.routerBusy || (appModel.routerConnection.map { appModel.isWorking($0) } ?? false)
         let active = appModel.worklistSelected && !appModel.worklistShowsSettings
         let subtitle = WorklistSidebarText.subtitle(needs: needs, unassigned: sa.unassignedTasks.count, open: sa.openTasks.count,
                                                     available: appModel.worklistAvailable)
-        HStack(spacing: Theme.Space.md) {
-            Image(systemName: "list.bullet.clipboard")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.onBrand)
-                .frame(width: 22, height: 22)
-                .background(Theme.brand, in: RoundedRectangle(cornerRadius: 6))
-            VStack(alignment: .leading, spacing: Theme.Space.xxs) {
-                Text("我的清单").font(Theme.Font.rowTitle).foregroundStyle(Theme.textPrimary).lineLimit(1)
-                Group {
-                    if subtitle.attention {
-                        Text(subtitle.text).foregroundStyle(Theme.Status.attention)
-                    } else if sa.openTasks.isEmpty {
-                        Text(subtitle.text).foregroundStyle(.tertiary)
-                    } else {
-                        Text(subtitle.text).foregroundStyle(.secondary)
+        Button { appModel.openWorklist() } label: {
+            HStack(spacing: Theme.Space.md) {
+                Image(systemName: "list.bullet.clipboard")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.onBrand)
+                    .frame(width: 22, height: 22)
+                    .background(Theme.brand, in: RoundedRectangle(cornerRadius: 6))
+                VStack(alignment: .leading, spacing: Theme.Space.xxs) {
+                    Text("我的工作").font(Theme.Font.rowTitle).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                    Group {
+                        if subtitle.attention {
+                            Text(subtitle.text).foregroundStyle(Theme.Status.attention)
+                        } else if sa.openTasks.isEmpty {
+                            Text(subtitle.text).foregroundStyle(.tertiary)
+                        } else {
+                            Text(subtitle.text).foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(Theme.Font.rowSubtitle)
+                    .lineLimit(1)
+                }
+                Spacer(minLength: Theme.Space.xs)
+                ZStack(alignment: .center) {
+                    if needs > 0 {
+                        Text("\(needs)")
+                            .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                            .contentTransition(.numericText())
+                            .foregroundStyle(Color.white)
+                            .frame(minWidth: 16, minHeight: 16)
+                            .background(Theme.Status.attention, in: Capsule())
+                            .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: needs)
+                    } else if routerBusy {
+                        EqualizerBars(animated: !reduceMotion, tint: Theme.brand)
                     }
                 }
-                .font(Theme.Font.rowSubtitle)
-                .lineLimit(1)
+                .frame(width: 18, alignment: .center)
             }
-            Spacer(minLength: Theme.Space.xs)
-            ZStack(alignment: .center) {
-                if needs > 0 {
-                    Text("\(needs)")
-                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(Color.white)
-                        .frame(minWidth: 16, minHeight: 16)
-                        .background(Theme.Status.attention, in: Capsule())
+            .padding(.vertical, Theme.Space.xxs)
+            .background {
+                if active {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Theme.surface2)
+                        .padding(.horizontal, -6)
+                        .padding(.vertical, -3)
+                } else if hovered {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Theme.surface2.opacity(0.55))
+                        .padding(.horizontal, -6)
+                        .padding(.vertical, -3)
                 }
             }
-            .frame(width: 18, alignment: .center)
+            .animation(Theme.Motion.value(Theme.Motion.micro, reduceMotion: reduceMotion), value: hovered)
+            .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: active)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, Theme.Space.xxs)
-        .background {
-            if active {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Theme.surface2)
-                    .padding(.horizontal, -6)
-                    .padding(.vertical, -3)
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { appModel.openWorklist() }
-        .help("我的清单：先定谁来做，需要你的事在最上面")
+        .buttonStyle(PaperPressButtonStyle(cornerRadius: 6))
+        .onHover { hovered = $0 }
+        .help("我的工作：清单、内嵌主管终端与知识库，需要你的事在最上面")
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel("我的清单，\(subtitle.text)")
+        .accessibilityLabel("我的工作，\(subtitle.text)\(routerBusy ? "，主管处理中" : "")")
         .accessibilityAction { appModel.openWorklist() }
     }
 }
@@ -1193,7 +1146,7 @@ private struct Bars: View {
         .frame(width: 12, height: 12, alignment: .center)
         .onAppear {
             guard animated else { return }
-            withAnimation(.easeInOut(duration: 0.42).repeatForever(autoreverses: true)) { up = true }
+            withAnimation(Theme.Motion.equalizer) { up = true }
         }
         .accessibilityHidden(true)
     }
@@ -1210,6 +1163,7 @@ private struct Bars: View {
 /// Sidebar output-activity effect: a brand dot that PULSES while output streams, a green checkmark
 /// FLASH when a burst finishes, otherwise the static unseen-output dot (or nothing).
 private struct OutputActivityIndicator: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let phase: ConnectionSession.OutputPhase
     let showUnseen: Bool
     var tint: Color = Theme.brand
@@ -1237,7 +1191,7 @@ private struct OutputActivityIndicator: View {
                 }
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: phase)
+        .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: phase)
         .accessibilityHidden(true)
     }
 }
@@ -1254,9 +1208,9 @@ struct ServerListView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
-            Text("Servers").font(Theme.Font.headerTitle)
+            Text("远程服务器").font(Theme.Font.headerTitle)
             if servers.isEmpty {
-                Text("No saved servers. Use “Add Host…” to add one.")
+                Text("尚未保存服务器。请通过「添加远程主机…」新增。")
                     .font(Theme.Font.emptyBody)
                     .foregroundStyle(.secondary)
             } else {
@@ -1266,16 +1220,16 @@ struct ServerListView: View {
                             Image(systemName: "network").foregroundStyle(Theme.brand)
                             Text(host.label).lineLimit(1)
                             if appModel.currentHost == host {
-                                Text("current").font(.caption2).foregroundStyle(.secondary)
+                                Text("当前").font(.caption2).foregroundStyle(.secondary)
                             }
                             Spacer(minLength: Theme.Space.sm)
-                            Button("Open") { appModel.selectHost(host); dismiss() }
+                            Button("打开") { appModel.selectHost(host); dismiss() }
                                 .buttonStyle(.borderless)
                             Button(role: .destructive) { appModel.forgetHost(host) } label: {
                                 Image(systemName: "trash")
                             }
                             .buttonStyle(.borderless)
-                            .help("Forget this server (also removes its saved password)")
+                            .help("移除此服务器（同时删除已保存的密码）")
                         }
                         .padding(.vertical, Theme.Space.xxs)
                     }
@@ -1284,7 +1238,7 @@ struct ServerListView: View {
             }
             HStack {
                 Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
         .padding(Theme.Space.xl)
@@ -1386,30 +1340,30 @@ struct SSHSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
-            Text("Add SSH Host").font(Theme.Font.headerTitle)
+            Text("添加 SSH 主机").font(Theme.Font.headerTitle)
             VStack(alignment: .leading, spacing: Theme.Space.md) {
-                TextField("Host (host or ssh alias)", text: $host)
+                TextField("主机地址（域名、IP 或 ssh 别名）", text: $host)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(onSubmit)
-                TextField("Username (optional)", text: $username)
+                TextField("用户名（可选）", text: $username)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(onSubmit)
-                SecureField("Password (optional — else typed in the terminal)", text: $password)
+                SecureField("密码（可选，留空则在终端内输入）", text: $password)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(onSubmit)
-                TextField("Extra ssh args (optional, space-separated)", text: $args)
+                TextField("额外 ssh 参数（可选，空格分隔）", text: $args)
                     .textFieldStyle(.roundedBorder)
             }
             .frame(width: 360)
-            Text("Connects over ssh, then launches tmux. Password is saved securely to your macOS Keychain so this server doesn't re-prompt — remove it any time via Manage Servers.")
+            Text("通过 SSH 连接并启动 tmux。密码将安全存入 macOS 钥匙串以便自动登录，随时可在「管理服务器」中移除。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(width: 360, alignment: .leading)
             HStack {
                 Spacer()
-                Button("Cancel", role: .cancel, action: onCancel)
-                Button("Connect", action: onSubmit)
+                Button("取消", role: .cancel, action: onCancel)
+                Button("连接", action: onSubmit)
                     .keyboardShortcut(.defaultAction)
                     .disabled(host.trimmingCharacters(in: .whitespaces).isEmpty)
             }

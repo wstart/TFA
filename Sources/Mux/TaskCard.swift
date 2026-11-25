@@ -18,6 +18,7 @@ enum TaskCardLayout {
 
 struct TaskCard: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let view: TaskView
     /// 打开「谁来做」。
     let assign: () -> Void
@@ -33,6 +34,8 @@ struct TaskCard: View {
     @State private var showDeps = false
     @State private var showRelatedKB = false
     @State private var showActivity = false
+    /// 清单区就地错误提示（勾选或加项失败时在清单底部直接显示，不滚去页顶）。
+    @State private var checklistError: String?
     /// 乐观更新的勾选（`Item.id` → 勾了没）：先翻状态再调引擎，失败回滚（注意事项 F-18）。
     @State private var pending: [Int64: Bool] = [:]
     @FocusState private var newItemFocused: Bool
@@ -117,9 +120,19 @@ struct TaskCard: View {
     /// 这张卡上动作的错误（`actionErrors[任务]`）和表单动作的错误（`actionError`）都在最上面（3A）。
     @ViewBuilder private var errorBanner: some View {
         let sa = appModel.superagent
-        if let e = sa.actionErrors[view.id] ?? sa.actionError {
-            Banner(text: e) { sa.actionErrors[view.id] = nil; sa.actionError = nil }
+        let currentError = sa.actionErrors[view.id] ?? sa.actionError
+        Group {
+            if let e = currentError {
+                Banner(text: e) {
+                    Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                        sa.actionErrors[view.id] = nil
+                        sa.actionError = nil
+                    }
+                }
+                .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
+            }
         }
+        .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: currentError != nil)
     }
 
     private var header: some View {
@@ -323,6 +336,8 @@ struct TaskCard: View {
                     SectionLabel(title: "清单")
                     Text("\(view.doneCount) / \(view.totalCount)")
                         .font(.system(size: 12)).monospacedDigit().foregroundStyle(Theme.textTertiary)
+                        .contentTransition(.numericText())
+                        .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: view.doneCount)
                         .accessibilityLabel("完成 \(view.doneCount) 项，共 \(view.totalCount) 项")
                     Spacer(minLength: 0)
                     if editable {
@@ -354,7 +369,7 @@ struct TaskCard: View {
                         editable: editable,
                         toggle: { toggle(item) },
                         toggleExpand: {
-                            withAnimation(.easeInOut(duration: 0.16)) {
+                            Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
                                 if expanded { expandedOrds.remove(item.ord) } else { expandedOrds.insert(item.ord) }
                             }
                         },
@@ -373,14 +388,48 @@ struct TaskCard: View {
                         )
                         .padding(.horizontal, 18)
                         .padding(.bottom, 12)
+                        .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
                     }
                 }
                 if editable {
                     if !view.items.isEmpty { Hairline() }
                     addField.padding(.horizontal, 18)
                 }
+                if let err = checklistError {
+                    Hairline()
+                    HStack(spacing: Theme.Space.sm) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.Status.error)
+                        Text(err)
+                            .font(.caption)
+                            .foregroundStyle(Theme.Status.error)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        Button {
+                            Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                                checklistError = nil
+                            }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Theme.textTertiary)
+                                .frame(width: 18, height: 18)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(PaperPressButtonStyle(hoverWash: true, cornerRadius: 4))
+                        .help("关闭错误提示")
+                        .accessibilityLabel("关闭错误提示")
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 10)
+                    .background(Theme.Status.error.opacity(0.06))
+                    .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
+                }
             }
         }
+        .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: checklistError)
         .saCard(padding: 0)
     }
 
@@ -411,21 +460,34 @@ struct TaskCard: View {
     private func toggle(_ item: Item) {
         let sa = appModel.superagent
         let done = shownStatus(item) != .done
-        pending[item.id] = done
-        sa.actionError = nil
-        sa.setItemDone(view.id, ord: item.ord, done: done)
-        if sa.actionError != nil { pending[item.id] = nil }
+        Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+            checklistError = nil
+            pending[item.id] = done
+            sa.actionError = nil
+            sa.setItemDone(view.id, ord: item.ord, done: done)
+            if let err = sa.actionError {
+                pending[item.id] = nil
+                checklistError = "更新勾选状态失败：\(err)"
+                sa.actionError = nil
+            }
+        }
     }
 
     private func addItem() {
         let text = newItem.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         let sa = appModel.superagent
-        if attempt(sa, { sa.addItems(view.id, [text]) }) == nil {
+        if let err = attempt(sa, { sa.addItems(view.id, [text]) }) {
+            Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                checklistError = "添加清单项失败：\(err)"
+            }
+            sa.actionError = nil
+        } else {
+            Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                checklistError = nil
+            }
             newItem = ""
             newItemFocused = true
-        } else {
-            sa.actionError = "加不进去：" + (sa.actionError ?? "")
         }
     }
 
@@ -436,12 +498,15 @@ struct TaskCard: View {
             HStack(alignment: .center, spacing: 12) {
                 if !events.isEmpty {
                     Button {
-                        withAnimation(.easeInOut(duration: 0.16)) { showActivity.toggle() }
+                        Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                            showActivity.toggle()
+                        }
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 10, weight: .semibold))
                                 .rotationEffect(.degrees(showActivity ? 90 : 0))
+                                .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: showActivity)
                             Text("活动记录 · \(events.count) 条")
                                 .font(.system(size: 12, weight: .medium))
                         }
@@ -487,7 +552,7 @@ struct TaskCard: View {
                     }
                 }
                 .saCard()
-                .transition(.opacity)
+                .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
             }
         }
         .padding(.top, 4)
@@ -517,6 +582,8 @@ struct TaskCard: View {
 /// 头卡内标题下的一行 24pt 文字「待领取 › 进行中 › 待评审 › 完成」：当前段 Charcoal 半粗 + 2px Charcoal 下划线，
 /// 已过段 stone，未到段 pewter。它是状态，不是重点——卡上最轻的墨；最重的墨留给需要你条。不用颜色区分阶段。
 struct StageStepper: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var stageNS
     let stages: [WorkflowStage]
     let current: Int
 
@@ -536,6 +603,7 @@ struct StageStepper: View {
             }
         }
         .frame(height: 26)
+        .animation(Theme.Motion.value(Theme.Motion.layout, reduceMotion: reduceMotion), value: current)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("阶段：" + stages.enumerated().map { $0.offset == current ? "\($0.element.name)（当前）" : $0.element.name }.joined(separator: "，"))
     }
@@ -546,7 +614,13 @@ struct StageStepper: View {
             .foregroundStyle(tone == .current ? Theme.brand : tone == .past ? Theme.textTertiary : Theme.Colors.pewter)
             .lineLimit(1)
             .frame(height: 26)
-            .overlay(alignment: .bottom) { if tone == .current { Theme.brand.frame(height: 2) } }
+            .overlay(alignment: .bottom) {
+                if tone == .current {
+                    Theme.brand
+                        .frame(height: 2)
+                        .matchedGeometryEffect(id: "stage-underline", in: stageNS)
+                }
+            }
     }
 }
 
@@ -688,6 +762,7 @@ private struct ItemRow: View {
                     Divider()
                 }
                 Button("改文字…", action: edit)
+                Divider()
                 Button("删除…", role: .destructive, action: remove).disabled(item.ticketID != nil)
                 if item.ticketID != nil { Text("有工单的项先取消工单才能删") }
             }
@@ -737,13 +812,17 @@ struct SectionLabel: View {
 
 /// 清单的进度：3pt 的细线，做完的部分炭黑。
 private struct ProgressLine: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let done: Int
     let total: Int
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
                 Capsule().fill(Theme.border.opacity(0.7))
-                Capsule().fill(Theme.brand).frame(width: total == 0 ? 0 : geo.size.width * CGFloat(done) / CGFloat(total))
+                Capsule()
+                    .fill(Theme.brand)
+                    .frame(width: total == 0 ? 0 : geo.size.width * CGFloat(done) / CGFloat(total))
+                    .animation(Theme.Motion.value(Theme.Motion.layout, reduceMotion: reduceMotion), value: done)
             }
         }
         .frame(height: 3)
@@ -782,6 +861,7 @@ private struct TimelineDot: View {
 
 /// 「请求原文」「结果」：超过 4 行（或 180 字）默认紧凑收起，保证首屏同时看到原文与下方清单，点「展开全部」查看全文。
 private struct LongText: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let label: String
     let text: String
     @State private var expanded = false
@@ -796,7 +876,11 @@ private struct LongText: View {
                     .lineLimit(long && !expanded ? 4 : nil)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 if long {
-                    Button(expanded ? "收起 ▴" : "展开全部 ▾") { expanded.toggle() }
+                    Button(expanded ? "收起 ▴" : "展开全部 ▾") {
+                        Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                            expanded.toggle()
+                        }
+                    }
                         .buttonStyle(.plain).font(.caption).foregroundStyle(Theme.textTertiary)
                         .accessibilityLabel(expanded ? "收起\(label)" : "展开\(label)全文")
                 }
@@ -817,7 +901,7 @@ private struct MetaChip: View {
     var body: some View {
         Group {
             if let action {
-                Button(action: action) { label }.buttonStyle(.plain)
+                Button(action: action) { label }.buttonStyle(PaperPressButtonStyle())
             } else {
                 label
             }

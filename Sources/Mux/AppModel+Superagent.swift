@@ -18,6 +18,9 @@ extension AppModel {
             guard let conn = self?.localConnection(named: session), let at = conn.lastUserInputAt else { return false }
             return Date().timeIntervalSince(at) < 20
         }
+        superagent.autoHealRouterDirectory = { [weak self] in
+            self?.routerDirectory ?? FileManager.default.homeDirectoryForCurrentUser.path
+        }
         superagent.postNotification = { title, body, task in NotificationManager.superagent(title: title, body: body, task: task) }
         superagent.start()
     }
@@ -39,11 +42,21 @@ extension AppModel {
     }
 
     /// 新的执行 / 主管终端：作为休眠行加入侧栏（选中时才 attach），执行终端放进「工单」分组，
-    /// 常驻角色的终端放进「角色」分组。
+    /// 常驻角色的终端放进「角色」分组。若同名旧连接已断开或报错，则先清理再重建，绝不复用死连接。
     func adoptSuperagentSession(_ name: String, isRouter: Bool) {
         let conn: ConnectionSession
         if let existing = localConnection(named: name) {
-            conn = existing
+            if existing.isEnded || existing.connectError != nil {
+                if !existing.stableID.isEmpty {
+                    sessionStore.remove(tfaID: existing.stableID)
+                }
+                existing.disconnect()
+                connections.removeAll { $0.id == existing.id }
+                guard let made = openDiscovered(sessionName: name) else { return }
+                conn = made
+            } else {
+                conn = existing
+            }
         } else {
             guard let made = openDiscovered(sessionName: name) else { return }
             conn = made
@@ -70,18 +83,70 @@ extension AppModel {
         set { UserDefaults.standard.set(newValue, forKey: Self.routerDirKey) }
     }
 
-    /// 打开主管终端（没有就建一个；里面的 Agent 退出了就重新启动），并切过去。
-    func openRouter() {
-        if let conn = routerConnection { activateTerminal(conn.id) }
+    /// 确保内嵌主管实时终端健康就绪：清理任何死掉/出错的旧连接，并在后台按需无感重连/重拉 Agent。
+    @MainActor
+    func ensureRouterReady() {
         let dir = routerDirectory
+        if let dead = routerConnection, dead.isEnded || dead.connectError != nil {
+            if !dead.stableID.isEmpty {
+                sessionStore.remove(tfaID: dead.stableID)
+            }
+            dead.disconnect()
+            connections.removeAll { $0.id == dead.id }
+        }
+        for stale in connections where isRouterConnection(stale) && (stale.isEnded || stale.connectError != nil) {
+            if !stale.stableID.isEmpty {
+                sessionStore.remove(tfaID: stale.stableID)
+            }
+            stale.disconnect()
+            connections.removeAll { $0.id == stale.id }
+        }
+        syncEmbeddedRouterViewing()
         Task { @MainActor in
-            guard let name = await superagent.openRouter(dir: dir) else { return }
+            guard let name = await superagent.openRouter(dir: dir, forceRetype: true) else { return }
+            adoptSuperagentSession(name, isRouter: true)
+            syncEmbeddedRouterViewing()
+        }
+    }
+
+    /// 带 3 秒防抖冷却的主管断线自愈调度：真断线延迟 0.6s 原地无感重连，防止极端配置异常下死循环。
+    @MainActor
+    func scheduleRouterAutoHeal() {
+        let now = Date()
+        guard now.timeIntervalSince(lastRouterAutoHealAt) >= 3 else { return }
+        lastRouterAutoHealAt = now
+        routerAutoHealTask?.cancel()
+        routerAutoHealTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled, let self else { return }
+            guard self.isEmbeddedRouterVisible, self.superagent.setupError == nil else { return }
+            self.ensureRouterReady()
+        }
+    }
+
+    /// 打开主管终端（没有就建一个；里面的 Agent 退出了就重新启动）。
+    /// 「我的工作」可用时直接切入顶部「主管」实时终端页，不再脱离「我的工作」；仅在回退模式使用 `activateTerminal`。
+    func openRouter() {
+        if worklistAvailable {
+            clearToolPanes()
+            worklistSelected = true
+            worklistShowsSettings = false
+            worklistTaskID = nil
+            worklistTab = .router
+            ensureRouterReady()
+            return
+        }
+        let dir = routerDirectory
+        if let conn = routerConnection { activateTerminal(conn.id) }
+        Task { @MainActor in
+            guard let name = await superagent.openRouter(dir: dir, forceRetype: true) else { return }
             adoptSuperagentSession(name, isRouter: true)
             if let conn = localConnection(named: name) { activateTerminal(conn.id) }
         }
     }
 
-    /// 重启主管终端：关掉旧的主管会话并用当前设置的执行与主管 Agent（如 Antigravity）重新启动，再切过去。
+    /// 重启主管终端：关掉旧的主管会话并用当前设置的执行与主管 Agent（如 Antigravity）重新启动。
+    /// 若已在「我的工作」内则保持当前标签不强跳（在「清单」页静默重启，在「主管」页原地重连）；若不在则切入「我的工作 · 主管」。
     func restartRouter() {
         let dir = routerDirectory
         if let old = routerConnection {
@@ -92,7 +157,15 @@ extension AppModel {
         Task { @MainActor in
             guard let name = await superagent.restartRouter(dir: dir) else { return }
             adoptSuperagentSession(name, isRouter: true)
-            if let conn = localConnection(named: name) { activateTerminal(conn.id) }
+            if worklistAvailable {
+                if !worklistSelected {
+                    openWorklist()
+                    worklistTab = .router
+                }
+                syncEmbeddedRouterViewing()
+            } else if let conn = localConnection(named: name) {
+                activateTerminal(conn.id)
+            }
         }
     }
 

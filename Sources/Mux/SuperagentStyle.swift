@@ -328,7 +328,7 @@ struct TaskChip: View {
             .background(Theme.chrome, in: RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.border, lineWidth: 1))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PaperPressButtonStyle())
         .help("打开任务 \(label)")
         .accessibilityLabel("任务 \(label)，打开任务卡")
     }
@@ -339,13 +339,29 @@ struct TaskChip: View {
 struct SegmentedChoice<Value: Hashable>: View {
     @Binding var selection: Value
     let options: [(value: Value, label: String)]
+    var dots: Set<Value> = []
     var disabled = false
+    @Namespace private var thumbNS
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(selection: Binding<Value>, options: [(value: Value, label: String)], dots: Set<Value> = [], disabled: Bool = false) {
+        self._selection = selection
+        self.options = options
+        self.dots = dots
+        self.disabled = disabled
+    }
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(Array(options.enumerated()), id: \.offset) { _, option in
                 let chosen = option.value == selection
-                Button { selection = option.value } label: {
+                let hasDot = dots.contains(option.value)
+                Button {
+                    guard !chosen else { return }
+                    Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                        selection = option.value
+                    }
+                } label: {
                     Text(option.label)
                         .font(.system(size: 12, weight: chosen ? .semibold : .regular))
                         .foregroundStyle(chosen ? Theme.textPrimary : Theme.textSecondary)
@@ -353,18 +369,32 @@ struct SegmentedChoice<Value: Hashable>: View {
                         .frame(height: 22)
                         .background {
                             if chosen {
-                                RoundedRectangle(cornerRadius: 7).fill(Theme.surface)
-                                RoundedRectangle(cornerRadius: 7).stroke(Theme.border, lineWidth: 1)
+                                RoundedRectangle(cornerRadius: 7)
+                                    .fill(Theme.surface)
+                                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.border, lineWidth: 1))
+                                    .matchedGeometryEffect(id: "seg-thumb", in: thumbNS)
+                            }
+                        }
+                        .overlay(alignment: .topTrailing) {
+                            if hasDot {
+                                Circle()
+                                    .fill(Theme.Status.attention)
+                                    .frame(width: 5, height: 5)
+                                    .offset(x: -4, y: 4)
+                                    .transition(reduceMotion ? .opacity : .scale.combined(with: .opacity))
+                                    .accessibilityHidden(true)
                             }
                         }
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: hasDot)
                 .accessibilityAddTraits(chosen ? .isSelected : [])
             }
         }
         .padding(2)
         .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+        .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: selection)
         .opacity(disabled ? 0.5 : 1)
         .disabled(disabled)
     }
@@ -374,14 +404,17 @@ struct SegmentedChoice<Value: Hashable>: View {
 struct CountBadge: View {
     let count: Int
     var attention = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Text("\(count)")
             .font(.system(size: 11, weight: .semibold)).monospacedDigit()
+            .contentTransition(.numericText())
             .foregroundStyle(attention ? Color.white : Theme.textSecondary)
             .padding(.horizontal, 7)
             .frame(height: 18)
             .background(attention ? Theme.Status.attention : Theme.surface2, in: RoundedRectangle(cornerRadius: 6))
+            .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: count)
             .accessibilityHidden(true)
     }
 }
@@ -391,6 +424,7 @@ struct CountBadge: View {
 struct ItemCheckbox: View {
     let status: ItemStatus
     var size: CGFloat = 20
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -398,7 +432,10 @@ struct ItemCheckbox: View {
             RoundedRectangle(cornerRadius: 5).stroke(stroke, lineWidth: status == .done ? 0 : 1)
             switch status {
             case .done:
-                Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.onBrand)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Theme.onBrand)
+                    .transition(reduceMotion ? .opacity : .scale(scale: 0.5).combined(with: .opacity))
             case .doing:
                 ZStack {
                     Circle().stroke(Theme.brand, lineWidth: 1.5)
@@ -412,6 +449,7 @@ struct ItemCheckbox: View {
             }
         }
         .frame(width: size, height: size)
+        .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: status)
         .accessibilityHidden(true)
     }
 

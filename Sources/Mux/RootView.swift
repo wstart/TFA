@@ -7,10 +7,13 @@ import TmuxKit
 /// The terminal area is topped by a slim active-terminal header (title + status + command).
 struct RootView: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Persisted sidebar width. Owned here (NOT by the sidebar's own frame) so the divider drag
     /// and @AppStorage stay the single source of truth across launches.
     @AppStorage("sidebarWidth") private var sidebarWidth: Double = 230
+    /// In-memory width while dragging the divider — avoids writing UserDefaults on every frame.
+    @State private var liveSidebarWidth: Double?
 
     private let minSidebar: Double = 190
     private let maxSidebar: Double = 420
@@ -19,28 +22,34 @@ struct RootView: View {
         @Bindable var model = appModel
         HStack(spacing: 0) {
             if !appModel.sidebarCollapsed {
-                SidebarView()
-                    .frame(width: clampedSidebarWidth)
-                    .transition(.move(edge: .leading).combined(with: .opacity))
+                HStack(spacing: 0) {
+                    SidebarView()
+                        .frame(width: clampedSidebarWidth)
 
-                SidebarDivider(
-                    width: $sidebarWidth,
-                    minWidth: minSidebar,
-                    maxWidth: maxSidebar
-                )
+                    SidebarDivider(
+                        persistedWidth: $sidebarWidth,
+                        liveWidth: $liveSidebarWidth,
+                        minWidth: minSidebar,
+                        maxWidth: maxSidebar
+                    )
+                }
+                .transition(Theme.Motion.reveal(edge: .leading, reduceMotion: reduceMotion))
             }
 
             VStack(spacing: 0) {
                 if appModel.tmuxMissing {
                     TmuxMissingBanner()
+                        .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
                 }
                 if let error = model.lastError {
                     ErrorBanner(message: error) { model.lastError = nil }
+                        .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
                 }
                 if let notice = model.detachedNotice {
                     DetachToast(message: notice,
                                 onUndo: { model.undoDetach() },
                                 onDismiss: { model.dismissDetachNotice() })
+                        .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
                 }
                 if appModel.axisSelected {
                     ToolHeaderBar(icon: "cpu", title: "本地模型", subtitle: "管理本机 axis-model 服务：安装、启停与模型切换。")
@@ -88,6 +97,9 @@ struct RootView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: appModel.tmuxMissing)
+            .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: model.lastError != nil)
+            .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: model.detachedNotice != nil)
             .overlay(alignment: .top) {
                 FontSizeHUD(size: appModel.fontSize, pulse: appModel.fontPulse)
             }
@@ -95,7 +107,7 @@ struct RootView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.canvas)
         .preferredColorScheme(appModel.preferredColorScheme)
-        .animation(.easeInOut(duration: 0.22), value: appModel.sidebarCollapsed)
+        .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: appModel.sidebarCollapsed)
         .tint(Theme.controlTint)
         .navigationTitle("TFA")
         // Host the per-session menu's sheets/alerts ONCE here, so right-clicking the sidebar row OR
@@ -144,43 +156,76 @@ struct RootView: View {
     }
 
     private var clampedSidebarWidth: CGFloat {
-        CGFloat(min(max(sidebarWidth, minSidebar), maxSidebar))
+        CGFloat(min(max(liveSidebarWidth ?? sidebarWidth, minSidebar), maxSidebar))
     }
 }
 
-/// A thin draggable divider that resizes the sidebar by mutating the persisted width.
-/// macOS-14 caveat: HStack/Divider is not user-resizable on its own, so we drive the width
-/// ourselves from a DragGesture and show a resize cursor on hover.
+/// A thin draggable divider that resizes the sidebar smoothly in global coordinates and persists
+/// the final width once on drag end (zero per-frame UserDefaults writes, zero coordinate wobble).
 private struct SidebarDivider: View {
-    @Binding var width: Double
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Binding var persistedWidth: Double
+    @Binding var liveWidth: Double?
     let minWidth: Double
     let maxWidth: Double
 
+    @State private var dragStartWidth: Double?
+    @State private var hovering = false
+    @State private var cursorPushed = false
+
+    private var active: Bool { hovering || dragStartWidth != nil }
+
     var body: some View {
-        Rectangle()
-            .fill(Theme.border)
-            .frame(width: 1)
-            .overlay(
-                Rectangle()
-                    .fill(Color.clear)
-                    .frame(width: 8)
-                    .contentShape(Rectangle())
-                    .onHover { inside in
-                        if inside {
-                            NSCursor.resizeLeftRight.push()
-                        } else {
-                            NSCursor.pop()
-                        }
+        ZStack {
+            Rectangle()
+                .fill(Theme.border)
+                .frame(width: 1)
+            Rectangle()
+                .fill(Theme.brand.opacity(active ? 0.32 : 0))
+                .frame(width: 2)
+                .animation(Theme.Motion.value(Theme.Motion.micro, reduceMotion: reduceMotion), value: active)
+        }
+        .frame(width: 1)
+        .overlay(
+            Rectangle()
+                .fill(Color.clear)
+                .frame(width: 8)
+                .contentShape(Rectangle())
+                .onHover { inside in
+                    hovering = inside
+                    if inside && !cursorPushed {
+                        NSCursor.resizeLeftRight.push()
+                        cursorPushed = true
+                    } else if !inside && cursorPushed {
+                        NSCursor.pop()
+                        cursorPushed = false
                     }
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                let proposed = width + Double(value.translation.width)
-                                width = min(max(proposed, minWidth), maxWidth)
-                            }
-                    )
-            )
-            .accessibilityHidden(true)
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                        .onChanged { value in
+                            let base = dragStartWidth ?? persistedWidth
+                            if dragStartWidth == nil { dragStartWidth = base }
+                            let proposed = min(max(base + Double(value.translation.width), minWidth), maxWidth)
+                            var tx = Transaction()
+                            tx.disablesAnimations = true
+                            withTransaction(tx) { liveWidth = proposed }
+                        }
+                        .onEnded { _ in
+                            let final = liveWidth ?? persistedWidth
+                            persistedWidth = min(max(final, minWidth), maxWidth)
+                            liveWidth = nil
+                            dragStartWidth = nil
+                        }
+                )
+        )
+        .onDisappear {
+            if cursorPushed {
+                NSCursor.pop()
+                cursorPushed = false
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -190,6 +235,7 @@ private struct SidebarDivider: View {
 private struct ActiveTerminalHeader: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let connection: ConnectionSession?
     /// Grid chip visibility: shown for a few seconds after the grid actually changes, then fades.
     @State private var showGrid = false
@@ -204,9 +250,9 @@ private struct ActiveTerminalHeader: View {
                     .frame(width: 26, height: 26)
                     .contentShape(RoundedRectangle(cornerRadius: 5))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PaperPressButtonStyle(hoverWash: true, cornerRadius: 5))
             .help(appModel.sidebarCollapsed ? "显示侧栏 (⌘\\)" : "隐藏侧栏 (⌘\\)")
-            .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
+            .accessibilityLabel(appModel.sidebarCollapsed ? "显示侧栏" : "隐藏侧栏")
 
             if let conn = connection {
                 let isRouter = conn.id == appModel.routerConnection?.id
@@ -224,7 +270,6 @@ private struct ActiveTerminalHeader: View {
                 }
 
                 if let host = conn.host { metaChip("network", host) }
-                if let g = conn.grid, showGrid { metaChip("squareshape.split.2x2", "\(g.cols)×\(g.rows)") }
 
                 if let path = conn.currentPath {
                     let shown = displayPath(path, remote: conn.host != nil)
@@ -239,13 +284,20 @@ private struct ActiveTerminalHeader: View {
 
                 Spacer(minLength: Theme.Space.md)
 
+                if let g = conn.grid {
+                    metaChip("squareshape.split.2x2", "\(g.cols)×\(g.rows)")
+                        .opacity(showGrid ? 1 : 0)
+                        .animation(Theme.Motion.value(showGrid ? Theme.Motion.snap : Theme.Motion.echo, reduceMotion: reduceMotion), value: showGrid)
+                        .accessibilityHidden(!showGrid)
+                }
+
                 if TerminalStatus.of(conn) == .failed {
                     Button { conn.retry() } label: {
                         Label("重新连接", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .accessibilityLabel("Reconnect terminal")
+                    .accessibilityLabel("重新连接终端")
                 }
 
                 if isRouter {
@@ -253,7 +305,7 @@ private struct ActiveTerminalHeader: View {
                     Button { appModel.openWorklist() } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "list.bullet.clipboard")
-                            Text(needs > 0 ? "我的清单 · \(needs)" : "我的清单")
+                            Text(needs > 0 ? "我的工作 · \(needs)" : "我的工作")
                         }
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(needs > 0 ? Theme.Status.attention : Theme.textSecondary)
@@ -262,13 +314,14 @@ private struct ActiveTerminalHeader: View {
                         .background(needs > 0 ? Theme.Status.attention.opacity(0.12) : Theme.surface2,
                                     in: RoundedRectangle(cornerRadius: 6))
                     }
-                    .buttonStyle(.plain)
-                    .help("打开我的清单")
+                    .buttonStyle(PaperPressButtonStyle(cornerRadius: 6))
+                    .help("打开我的工作")
 
                     Button { appModel.restartRouter() } label: {
                         Image(systemName: "arrow.clockwise")
+                            .frame(width: 24, height: 24)
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(PaperPressButtonStyle(hoverWash: true, cornerRadius: 5))
                     .help("按当前设置重启主管")
                     .accessibilityLabel("重启主管")
                 }
@@ -308,12 +361,12 @@ private struct ActiveTerminalHeader: View {
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
         .onChange(of: gridText) { _, new in
             guard new != nil else { showGrid = false; return }
-            withAnimation(.easeInOut(duration: 0.15)) { showGrid = true }
+            Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) { showGrid = true }
             gridHideTask?.cancel()
             gridHideTask = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
                 guard !Task.isCancelled else { return }
-                withAnimation(.easeInOut(duration: 0.3)) { showGrid = false }
+                Theme.Motion.run(Theme.Motion.echo, reduceMotion: reduceMotion) { showGrid = false }
             }
         }
     }
@@ -326,7 +379,7 @@ private struct ActiveTerminalHeader: View {
                 .frame(width: 26, height: 24)
                 .contentShape(RoundedRectangle(cornerRadius: 5))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PaperPressButtonStyle(hoverWash: true, cornerRadius: 5))
         .disabled(disabled)
         .opacity(disabled ? 0.35 : 1)
         .help(help)
@@ -494,9 +547,9 @@ struct ToolHeaderBar<Leading: View, Trailing: View>: View {
                     .frame(width: 26, height: 26)
                     .contentShape(RoundedRectangle(cornerRadius: 5))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PaperPressButtonStyle(hoverWash: true, cornerRadius: 5))
             .help(appModel.sidebarCollapsed ? "显示侧栏 (⌘\\)" : "隐藏侧栏 (⌘\\)")
-            .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
+            .accessibilityLabel(appModel.sidebarCollapsed ? "显示侧栏" : "隐藏侧栏")
 
             if hasLeading {
                 leading()
@@ -581,38 +634,38 @@ private struct DetachToast: View {
 /// A brief "13 pt" flash whenever the font size changes (driven by `AppModel.fontPulse`), so ⌘+/−/0
 /// gives visible feedback — including a no-op press at the 9–28 clamp boundary. Non-interactive.
 private struct FontSizeHUD: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let size: Double
     let pulse: Int
     @State private var visible = false
     @State private var hideTask: Task<Void, Never>?
 
     var body: some View {
-        // Mounted only while showing: a material keeps re-blurring whatever is behind it, so an
-        // always-present (opacity 0) HUD over the live terminal re-rendered continuously.
+        // Solid paper-ink badge (no material blur over live terminal, honoring DESIGN.md).
         ZStack {
             if visible {
                 Text("\(Int(size)) pt")
                     .font(.system(.title3, design: .rounded).weight(.semibold))
                     .monospacedDigit()
+                    .foregroundStyle(Theme.onBrand)
                     .padding(.horizontal, Theme.Space.lg)
                     .padding(.vertical, Theme.Space.sm)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(Capsule().strokeBorder(Theme.brand.opacity(0.4)))
+                    .background(Theme.brand, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
                     .padding(.top, Theme.Space.xl)
                     .transition(.opacity)
             }
         }
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-            .animation(.easeOut(duration: 0.12), value: visible)
-            .onChange(of: pulse) {
-                visible = true
-                hideTask?.cancel()
-                hideTask = Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 900_000_000)
-                    guard !Task.isCancelled else { return }
-                    withAnimation(.easeOut(duration: 0.25)) { visible = false }
-                }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .animation(Theme.Motion.value(Theme.Motion.micro, reduceMotion: reduceMotion), value: visible)
+        .onChange(of: pulse) {
+            visible = true
+            hideTask?.cancel()
+            hideTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                guard !Task.isCancelled else { return }
+                Theme.Motion.run(Theme.Motion.echo, reduceMotion: reduceMotion) { visible = false }
             }
+        }
     }
 }

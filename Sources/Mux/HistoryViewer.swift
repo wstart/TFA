@@ -156,8 +156,10 @@ struct HistoryViewerSheet: View {
                     if loading {
                         ProgressView("正在读取历史…")
                             .controlSize(.small)
+                            .foregroundStyle(Theme.textPrimary)
                             .padding(Theme.Space.lg)
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+                            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
                     } else if empty {
                         Text("这个终端还没有可显示的历史。")
                             .font(Theme.Font.emptyBody)

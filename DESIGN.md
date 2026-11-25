@@ -205,13 +205,32 @@ This system has **zero drop shadows** (chrome and cards alike). Depth comes from
 
 ## 8. Motion
 
-Restrained — motion is reserved for things that genuinely change state, and there is exactly **one
-signature looping animation**:
-- **Equalizer bars** while a terminal is actively producing output (the live-activity signal).
-- Everything else is one-shot/interaction-triggered (sidebar collapse, board drag spring, toast fade,
-  selection). No perpetual loops on bells/dots; the board "running" tag is static.
-- Typing-combo spark effects default **off**.
-- All decorative motion honors **Reduce Motion**.
+Restrained, critically damped, zero-bounce — motion is reserved for things that genuinely change
+state and reveal causality, never decorative flourish. All timings are centralized in
+`Theme.Motion` (`Sources/Mux/Theme.swift`); views never hardcode ad-hoc animation durations.
+
+### Motion tokens (`Theme.Motion`)
+
+| Tier | Token | Curve & duration | Use |
+|------|-------|------------------|-----|
+| Micro | `Theme.Motion.micro` | `easeOut(0.10s)` | Hover washes, press feedback (`PaperPressButtonStyle` `0.985` scale / `0.76` opacity), focus rings |
+| Snap | `Theme.Motion.snap` | `snappy(0.15s, extraBounce: 0)` | Segmented thumbs (`matchedGeometryEffect`), numeric badge ticks, checkboxes, quick toggles |
+| Panel | `Theme.Motion.panel` | `snappy(0.20s, extraBounce: 0)` | Sidebar collapse, drawers, banners, cards, foldouts, tone switches |
+| Layout | `Theme.Motion.layout` | `smooth(0.24s, extraBounce: 0)` | Progress bars, stage underlines, list reflow / hold release, relation tree highlights |
+| Echo | `Theme.Motion.echo` | `easeOut(0.22s)` | Transient echoes, status text fades, HUD dismissal |
+| Equalizer | `Theme.Motion.equalizer` | `easeInOut(0.42s).repeatForever(autoreverses: true)` | **The sole permitted looping animation** — live terminal output equalizer bars |
+
+### Guardrails & anti-jank rules
+
+- **Zero bounce (`extraBounce: 0`)**: Printed paper settles cleanly without springy overshoot.
+- **One signature loop only**: Only **Equalizer bars** may repeat forever while a terminal is actively producing output. No perpetual breathing/pulsing on dots, bells, or badges; the board "running" tag is static.
+- **100% Reduce Motion**: Always gate implicit modifiers with `Theme.Motion.value(_:reduceMotion:)`, imperative mutations with `Theme.Motion.run(_:reduceMotion:_:)`, and directional transitions with `Theme.Motion.reveal(edge:reduceMotion:)` (which collapses movement to pure `.opacity`).
+- **Tactile press without shadows**: Interactive chips and chrome icon buttons use `PaperPressButtonStyle(hoverWash:cornerRadius:)` — subtle `0.985` scale + `0.76` opacity on press, zero drop shadow, zero layout shift.
+- **No-jank boundaries**:
+  - Live drag gestures (e.g. `SidebarDivider`) update in-memory state inside a disabled-animation `Transaction` and persist to `@AppStorage` only in `.onEnded`.
+  - Terminal panes (`TerminalPaneView`, `EmbeddedRouterTerminalView`) never receive `opacity`/`scale`/`move` transitions, and PTY size-sync debounce (`≥ 230ms`) clears the `200ms` `panel` transition so tmux is never resized mid-flight.
+  - Large code diffs (`TaskDiffSection`) animate only their disclosure chevron, never height-scaling thousands of diff lines.
+  - Typing-combo spark effects default **off**.
 
 ---
 

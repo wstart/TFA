@@ -17,7 +17,7 @@ struct TerminalAreaView: View {
 }
 
 /// The terminal (or its login / reconnecting / error state) for one connection.
-private struct TerminalContent: View {
+struct TerminalContent: View {
     @Environment(AppModel.self) private var appModel
     let conn: ConnectionSession
 
@@ -136,7 +136,7 @@ private struct ConnectionFailureView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 34))
                 .foregroundStyle(Theme.Status.error)
-            Text("Couldn't connect")
+            Text("连接终端失败")
                 .font(Theme.Font.emptyTitle)
             Text(error)
                 .font(Theme.Font.emptyBody)
@@ -147,7 +147,7 @@ private struct ConnectionFailureView: View {
             Button {
                 connection.retry()
             } label: {
-                Label("Retry Connection", systemImage: "arrow.clockwise")
+                Label("重新连接", systemImage: "arrow.clockwise")
             }
             .controlSize(.large)
             .keyboardShortcut("r", modifiers: .command)
@@ -279,8 +279,8 @@ private struct LoginView: View {
     }
 
     private var hint: String {
-        let host = connection.host ?? "host"
-        return "Signing in to \(host) — type your password / answer prompts, then press Return."
+        let host = connection.host ?? "远程主机"
+        return "正在登录 \(host) — 请输入密码或确认提示后按回车。"
     }
 }
 
@@ -349,6 +349,7 @@ private struct SinglePaneView: View {
     // Injected by TerminalAreaView's environment (AppModel is @Observable). Drives whether the
     // typing-combo effect is wired/shown — see requirement 10.
     @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let connection: ConnectionSession
     let pane: TmuxPane
@@ -401,6 +402,7 @@ private struct SinglePaneView: View {
                             connection.terminal(for: pane.id).scrollToBottom()
                         }
                         .padding(Theme.Space.lg)
+                        .transition(Theme.Motion.reveal(edge: .bottom, reduceMotion: reduceMotion))
                     }
                 }
                 .onAppear { scheduleRefresh(); wireCombo(); wireScrollState() }
@@ -432,8 +434,14 @@ private struct SinglePaneView: View {
         atBottom = true
         unseenLines = 0
         term.onScrollState = { atBottom, unseen in
-            self.atBottom = atBottom
-            self.unseenLines = unseen
+            if self.atBottom != atBottom {
+                Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                    self.atBottom = atBottom
+                    self.unseenLines = unseen
+                }
+            } else {
+                self.unseenLines = unseen
+            }
         }
     }
 
@@ -467,7 +475,7 @@ private struct SinglePaneView: View {
         let paneID = pane.id
         sizeSyncTask?.cancel()
         sizeSyncTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 120_000_000) // debounce a live drag-resize
+            try? await Task.sleep(nanoseconds: 230_000_000) // debounce across 200ms sidebar collapse & live drag-resize
             guard !Task.isCancelled else { return }
             let term = connection.terminal(for: paneID)
             term.applyViewSizeToTmux()                       // grow/shrink tmux to the new view grid
@@ -501,6 +509,7 @@ private struct ComboBurst: View {
 /// One spark burst: a handful of brand-colored dots flying outward and fading, played once on
 /// appear. Lightweight — nothing animates while idle (the parent only mounts it per keystroke).
 private struct BurstInstance: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var expanded = false
 
     private struct Spark { let angle: Double; let distance: CGFloat; let size: CGFloat; let opacity: Double }
@@ -524,12 +533,15 @@ private struct BurstInstance: View {
                     .scaleEffect(expanded ? 0.3 : 1)
             }
         }
-        .onAppear { withAnimation(.easeOut(duration: 0.45)) { expanded = true } }
+        .onAppear {
+            Theme.Motion.run(Theme.Motion.layout, reduceMotion: reduceMotion) { expanded = true }
+        }
     }
 }
 
 /// The top-right "×N COMBO" counter. Grows and glows with the streak; pops on each increment.
 private struct ComboCounter: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let count: Int
 
     var body: some View {
@@ -543,7 +555,7 @@ private struct ComboCounter: View {
                 .tracking(2)
                 .foregroundStyle(Theme.brand.opacity(0.8))
         }
-        .animation(.spring(response: 0.25, dampingFraction: 0.55), value: count)
+        .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: count)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
@@ -551,7 +563,7 @@ private struct ComboCounter: View {
 
 // MARK: - Jump to latest (rebuild.md #5)
 
-/// A small floating pill that appears in the terminal's bottom-right while the user is scrolled up
+/// A small floating chip that appears in the terminal's bottom-right while the user is scrolled up
 /// into history, snapping the viewport back to the live tail when tapped. Shows the count of lines
 /// that streamed in while away (when known) so the user can tell there's new output below.
 private struct JumpToLatestPill: View {
@@ -573,10 +585,10 @@ private struct JumpToLatestPill: View {
             .padding(.vertical, Theme.Space.xs)
             // Solid fill, no material and no per-count animation: it sits over a live terminal, so a
             // blur would be recomputed on every repaint underneath it.
-            .background(Theme.surface, in: Capsule())
-            .overlay(Capsule().stroke(Theme.brand.opacity(0.6), lineWidth: 1))
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.brand.opacity(0.6), lineWidth: 1))
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Jump to latest output")
+        .buttonStyle(PaperPressButtonStyle(cornerRadius: Theme.Radius.md))
+        .accessibilityLabel("跳到最新输出")
     }
 }

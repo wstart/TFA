@@ -134,6 +134,7 @@ public enum TFACommand {
         case "handback": return try handback(rest, c)
         case "task": return try task(rest, c)
         case "kb": return try kb(rest, c)
+        case "org": return try org(rest, c)
         default:
             return Outcome(code: 2, err: "tfa: 未知命令 \(head)\n\n" + help(""))
         }
@@ -529,6 +530,18 @@ public enum TFACommand {
         Entry(command: "kb summarize",
               usage: "tfa kb summarize A-12 [--force]",
               about: "为指定任务生成或重新提炼知识库总结卡片",
+              worker: false),
+        Entry(command: "org join",
+              usage: "tfa org join \"<接入链接或原话>\"",
+              about: "用一句话或单链接接入公司组织（支持 .../join/<code>、tfa://join?... 或自然语言；省略参数时从 stdin 读）",
+              worker: false),
+        Entry(command: "org status",
+              usage: "tfa org status",
+              about: "查看当前本机接入组织的状态（工作区、服务器地址、邮箱、节点 ID）",
+              worker: false),
+        Entry(command: "org leave",
+              usage: "tfa org leave",
+              about: "断开本机组织连接（清除本地节点凭据，保留历史任务）",
               worker: false),
         Entry(command: "task list", usage: "tfa task list [--needs-you] [--scope 目录] [--stage 阶段名]",
               about: "清单：需要你 → 进行中 → 待分配，每行 A-12 [状态] 标题 · 完成/总数 · 执行者", worker: false),

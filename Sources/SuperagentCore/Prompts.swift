@@ -16,6 +16,7 @@ public enum SuperagentPrompts {
 只通过 Bash 运行 `tfa`。每次 Bash 只跑一条 tfa 命令，不用管道、`&&` 或 `;`。原文含换行或引号时省略 `--request`，用 heredoc 从标准输入传入（只用于 accept、attach，以及 role set 的 `--behavior`）：`tfa route accept --role R --title T <<'EOF'`，下一行起写原文，最后一行 `EOF`。
 - `tfa read`（总览）、`tfa read ticket <id>`、`tfa read roles`（现有角色）、`tfa read candidates`、`tfa read rules`、`tfa read projects`（TFA 已知的项目目录）
 - `tfa kb search <关键词> [--scope DIR]`、`tfa kb show <A-id|K-id>`、`tfa kb list [--scope DIR]`（项目知识库与已完成任务复盘）
+- `tfa org join "<接入链接或原话>"`、`tfa org status`、`tfa org leave`（接入或查看公司组织协同）
 - `tfa task add --title T [--request 原文] [--scope DIR] [--item 一项]... [--suggest 1=助理,2=开发] [--relate A-12,K-3] [--assign-all 角色] [--note N]`、`tfa task relate A-<id> <A-12|K-3>...`、`tfa task list [--needs-you]`、`tfa task show A-<id>`（人的工作清单：新工作从这里进，见「人的消息」；原文也可用 heredoc）
 - `tfa route accept --role R --title T --request "原文" [--dir PATH] [--note N] [--no-worktree] [--trigger tN]`
 - `tfa route attach <id> --request "原文"`
@@ -28,6 +29,7 @@ public enum SuperagentPrompts {
 
 ## 人的消息
 - 闲聊、关于 TFA 本身的问题：直接回答，不建任务。
+- 接入或断开公司组织：人发来包含组织接入链接（如 .../join/... 或 tfa://join...）或明确说「接入组织 / 连上公司 …」时，直接运行 `tfa org join "<人的原话>"`（查看状态用 `tfa org status`，明确要求断开用 `tfa org leave`），完成后一句话告知结果，不要建任务或工单。
 - 追问先 attach：人的话接着某个工单的结果（结果里的某一条、「再看看」「详细说说」「那个」），或明确指向某个工单（写了 #编号），就 `tfa route attach <id> --request "原文"`，不新开。已结束的单也 attach：它会重新打开，交给原来的终端，上下文还在。转达对该工单问题的回答或打回意见也用它。人说的是任务（A-编号）时，先 `tfa task show A-<id>` 找到工单号再 attach。只是主题相似、和之前的结果无关，才算新工作。
 - 新的工作请求用 `tfa task add` 加进人的清单并给出清单项与角色建议；不要 `route accept`，除非人明确说直接让 Agent 做。先 `tfa read` 查重，同一工作已有打开的任务或工单就不再加。一条消息里有几件独立的事，就各 add 一次。
   - `tfa task add --title T --request "原文" [--scope 目录] --item "…" --item "…" --suggest 1=助理,2=开发 [--note N]`；原文含换行或引号时省略 `--request`，用 heredoc 从标准输入传入。

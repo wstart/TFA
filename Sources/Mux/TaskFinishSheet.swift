@@ -85,11 +85,9 @@ struct TaskFinishSheet: View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
             Text("完成任务 A-\(taskID) \(sa.task(taskID)?.task.title ?? "")").font(Theme.Font.headerTitle).lineLimit(2)
             if let plan {
-                VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                    Text("要合并的分支").font(Theme.Font.sectionHeader).foregroundStyle(Theme.textTertiary)
-                    if plan.branches.isEmpty {
-                        Text("没有要合并的分支。").font(.callout).foregroundStyle(Theme.textSecondary)
-                    } else {
+                if !plan.branches.isEmpty {
+                    VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                        Text("要合并的分支").font(Theme.Font.sectionHeader).foregroundStyle(Theme.textTertiary)
                         ForEach(plan.branches, id: \.ticketID) { b in
                             HStack(spacing: Theme.Space.md) {
                                 Text(b.branch).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.textPrimary)
@@ -108,10 +106,12 @@ struct TaskFinishSheet: View {
                         }
                         .accessibilityLabel("合并到 \(plan.target)")
                     }
+                } else if plan.withoutBranch.isEmpty && plan.unfinishedLine == nil {
+                    Text("所有清单项已完成，确认后将直接结单。").font(.callout).foregroundStyle(Theme.textSecondary)
                 }
                 if !plan.withoutBranch.isEmpty {
                     VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                        Text("没有分支的工单（随任务结单）").font(Theme.Font.sectionHeader).foregroundStyle(Theme.textTertiary)
+                        Text("随任务结单的工单").font(Theme.Font.sectionHeader).foregroundStyle(Theme.textTertiary)
                         ForEach(plan.withoutBranch, id: \.ticketID) { t in
                             Text("工单 #\(t.ticketID) \(t.title)").font(.callout).foregroundStyle(Theme.textSecondary).lineLimit(1)
                         }
@@ -129,11 +129,12 @@ struct TaskFinishSheet: View {
             } else {
                 HStack(spacing: Theme.Space.sm) {
                     ProgressView().controlSize(.small)
-                    Text("在看要合并的分支…").font(.caption).foregroundStyle(Theme.textTertiary)
+                    Text("正在检查待合并分支…").font(.caption).foregroundStyle(Theme.textTertiary)
                 }
             }
             SheetButtons(error: error, confirm: running ? "合并中…" : (plan?.confirmTitle ?? "合并并完成"),
-                         enabled: plan != nil && error == nil && !running && !sa.mergingTasks.contains(taskID)) { confirm(sa) }
+                         enabled: plan != nil && error == nil && !running && !sa.mergingTasks.contains(taskID),
+                         shortcut: KeyboardShortcut(.return, modifiers: .command)) { confirm(sa) }
         }
         .padding(Theme.Space.xl)
         .frame(width: 460)

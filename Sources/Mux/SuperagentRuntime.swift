@@ -38,7 +38,13 @@ final class SuperagentRuntime {
     /// 常驻角色的终端（会话名）：侧栏把它们归进「角色」分组。
     private(set) var agentSessions: Set<String> = []
     /// 「主管」终端的 tmux 会话名（没开 = nil）。
-    private(set) var routerSession: String?
+    var routerSession: String?
+    /// 主管终端此刻是否正在思考 / 执行中（窗格活跃、`agy` 显示 `esc to cancel` 或正在送入指令）。
+    private(set) var routerBusy: Bool = false
+    /// 主管实时动态（一句干净的人类可读状态，展示在「我的工作」内嵌主管栏）。
+    private(set) var routerActivityLine: String = "主管未启动 · 直接输入需求，发送时会自动拉起"
+    /// 正在把「我的清单」内嵌栏的一句话指令送达主管终端或接入组织。
+    private(set) var sendingToRouter: Bool = false
     /// 打开数据库失败等：面板顶部显示。
     private(set) var setupError: String?
     /// 「我的清单」可用：启动时的工单 → 任务迁移成功。失败时首屏回退到旧的主管面板（注意事项 K-05）。
@@ -93,10 +99,15 @@ final class SuperagentRuntime {
     @ObservationIgnored var workerCommand: ((_ ticket: Ticket, _ kickoff: String) -> String)?
     /// 主管终端启动命令行；nil = 按设置选 Claude Code 或 axis-claude。
     @ObservationIgnored var routerCommand: (() -> String)?
+    /// 供后台转达（`performRelay`）在主管断线时按需自动唤醒主管的工作目录提供器；`AppModel.startSuperagent()` 注入，单测默认 `nil` 不破坏既有断言。
+    @ObservationIgnored var autoHealRouterDirectory: (() -> String)?
+    @ObservationIgnored private var routerAutoHealAt: Double = 0
     /// 送达后等回显的时间（测试可调小）。
     @ObservationIgnored var echoWait: Double = 2.0
     /// agent 启动的最长等待。
     @ObservationIgnored var launchWait: Double = 15
+    /// 内嵌主管栏等待主管窗格就绪的最长时间（秒）。
+    @ObservationIgnored var routerReadyWait: Double = 15
     @ObservationIgnored var worktreeRoot = SuperagentPaths.worktreesDir
     /// 常驻角色各自的目录：`<agentsRoot>/<角色>`。
     @ObservationIgnored var agentsRoot = SuperagentPaths.agentsDir
@@ -238,8 +249,11 @@ final class SuperagentRuntime {
         }
     }
 
-    /// 立刻跑一轮（`tfa` 提交、界面操作之后）。
-    func kick() { Task { @MainActor in await self.pass() } }
+    /// 立刻跑一轮（`tfa` 提交、界面操作之后；同时检查外部 `tfa org join / leave` 带来的组织连接变更）。
+    func kick() {
+        org.reloadFromStore()
+        Task { @MainActor in await self.pass() }
+    }
 
     // MARK: - 人的操作（界面）
 
@@ -501,28 +515,36 @@ final class SuperagentRuntime {
 
     // MARK: - 主管终端
 
-    /// 打开（或建）「主管」终端：Claude Code，只允许 `tfa` 命令、禁用编辑。返回会话名。
-    func openRouter(dir: String) async -> String? {
+    /// 打开（或建）「主管」终端：Claude Code / axis-claude / Antigravity，只允许 `tfa` 命令、禁用编辑。返回会话名。
+    /// `forceRetype == true` 时把退回 Shell 后的重拉冷却从 30s 放宽到 5s（供用户主动切页/发话或断线自愈立即拉起）。
+    func openRouter(dir: String, forceRetype: Bool = false) async -> String? {
         // 连点两下：第二次等第一次的结果，不并发建两个（同名会话会建失败）。
         if let inFlight = routerOpening { return await inFlight.value }
-        let task = Task { @MainActor in await self.openRouterOnce(dir: dir) }
+        let task = Task { @MainActor in await self.openRouterOnce(dir: dir, forceRetype: forceRetype) }
         routerOpening = task
         defer { routerOpening = nil }
         return await task.value
     }
 
-    private func openRouterOnce(dir: String) async -> String? {
+    private func openRouterOnce(dir: String, forceRetype: Bool) async -> String? {
         let tmux = self.tmux
         if routerCommand == nil, settings.codingAgent == .antigravity {
             let acceptance = settings.acceptance, roles = roles
             await Task.detached(priority: .userInitiated) { _ = SuperagentPrompts.install(acceptance: acceptance, roles: roles) }.value
         }
         let command = routerCommand?() ?? defaultRouterCommand(trustedDir: dir)
-        let mayRetype = Date().timeIntervalSince(routerTypedAt) > 30
+        let cooldown: Double = forceRetype ? 5 : 30
+        let mayRetype = Date().timeIntervalSince(routerTypedAt) > cooldown
         let made = await Task.detached(priority: .userInitiated) { Self.makeRouter(tmux, dir: dir, command: command, mayRetype: mayRetype) }.value
         switch made {
         case .success(let (name, launched)):
-            if launched { routerTypedAt = Date() }
+            if launched {
+                routerTypedAt = Date()
+                if !sendingToRouter {
+                    routerBusy = true
+                    routerActivityLine = "主管终端启动中（\(settings.codingAgent.label)）…"
+                }
+            }
             if routerSession != name { routerSession = name }
             onSessionCreated?(name, true)
             return name
@@ -537,6 +559,8 @@ final class SuperagentRuntime {
         if let inFlight = routerOpening { _ = await inFlight.value }
         let task = Task { @MainActor () -> String? in
             let tmux = self.tmux
+            self.routerBusy = true
+            self.routerActivityLine = "正在重启主管终端（\(self.settings.codingAgent.label)）…"
             if self.routerCommand == nil, self.settings.codingAgent == .antigravity {
                 let acceptance = self.settings.acceptance, roles = self.roles
                 await Task.detached(priority: .userInitiated) { _ = SuperagentPrompts.install(acceptance: acceptance, roles: roles) }.value
@@ -560,6 +584,8 @@ final class SuperagentRuntime {
                 self.onSessionCreated?(name, true)
                 return name
             case .failure(let e):
+                self.routerBusy = false
+                self.routerActivityLine = "主管重启失败：\(e)"
                 self.actionError = "\(e)"
                 return nil
             }
@@ -567,6 +593,382 @@ final class SuperagentRuntime {
         routerOpening = task
         defer { routerOpening = nil }
         return await task.value
+    }
+
+    /// 在「我的清单」内嵌栏直接向主管发送一句话（不切走当前工作清单视图！）：
+    /// 1. 若匹配 `OrgJoinSpec.parse(trimmed)`（线上组织接入链接/口令），直接调用 `await org.register(phrase: trimmed)` 秒级接入组织，返回成功提示或错误原因；
+    /// 2. 否则，确保主管终端已启动（若 `routerSession == nil` 或会话不在 tmux 中，自动调用 `await openRouter(dir: routerDir)` 并在侧栏静默收养 `onSessionCreated`，不切换用户的当前选中页面）；
+    /// 3. 轮询等待主管窗格就绪（无对话框且进入空闲输入态，最多等 15 秒，刚新建启动时等 Agent 提示符出现），然后将用户的原话送入主管窗格执行，更新 `routerActivityLine` 并返回回声提示。
+    @MainActor
+    func sendToEmbeddedRouter(_ text: String, routerDir: String) async -> (ok: Bool, message: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return (false, "请先输入一句话指令或线上组织接入口令")
+        }
+        guard !sendingToRouter else {
+            return (false, "上一条指令正在送达主管，请稍候…")
+        }
+
+        sendingToRouter = true
+        routerBusy = true
+        routerActivityLine = "正在把指令送达主管终端…"
+        defer { sendingToRouter = false }
+
+        // 1. 线上组织接入口令/链接：秒级直连注册，不经过终端
+        if OrgJoinSpec.parse(trimmed) != nil {
+            routerActivityLine = "正在识别并接入线上组织…"
+            if let err = await org.register(phrase: trimmed) {
+                sendingToRouter = false
+                routerBusy = false
+                await refreshRouterActivityOnce()
+                return (false, "接入线上组织失败：\(err)")
+            }
+            reload()
+            kick()
+            let workspace = org.settings.workspace.trimmingCharacters(in: .whitespacesAndNewlines)
+            let label = workspace.isEmpty ? org.settings.serverURL : workspace
+            sendingToRouter = false
+            routerBusy = false
+            await refreshRouterActivityOnce()
+            return (true, "已接入「\(label)」，正在同步组织任务…")
+        }
+
+        // 2. 确保主管终端已启动且匹配当前配置的 Agent（静默拉起/自愈并通过 onSessionCreated 收养，不切走当前页面）
+        let tmux = self.tmux
+        let initialSnap = await Task.detached(priority: .userInitiated) { tmux.snapshot() }.value
+        let existingRouter = initialSnap?.first(where: \.isRouter)
+        let agentMismatch = existingRouter != nil
+            && existingRouter?.isPlainShell == false
+            && routerCommand == nil
+            && !existingRouter!.matches(codingAgent: settings.codingAgent)
+        let needsLaunch = agentMismatch || (routerSession == nil) || (existingRouter == nil) || (existingRouter?.isPlainShell == true)
+        if agentMismatch {
+            routerActivityLine = "正在切换主管 Agent（\(settings.codingAgent.label)）…"
+            let prevError = actionError
+            actionError = nil
+            guard let name = await restartRouter(dir: routerDir) else {
+                let reason = actionError ?? "无法重启主管终端"
+                if actionError == nil { actionError = prevError }
+                routerBusy = false
+                routerActivityLine = "主管启动失败：\(reason)"
+                return (false, "切换主管 Agent 失败：\(reason)")
+            }
+            if actionError == nil { actionError = prevError }
+            if routerSession != name { routerSession = name }
+        } else if needsLaunch {
+            routerActivityLine = "主管未连接，正在为你自动拉起 \(settings.codingAgent.label)…"
+            let prevError = actionError
+            actionError = nil
+            guard let name = await openRouter(dir: routerDir, forceRetype: true) else {
+                let reason = actionError ?? "无法启动主管终端"
+                if actionError == nil { actionError = prevError }
+                routerBusy = false
+                routerActivityLine = "主管启动失败：\(reason)"
+                return (false, "唤醒主管终端失败：\(reason)")
+            }
+            if actionError == nil { actionError = prevError }
+            if routerSession != name { routerSession = name }
+        }
+
+        // 3. 轮询等待主管窗格就绪（冷启动自适应给足 35s，单测自定义短超时不受影响）后送入用户原话
+        let effectiveWait = (needsLaunch && routerReadyWait >= 15) ? 35.0 : routerReadyWait
+        routerActivityLine = needsLaunch ? "等待主管终端就绪…" : "正在把指令送达主管终端…"
+        var outcome = await waitForRouterAndSend(trimmed, routerDir: routerDir, timeout: effectiveWait)
+
+        // 4. 一次自愈重连兜底：若原本在跑的主管会话在发话瞬间断线或退回 Shell，自动重启恢复并重发一次
+        if outcome == .notStarted, !needsLaunch {
+            routerActivityLine = "主管刚才断开了，正在重连并补发这句话…"
+            let prevError = actionError
+            actionError = nil
+            if let name = await restartRouter(dir: routerDir) {
+                if actionError == nil { actionError = prevError }
+                if routerSession != name { routerSession = name }
+                let retryWait = routerReadyWait >= 15 ? 35.0 : routerReadyWait
+                routerActivityLine = "主管刚才断开了，正在重连并补发这句话…"
+                outcome = await waitForRouterAndSend(trimmed, routerDir: routerDir, timeout: retryWait)
+            } else if actionError == nil {
+                actionError = prevError
+            }
+        }
+
+        switch outcome {
+        case .delivered:
+            routerBusy = true
+            routerActivityLine = "主管已收到，正在拆解任务…"
+            kick()
+            return (true, "已发给主管，拆好后会自动出现在清单里")
+        case .dialog:
+            routerBusy = false
+            routerActivityLine = "主管正等你确认弹窗 · 点右侧「打开主管终端」处理"
+            return (false, "主管正等你确认弹窗，请点右侧「打开主管终端」处理后再发")
+        case .busy:
+            routerBusy = true
+            routerActivityLine = "主管正在处理上一条指令，暂时忙碌…"
+            return (false, "主管正在处理上一条指令，可稍后再试或点右侧「打开主管终端」直接接手")
+        case .notStarted:
+            routerBusy = false
+            routerActivityLine = "主管终端尚未就绪 · 点右侧「打开主管终端」查看"
+            return (false, "等待主管终端就绪超时，请稍后重试或点右侧「打开主管终端」查看")
+        }
+    }
+
+    private enum EmbeddedSendOutcome: Sendable {
+        case delivered
+        case dialog
+        case busy
+        case notStarted
+    }
+
+    private func waitForRouterAndSend(_ text: String, routerDir: String, timeout: Double) async -> EmbeddedSendOutcome {
+        let tmux = self.tmux
+        let deadline = Date().addingTimeInterval(max(timeout, 1))
+        var lastOutcome: EmbeddedSendOutcome = .notStarted
+
+        while true {
+            let step = await Task.detached(priority: .userInitiated) { () -> EmbeddedSendOutcome? in
+                guard let snap = tmux.snapshot(), let pane = snap.first(where: \.isRouter) else {
+                    return nil
+                }
+                guard let state = tmux.paneState(pane.pane), !SuperagentPane.isShell(state.command) else {
+                    return nil
+                }
+                let screen = tmux.capture(pane.pane, lines: 40)
+                if let keys = SuperagentTmux.trustDialogKeys(screen, for: routerDir) {
+                    for (idx, key) in keys.enumerated() {
+                        if idx > 0 { try? await Task.sleep(nanoseconds: 200_000_000) }
+                        tmux.sendKey(pane.pane, key)
+                    }
+                    try? await Task.sleep(nanoseconds: 800_000_000)
+                    return nil
+                }
+                if SuperagentTmux.showsDialog(screen) {
+                    return .dialog
+                }
+                let lowerCmd = state.command.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                let isAgy = lowerCmd == "agy" || lowerCmd.hasPrefix("agy ") || lowerCmd.hasSuffix("/agy")
+                if isAgy {
+                    if !SuperagentTmux.isAgyIdle(screen) {
+                        return screen.lowercased().contains("esc to cancel") ? .busy : nil
+                    }
+                } else {
+                    let tailLower = screen.split(separator: "\n")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty }
+                        .suffix(12)
+                        .joined(separator: "\n")
+                        .lowercased()
+                    let quiet = Date().timeIntervalSince1970 - Double(state.activity)
+                    let streaming = tailLower.contains("esc to cancel") || tailLower.contains("esc to interrupt")
+                    if streaming { return .busy }
+                    let promptVisible = Self.hasInteractivePrompt(screen)
+                    if quiet < Self.busyWindow && !(quiet >= 1.5 && promptVisible) {
+                        return promptVisible ? .busy : nil
+                    }
+                }
+                tmux.type(pane.pane, text)
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                if let after = tmux.paneState(pane.pane), !SuperagentPane.isShell(after.command) {
+                    return .delivered
+                }
+                return .notStarted
+            }.value
+
+            if let step {
+                switch step {
+                case .delivered: return .delivered
+                case .dialog: return .dialog
+                case .busy: lastOutcome = .busy
+                case .notStarted: lastOutcome = .notStarted
+                }
+            } else {
+                lastOutcome = .notStarted
+            }
+
+            if Date() >= deadline {
+                return lastOutcome
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
+
+    private func refreshRouterActivityOnce() async {
+        let tmux = self.tmux
+        let snap = await Task.detached(priority: .utility) { tmux.snapshot() }.value
+        if let snap {
+            let pane = snap.first(where: \.isRouter)
+            if pane?.session != routerSession { routerSession = pane?.session }
+            await updateRouterActivity(pane: pane)
+        } else if routerSession == nil {
+            let idle = "主管未启动 · 直接输入需求，发送时会自动拉起"
+            if routerActivityLine != idle { routerActivityLine = idle }
+        }
+    }
+
+    /// 根据最新 tmux 快照轻量抓取主管窗格底部 25 行（全程在后台线程，不阻塞主线程），更新 `routerBusy` 与 `routerActivityLine`。
+    private func updateRouterActivity(pane: SuperagentPane?) async {
+        if sendingToRouter {
+            if !routerBusy { routerBusy = true }
+            return
+        }
+        guard let pane else {
+            if routerBusy { routerBusy = false }
+            let idle = "主管未启动 · 直接输入需求，发送时会自动拉起"
+            if routerActivityLine != idle { routerActivityLine = idle }
+            return
+        }
+        let agentLabel = settings.codingAgent.label
+        let recentlyTyped = Date().timeIntervalSince(routerTypedAt) < 12
+        if pane.isPlainShell {
+            let busy = recentlyTyped
+            let line = busy
+                ? "主管终端正在启动（\(agentLabel)）…"
+                : "主管已退回命令行 · 发话或切去终端时会自动恢复"
+            if routerBusy != busy { routerBusy = busy }
+            if routerActivityLine != line { routerActivityLine = line }
+            return
+        }
+        let tmux = self.tmux
+        let now = clock()
+        let isAgy = pane.matches(codingAgent: .antigravity)
+        let target = pane.pane
+        let activity = pane.activity
+        let (busy, line) = await Task.detached(priority: .utility) { () -> (Bool, String) in
+            let screen = tmux.capture(target, lines: 25)
+            return Self.evaluateRouterScreen(
+                screen,
+                isAgy: isAgy,
+                activity: activity,
+                now: now,
+                recentlyTyped: recentlyTyped,
+                agentLabel: agentLabel
+            )
+        }.value
+        guard !sendingToRouter else { return }
+        if routerBusy != busy { routerBusy = busy }
+        if routerActivityLine != line { routerActivityLine = line }
+    }
+
+    nonisolated static func evaluateRouterScreen(
+        _ screen: String,
+        isAgy: Bool,
+        activity: Int,
+        now: Double,
+        recentlyTyped: Bool,
+        agentLabel: String
+    ) -> (busy: Bool, line: String) {
+        if SuperagentTmux.showsDialog(screen) {
+            return (false, "主管正等你确认弹窗 · 点右侧「打开主管终端」处理")
+        }
+        let nonEmpty = screen.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let tailLower = nonEmpty.suffix(12).joined(separator: "\n").lowercased()
+        let busy: Bool
+        if isAgy {
+            if tailLower.contains("esc to cancel") {
+                busy = true
+            } else if SuperagentTmux.isAgyIdle(screen) {
+                busy = false
+            } else {
+                busy = recentlyTyped || (now - Double(activity) < busyWindow)
+            }
+        } else {
+            if tailLower.contains("esc to cancel") || tailLower.contains("esc to interrupt") {
+                busy = true
+            } else {
+                busy = now - Double(activity) < busyWindow
+            }
+        }
+        let line = extractRouterActivityLine(screen: screen, isBusy: busy, agentLabel: agentLabel)
+        return (busy, line)
+    }
+
+    /// 从主管窗格底部提炼一句干净的人类可读动态（过滤横线、底栏提示、Auto mode、ASCII logo 等装饰噪点）。
+    nonisolated static func extractRouterActivityLine(screen: String, isBusy: Bool, agentLabel: String) -> String {
+        let rawLines = screen.split(separator: "\n", omittingEmptySubsequences: false)
+        for raw in rawLines.reversed() {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if !isBusy && isPromptInputLine(trimmed) { continue }
+            if let cleaned = cleanRouterLine(trimmed) {
+                return cleaned
+            }
+        }
+        if isBusy {
+            return "主管正在分析拆解你的指令…"
+        }
+        return "主管在线就绪（\(agentLabel)）· 可随时发话或切去终端"
+    }
+
+    nonisolated private static func hasInteractivePrompt(_ screen: String) -> Bool {
+        let lines = screen.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .suffix(8)
+        return lines.contains { line in
+            let lower = line.lowercased()
+            return line.hasPrefix("❯") || line.hasPrefix(">") || lower.contains("? for shortcuts") || lower.contains("try \"")
+        }
+    }
+
+    nonisolated private static func isPromptInputLine(_ line: String) -> Bool {
+        let stripped = line.trimmingCharacters(in: CharacterSet(charactersIn: "│┃║ \t"))
+        return stripped.hasPrefix("❯") || stripped.hasPrefix(">") || stripped.hasPrefix("›")
+            || stripped.hasPrefix("»") || stripped.hasPrefix("$ ") || stripped.hasPrefix("% ")
+    }
+
+    nonisolated private static func cleanRouterLine(_ raw: String) -> String? {
+        // 去掉两侧竖框线
+        var s = raw.trimmingCharacters(in: CharacterSet(charactersIn: "│┃║ \t"))
+        guard !s.isEmpty else { return nil }
+
+        // 过滤包含块状 ASCII logo / 框角字符的行
+        let artScalars = CharacterSet(charactersIn: "█▀▄▌▐░▒▓╔╗╚╝╭╮╰╯┌┐└┘├┤┬┴┼═━─┄┈")
+        let artCount = s.unicodeScalars.filter { artScalars.contains($0) }.count
+        if artCount >= 2 { return nil }
+        if s.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "─━═┄┈-=_*~·•.…|/\\+`^ \t").contains($0) }) {
+            return nil
+        }
+
+        let lower = s.lowercased()
+        let noiseMarkers = [
+            "? for shortcuts", "esc to cancel", "esc to interrupt",
+            "auto mode:", "auto mode", "shift+tab", "tab to toggle",
+            "ctrl+", "cmd+", "enter to send", "enter to submit",
+            "bypass permissions", "permission mode", "dontask", "plan mode", "accept edits",
+            "context left", "context window", "tokens used",
+            "welcome to claude", "welcome to antigravity", "tips for getting started",
+            "claude code v", "antigravity v", "/help for", "type /help",
+            "type your message", "ask anything", "message claude", "try \"",
+            "[tfa·r",
+        ]
+        if noiseMarkers.contains(where: { lower.contains($0) }) { return nil }
+
+        // 去掉前缀图标/旋转指示符
+        let leadingNoise = CharacterSet(charactersIn: "●•⏺◆◇▸▹↳⎿✻✳✶✢✓✔⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏❯>›» \t")
+        while let first = s.unicodeScalars.first, leadingNoise.contains(first) {
+            s.unicodeScalars.removeFirst()
+        }
+        s = s.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        guard !s.isEmpty else { return nil }
+
+        let cleanedLower = s.lowercased()
+        if cleanedLower == "thinking" || cleanedLower == "thinking..." || cleanedLower == "thinking…"
+            || cleanedLower == "working" || cleanedLower == "working..." || cleanedLower == "working…" {
+            return nil
+        }
+
+        // 过滤仅含路径或仅含 1 个字符的碎行
+        if s.hasPrefix("~/") || s.hasPrefix("/Users/") || s.hasPrefix("/private/") {
+            if !s.contains(" ") { return nil }
+        }
+        let meaningfulCount = s.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) || $0.value >= 0x4E00 }.count
+        guard meaningfulCount >= 2 else { return nil }
+
+        if s.count > 100 {
+            return String(s.prefix(100)) + "…"
+        }
+        return s
     }
 
     // MARK: - Pass
@@ -589,15 +991,21 @@ final class SuperagentRuntime {
         let open = (try? store.tickets(endedLimit: 0)) ?? []
         let due = (try? store.dueEffects(now: clock())) ?? []
         passCount &+= 1
-        // 没有打开的工单、没有到期的副作用：一次 SQLite 查询就结束，不 fork tmux（偶尔查一下主管终端还在不在）。
-        guard !open.isEmpty || !due.isEmpty || passCount % 15 == 1 else { await reloadIfChanged(); return }
+        // 没有打开的工单、没有到期的副作用且主管未启动：一次 SQLite 查询就结束，不 fork tmux（偶尔查一下主管终端还在不在）。
+        guard !open.isEmpty || !due.isEmpty || routerSession != nil || passCount % 15 == 1 else {
+            if !sendingToRouter, routerBusy { routerBusy = false }
+            await reloadIfChanged()
+            return
+        }
         let tmux = self.tmux
         let snap = await Task.detached(priority: .utility) { tmux.snapshot() }.value
         if let snap {
-            let router = snap.first(where: \.isRouter)?.session
+            let routerPane = snap.first(where: \.isRouter)
+            let router = routerPane?.session
             if router != routerSession { routerSession = router }
             let agents = Set(snap.filter { $0.agent != nil }.map(\.session))
             if agents != agentSessions { agentSessions = agents }
+            await updateRouterActivity(pane: routerPane)
         }
         await reconcile(open: open, snap: snap)
         // 先通知 / 中断 / 转达 / 送达，最后才启动新的（唤醒优先于新建）。
@@ -931,8 +1339,19 @@ final class SuperagentRuntime {
         guard let engine, let snap else { return .later(3) }
         let relays = (try? engine.store.pendingRelays()) ?? []
         guard let last = relays.last else { return .done }
-        // 主管没开：消息留着，等它开了再送（不算失败）。
-        guard let pane = snap.first(where: \.isRouter) else { return .later(10) }
+        let pane = snap.first(where: \.isRouter)
+        // 主管断线或退回 Shell：若注入了自愈目录提供器（生产环境）且不在 20s 冷却内，按需自动唤醒主管并在下轮 Pass 送达。
+        if pane == nil || pane?.isPlainShell == true {
+            if let dirProvider = autoHealRouterDirectory, clock() - routerAutoHealAt >= 20 {
+                routerAutoHealAt = clock()
+                let dir = dirProvider()
+                _ = await openRouter(dir: dir, forceRetype: true)
+                return .later(3)
+            }
+            guard let pane else { return .later(10) }
+            if let wait = gate(pane) { return wait }
+        }
+        guard let pane else { return .later(10) }
         if let wait = gate(pane) { return wait }
         // 每批一个唯一标记：同一工单的几种回报开头一样，只看开头会把上一批的回显当成这一批。
         let marker = "[TFA·r\(last.id)]"

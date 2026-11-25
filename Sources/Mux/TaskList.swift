@@ -2,13 +2,14 @@ import AppKit
 import SwiftUI
 import SuperagentCore
 
-// 我的清单（TFA-工作清单-需求文档 §9.1、注意事项 F；设计评审 2026-11-08）：首屏是任务，不是工单。分区按 1A 的顺序
+// 我的工作（TFA-工作清单-需求文档 §9.1、注意事项 F；设计评审 2026-11-08）：首屏是任务，不是工单。分区按 1A 的顺序
 // 需要你 / 待分配 / 进行中 / 待领取 / 已完成，空分区不显示；琥珀只出现在需要你的地方（注意事项 A-04）；行点击在同一面板内推入任务卡（F-06）。
 // 人能看到的概念只有：任务、清单项、谁来做、工作流、需要你（A-03）。
 
-/// 详情区的「我的清单」：`appModel.worklistTaskID` 为 nil 显示清单，否则显示那张任务卡（同一面板内推入，带返回）。
+/// 详情区的「我的工作」：`appModel.worklistTaskID` 为 nil 时在 清单 / 主管 / 知识库 三栏间切换，否则显示那张任务卡（同一面板内推入，带返回）。
 struct WorklistView: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showingNewTask = false
     @State private var activeSeed: AppModel.NewTaskSeed?
     @State private var showingNewKnowledge = false
@@ -21,7 +22,10 @@ struct WorklistView: View {
     @State private var pendingAssign: Int64?
     @State private var searching = false
     @State private var search = ""
+    @FocusState private var searchFieldFocused: Bool
     @State private var filter: WorklistFilter = .all
+    @State private var originFilter: WorklistOriginFilter = .all
+    @State private var onlineOrigin: String?
     @State private var project: String?
     @State private var showDone = false
     /// 清单区的宽度：≥ 900 第三行显示来源 / 执行者 chips，< 720 行尾动作收进「…」菜单（Pass 1 / Pass 6）。
@@ -37,47 +41,79 @@ struct WorklistView: View {
         let sa = appModel.superagent
         VStack(spacing: 0) {
             if let id = appModel.worklistTaskID {
-                ToolHeaderBar(icon: "list.bullet.clipboard", title: "任务 A-\(id)",
-                              subtitle: sa.task(id)?.headerStatus(now: Date()) ?? "任务不在清单里。", leading: {
-                    Button {
-                        appModel.worklistTaskID = nil
-                    } label: {
-                        Label("我的清单", systemImage: "chevron.left")
-                            .font(Theme.Font.headerTitle)
-                            .foregroundStyle(Theme.textSecondary)
+                VStack(spacing: 0) {
+                    ToolHeaderBar(icon: "list.bullet.clipboard", title: "任务 A-\(id)",
+                                  subtitle: sa.task(id)?.headerStatus(now: Date()) ?? "找不到该任务。", leading: {
+                        Button {
+                            Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                                appModel.worklistTaskID = nil
+                            }
+                        } label: {
+                            Label("我的工作", systemImage: "chevron.left")
+                                .font(Theme.Font.headerTitle)
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                        .buttonStyle(PaperPressButtonStyle(hoverWash: true))
+                        .help("回到我的工作")
+                        .accessibilityLabel("返回我的工作")
+                        .keyboardShortcut("[", modifiers: .command)
+                    })
+                    if let tv = sa.task(id) {
+                        TaskCard(view: tv, assign: { assigning = tv })
+                            .id(tv.id)
+                    } else {
+                        VStack(spacing: Theme.Space.lg) {
+                            Text("找不到任务 A-\(id)，可能已删除或尚未同步。")
+                                .font(Theme.Font.emptyBody)
+                                .foregroundStyle(Theme.textTertiary)
+                            Button("回到我的工作") {
+                                Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                                    appModel.worklistTaskID = nil
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    .help("回到我的清单")
-                    .accessibilityLabel("返回我的清单")
-                    .keyboardShortcut("[", modifiers: .command)
-                })
-                if let tv = sa.task(id) {
-                    TaskCard(view: tv, assign: { assigning = tv })
-                        .id(tv.id)
-                } else {
-                    VStack(spacing: Theme.Space.lg) {
-                        Text("任务 A-\(id) 不在清单里。").font(Theme.Font.emptyBody).foregroundStyle(Theme.textTertiary)
-                        Button("回到我的清单") { appModel.worklistTaskID = nil }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+                .transition(.opacity)
             } else {
-                let inKB = appModel.worklistTab == .knowledge
+                let tab = appModel.worklistTab
                 WorklistHeader(empty: sa.loaded && sa.tasks.isEmpty && holds.isEmpty) {
-                    if searching {
-                        TextField(inKB ? "搜索知识库" : "搜索任务", text: $search)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 180)
-                            .accessibilityLabel(inKB ? "搜索知识库" : "搜索任务")
+                    if tab != .router {
+                        let inKB = tab == .knowledge
+                        if searching {
+                            TextField(inKB ? "搜索知识库" : "搜索任务", text: $search)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 180)
+                                .focused($searchFieldFocused)
+                                .onExitCommand {
+                                    Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                                        searching = false
+                                        search = ""
+                                        searchFieldFocused = false
+                                    }
+                                }
+                                .accessibilityLabel(inKB ? "搜索知识库" : "搜索任务")
+                                .transition(Theme.Motion.reveal(edge: .trailing, reduceMotion: reduceMotion))
+                        }
+                        Button {
+                            Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                                searching.toggle()
+                                if searching {
+                                    DispatchQueue.main.async { searchFieldFocused = true }
+                                } else {
+                                    search = ""
+                                    searchFieldFocused = false
+                                }
+                            }
+                        } label: {
+                            Image(systemName: searching ? "xmark" : "magnifyingglass")
+                                .contentTransition(.symbolEffect(.replace))
+                        }
+                        .help(searching ? "关闭搜索" : (inKB ? "搜索知识库" : "搜索任务"))
+                        .accessibilityLabel(searching ? "关闭搜索" : (inKB ? "搜索知识库" : "搜索任务"))
                     }
-                    Button {
-                        searching.toggle()
-                        if !searching { search = "" }
-                    } label: {
-                        Image(systemName: searching ? "xmark" : "magnifyingglass")
-                    }
-                    .help(searching ? "关闭搜索" : (inKB ? "搜索知识库" : "搜索任务"))
-                    .accessibilityLabel(searching ? "关闭搜索" : (inKB ? "搜索知识库" : "搜索任务"))
-                    if inKB {
+                    if tab == .knowledge {
                         Button {
                             showingNewKnowledge = true
                         } label: {
@@ -105,10 +141,16 @@ struct WorklistView: View {
                     .help("设置：主管终端、组织、工作流、角色、规则、定时任务、记录")
                     .accessibilityLabel("清单设置")
                 }
-                if inKB {
-                    KnowledgeBrowserView(search: search, showingNewEntry: $showingNewKnowledge)
-                } else {
+                switch tab {
+                case .tasks:
                     list
+                        .transition(.opacity)
+                case .router:
+                    EmbeddedRouterTerminalView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                case .knowledge:
+                    KnowledgeBrowserView(search: search, showingNewEntry: $showingNewKnowledge)
+                        .transition(.opacity)
                 }
             }
         }
@@ -121,12 +163,42 @@ struct WorklistView: View {
         .onChange(of: sa.tasks) { old, _ in previousTasks = old }
         .onChange(of: sa.actionEchoes) { old, new in updateHolds(old: old, new: new) }
         .onChange(of: appModel.newTaskSeed) { _, _ in consumeNewTaskSeed() }
+        .onChange(of: appModel.worklistTab) { _, tab in
+            if tab == .router {
+                searching = false
+                search = ""
+            }
+            appModel.syncEmbeddedRouterViewing()
+        }
+        .onChange(of: appModel.worklistTaskID) { _, _ in
+            appModel.syncEmbeddedRouterViewing()
+        }
+        .onChange(of: appModel.worklistSearchTogglePulse) { _, _ in
+            guard appModel.worklistTaskID == nil, appModel.worklistTab != .router else { return }
+            Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                if searching {
+                    searching = false
+                    search = ""
+                    searchFieldFocused = false
+                } else {
+                    searching = true
+                    DispatchQueue.main.async { searchFieldFocused = true }
+                }
+            }
+        }
+        .onChange(of: originFilter) { _, newValue in
+            if newValue == .online {
+                project = nil
+            } else {
+                onlineOrigin = nil
+            }
+        }
         .sheet(isPresented: $showingNewTask, onDismiss: {
             activeSeed = nil
-            // 建完直接弹「谁来做」（需求文档 §9.1）。
+            // 若建单时未自动完成分配（未勾选或需手选目录），再弹「谁来做」（需求文档 §9.1）。
             if let id = pendingAssign {
                 pendingAssign = nil
-                if let tv = sa.task(id) { assigning = tv }
+                if let tv = sa.task(id), tv.unassignedCount > 0 { assigning = tv }
             }
         }) {
             NewTaskSheet(seed: activeSeed) { id in
@@ -147,37 +219,97 @@ struct WorklistView: View {
 
     private var list: some View {
         let sa = appModel.superagent
-        let sections = WorklistSections.make(sa.tasks, filter: filter, project: project, search: search).holding(holds)
-        let projects = WorklistSections.projects(sa.tasks)
+        let activeProject = originFilter == .online ? nil : project
+        let activeOnlineOrigin = originFilter == .online ? onlineOrigin : nil
+        let sections = WorklistSections.make(
+            sa.tasks,
+            filter: filter,
+            project: activeProject,
+            search: search,
+            originFilter: originFilter,
+            onlineOrigin: activeOnlineOrigin
+        ).holding(holds)
+        let originCounts = WorklistSections.originCounts(sa.tasks)
+        let hasOnlineContext = sa.org.registered || originCounts.online > 0 || originFilter != .all
+        let projects = WorklistSections.projects(
+            originFilter == .local || !hasOnlineContext
+                ? sa.tasks.filter { ($0.task.origin ?? "").isEmpty }
+                : sa.tasks
+        )
+        let multipleLocalProjects = projects.count > 1
+        let hasActiveFilter = originFilter != .all || filter != .all || project != nil || onlineOrigin != nil || !search.isEmpty
+        var onlineOrigins = WorklistSections.onlineOrigins(sa.tasks)
+        if sa.org.registered, !sa.org.settings.serverURL.isEmpty, !onlineOrigins.contains(sa.org.settings.serverURL) {
+            onlineOrigins.append(sa.org.settings.serverURL)
+            onlineOrigins.sort()
+        }
         let order = sections.orderedIDs(showDone: showDone)
         let compact = width < 720, wide = width >= 900
         return ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.xl) {
-                if let e = sa.setupError { Banner(text: e) }
-                if let e = sa.actionError { Banner(text: e) { sa.actionError = nil } } // 页顶只留全局错误；按任务的贴在行下（3A）
+                if let e = sa.setupError {
+                    Banner(text: e)
+                        .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
+                }
+                if let e = sa.actionError {
+                    Banner(text: e) {
+                        Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                            sa.actionError = nil
+                        }
+                    } // 页顶只留全局错误；按任务的贴在行下（3A）
+                    .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
+                }
                 if !sa.loaded {
                     // 首个快照还没到：什么都不画，免得空态闪一下（Pass 2）。
                     EmptyView()
-                } else if sa.tasks.isEmpty && holds.isEmpty {
-                    emptyState
                 } else {
-                    if sa.tasks.count > 2 || filter != .all || project != nil {
-                        FilterRow(filter: $filter, project: $project, projects: projects)
-                    }
-                    if sections.isEmpty { empty("这个筛选下没有任务。") }
-                    ForEach(WorklistSections.Kind.allCases, id: \.self) { kind in
-                        let tasks = sections[kind]
-                        if !tasks.isEmpty {
-                            let count = sections.counts[kind] ?? tasks.count
-                            if kind == .done {
-                                doneSection(tasks, count: count, order: order, wide: wide, compact: compact)
+                    EmbeddedRouterBar(onManualNewTask: { activeSeed = nil; showingNewTask = true })
+                    if sa.tasks.isEmpty && holds.isEmpty {
+                        emptyState
+                    } else {
+                        if !sa.tasks.isEmpty || originFilter != .all || filter != .all || project != nil || onlineOrigin != nil {
+                            FilterRow(
+                                originFilter: $originFilter,
+                                originCounts: originCounts,
+                                hasOnlineContext: hasOnlineContext,
+                                onlineOrigin: $onlineOrigin,
+                                onlineOrigins: onlineOrigins,
+                                orgRegistered: sa.org.registered,
+                                orgName: { sa.org.organizationName(for: $0) },
+                                filter: $filter,
+                                project: $project,
+                                projects: projects,
+                                hasActiveFilter: hasActiveFilter,
+                                onReset: { resetFilters() }
+                            )
+                        }
+                        if sections.isEmpty {
+                            if originFilter == .online && originCounts.online == 0 {
+                                onlineEmptyState
+                            } else if originFilter == .local && originCounts.local == 0 {
+                                empty("当前没有本地项目任务。")
                             } else {
-                                section(kind, tasks, count: count, order: order, wide: wide, compact: compact)
+                                filteredEmptyState
+                            }
+                        }
+                        ForEach(WorklistSections.Kind.allCases, id: \.self) { kind in
+                            let tasks = sections[kind]
+                            if !tasks.isEmpty {
+                                let count = sections.counts[kind] ?? tasks.count
+                                if kind == .done {
+                                    doneSection(tasks, count: count, order: order, wide: wide, compact: compact,
+                                                hasOnlineContext: hasOnlineContext, multipleLocalProjects: multipleLocalProjects)
+                                } else {
+                                    section(kind, tasks, count: count, order: order, wide: wide, compact: compact,
+                                            hasOnlineContext: hasOnlineContext, multipleLocalProjects: multipleLocalProjects)
+                                }
                             }
                         }
                     }
                 }
             }
+            .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: sa.setupError != nil)
+            .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: sa.actionError != nil)
             .padding(.horizontal, 32)
             .padding(.vertical, 24)
             .frame(maxWidth: 960, alignment: .leading)
@@ -190,27 +322,58 @@ struct WorklistView: View {
     /// 回声消失 → 放开，行归位。
     private func updateHolds(old: [Int64: String], new: [Int64: String]) {
         let sa = appModel.superagent
-        let before = WorklistSections.make(previousTasks, filter: filter, project: project, search: search)
-        let current = WorklistSections.make(sa.tasks, filter: filter, project: project, search: search)
+        let activeProject = originFilter == .online ? nil : project
+        let activeOnlineOrigin = originFilter == .online ? onlineOrigin : nil
+        let before = WorklistSections.make(
+            previousTasks,
+            filter: filter,
+            project: activeProject,
+            search: search,
+            originFilter: originFilter,
+            onlineOrigin: activeOnlineOrigin
+        )
+        let current = WorklistSections.make(
+            sa.tasks,
+            filter: filter,
+            project: activeProject,
+            search: search,
+            originFilter: originFilter,
+            onlineOrigin: activeOnlineOrigin
+        )
         for id in new.keys where old[id] == nil && holds[id] == nil {
             guard let place = before.placement(of: id) ?? current.placement(of: id),
                   let snapshot = previousTasks.first(where: { $0.id == id }) ?? sa.task(id) else { continue }
             holds[id] = .init(kind: place.kind, index: place.index, snapshot: snapshot)
         }
-        for id in old.keys where new[id] == nil { holds[id] = nil }
+        let expired = old.keys.filter { new[$0] == nil }
+        if !expired.isEmpty {
+            Theme.Motion.run(Theme.Motion.layout, reduceMotion: reduceMotion) {
+                for id in expired { holds[id] = nil }
+            }
+        }
     }
 
-    private func row(_ tv: TaskView, kind: WorklistSections.Kind, order: [Int64], wide: Bool, compact: Bool) -> some View {
-        TaskRow(view: tv, kind: kind, wide: wide, compact: compact, focused: $focusedRow,
-                open: { appModel.openWorklist(task: tv.id) }, assign: { assigning = tv },
+    private func row(_ tv: TaskView, kind: WorklistSections.Kind, order: [Int64], wide: Bool, compact: Bool,
+                     hasOnlineContext: Bool, multipleLocalProjects: Bool) -> some View {
+        TaskRow(view: tv, kind: kind, wide: wide, compact: compact,
+                hasOnlineContext: hasOnlineContext, multipleLocalProjects: multipleLocalProjects,
+                focused: $focusedRow,
+                open: {
+                    Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                        appModel.openWorklist(task: tv.id)
+                    }
+                },
+                assign: { assigning = tv },
                 reassign: { ord in assignFocus = ord; assigning = tv }, finish: { finishing = tv }) { step in
             guard let i = order.firstIndex(of: tv.id), order.indices.contains(i + step) else { return }
             focusedRow = order[i + step]
         }
+        .transition(.opacity)
     }
 
     /// `count` = 计数胶囊的数目：按真正的分区算（`WorklistSections.counts`），停住的行只是暂时画在这里。
-    private func section(_ kind: WorklistSections.Kind, _ tasks: [TaskView], count: Int, order: [Int64], wide: Bool, compact: Bool) -> some View {
+    private func section(_ kind: WorklistSections.Kind, _ tasks: [TaskView], count: Int, order: [Int64], wide: Bool, compact: Bool,
+                         hasOnlineContext: Bool, multipleLocalProjects: Bool) -> some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
             HStack(alignment: .center, spacing: Theme.Space.sm) {
                 Text(kind.title).font(Theme.Font.sectionHeader).foregroundStyle(Theme.textPrimary)
@@ -218,14 +381,20 @@ struct WorklistView: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(kind.title) \(count) 件")
-            ForEach(tasks) { row($0, kind: kind, order: order, wide: wide, compact: compact) }
+            ForEach(tasks) {
+                row($0, kind: kind, order: order, wide: wide, compact: compact,
+                    hasOnlineContext: hasOnlineContext, multipleLocalProjects: multipleLocalProjects)
+            }
         }
     }
 
-    private func doneSection(_ tasks: [TaskView], count: Int, order: [Int64], wide: Bool, compact: Bool) -> some View {
+    private func doneSection(_ tasks: [TaskView], count: Int, order: [Int64], wide: Bool, compact: Bool,
+                             hasOnlineContext: Bool, multipleLocalProjects: Bool) -> some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
             Button {
-                showDone.toggle()
+                Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                    showDone.toggle()
+                }
             } label: {
                 HStack(alignment: .center, spacing: Theme.Space.sm) {
                     Text(WorklistSections.Kind.done.title).font(Theme.Font.sectionHeader).foregroundStyle(Theme.textPrimary)
@@ -235,6 +404,7 @@ struct WorklistView: View {
                         Text(showDone ? "收起" : "展开")
                         Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
                             .rotationEffect(.degrees(showDone ? 90 : 0))
+                            .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: showDone)
                     }
                     .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
@@ -243,29 +413,100 @@ struct WorklistView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("已完成 \(count) 件，\(showDone ? "收起" : "展开")")
             if showDone {
-                ForEach(tasks) { row($0, kind: .done, order: order, wide: wide, compact: compact) }
+                VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                    ForEach(tasks) {
+                        row($0, kind: .done, order: order, wide: wide, compact: compact,
+                            hasOnlineContext: hasOnlineContext, multipleLocalProjects: multipleLocalProjects)
+                    }
+                }
+                .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
             }
         }
     }
 
-    /// 空态（Pass 2）：一行说明 + 两个按钮；没有筛选、没有打扰数。
+    private func resetFilters() {
+        Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+            originFilter = .all
+            onlineOrigin = nil
+            project = nil
+            filter = .all
+            search = ""
+        }
+    }
+
+    /// 空态（上方已常驻 `EmbeddedRouterBar`，这里给出简洁指引与可选的组织连接入口）。
     private var emptyState: some View {
-        let running = appModel.superagent.routerSession != nil
-        return VStack(spacing: Theme.Space.lg) {
-            Text("清单是空的。对主管说一句，或自己加一个任务。")
+        VStack(spacing: Theme.Space.md) {
+            Text("清单是空的。直接在上方对主管说一句拆单，或粘贴线上组织的接入口令。")
                 .font(Theme.Font.emptyBody)
                 .foregroundStyle(Theme.textTertiary)
-            HStack(spacing: Theme.Space.md) {
-                Button(running ? "打开主管终端" : "启动主管") { appModel.openRouter() }
-                    .help(running ? "到主管终端里说一句，它把任务加进清单" : "启动主管终端：对它说一句，它把任务加进清单")
+                .multilineTextAlignment(.center)
+            if !appModel.superagent.org.registered {
                 Button {
-                    showingNewTask = true
+                    appModel.openWorklistSettings(.org)
                 } label: {
-                    Label("任务", systemImage: "plus")
+                    Label("前往连接组织", systemImage: "globe")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("在设置里连接团队的 TFA-Org 线上组织")
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, Theme.Space.xxl)
+    }
+
+    /// 切到「线上项目」且当前没有任何线上任务时的友好空态。
+    private var onlineEmptyState: some View {
+        let org = appModel.superagent.org
+        return VStack(spacing: Theme.Space.md) {
+            if !org.registered {
+                Text("尚未接入线上组织，可在上方主管栏直接粘贴一句接入口令，或前往设置连接。")
+                    .font(Theme.Font.emptyBody)
+                    .foregroundStyle(Theme.textTertiary)
+                    .multilineTextAlignment(.center)
+                Button {
+                    appModel.openWorklistSettings(.org)
+                } label: {
+                    Label("前往连接组织", systemImage: "globe")
                 }
                 .buttonStyle(.borderedProminent)
-                .accessibilityLabel("新建任务")
+                .controlSize(.regular)
+                .help("打开组织同步设置，填入服务器地址和邀请码即可连接")
+            } else {
+                Text("已连接「\(org.organizationName(for: org.settings.serverURL))」，当前还没有同步到线上任务。")
+                    .font(Theme.Font.emptyBody)
+                    .foregroundStyle(Theme.textTertiary)
+                    .multilineTextAlignment(.center)
+                Button {
+                    appModel.openWorklistSettings(.org)
+                } label: {
+                    Label("查看组织设置", systemImage: "globe")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
             }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, Theme.Space.xxxl)
+    }
+
+    private var filteredEmptyState: some View {
+        VStack(spacing: Theme.Space.md) {
+            Text("这个筛选下没有任务。")
+                .font(Theme.Font.emptyBody)
+                .foregroundStyle(Theme.textTertiary)
+            Button("重置筛选") {
+                Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                    originFilter = .all
+                    onlineOrigin = nil
+                    project = nil
+                    filter = .all
+                    search = ""
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, Theme.Space.xxxl)
@@ -292,17 +533,24 @@ struct WorklistView: View {
 
 /// 清单页头（Pass 1）：和 `ToolHeaderBar` 同一套排版——侧栏开关、图标 + 标题、右侧小控件——但标题下不是宣言，而是一行可带按钮的
 /// meta：「主管 运行中 · 今天打扰 0 / 8」；主管没开就是「主管 未启动」+ 小「启动」；超预算时打扰那段加重；空态下不显示打扰数（Pass 2）。
-/// Unified 44pt single-row header for「我的清单」, sharing the exact Y=44pt bottom hairline and vertical
+/// Unified 44pt single-row header for「我的工作」, sharing the exact Y=44pt bottom hairline and vertical
 /// center axis with `SidebarHeader`, `ToolHeaderBar`, and `ActiveTerminalHeader`.
 private struct WorklistHeader<Trailing: View>: View {
     @Environment(AppModel.self) private var appModel
     let empty: Bool
     @ViewBuilder let trailing: () -> Trailing
 
+    private var headerIcon: String {
+        switch appModel.worklistTab {
+        case .tasks: return "list.bullet.clipboard"
+        case .router: return "terminal"
+        case .knowledge: return "books.vertical"
+        }
+    }
+
     var body: some View {
         @Bindable var model = appModel
         let sa = appModel.superagent
-        let running = sa.routerSession != nil
         let budget = WorklistHeaderText.interruptions(used: sa.interruptionsToday, budget: sa.settings.interruptionBudget)
         let kbCount = sa.knowledge.count
         let kbTitle = kbCount > 0 ? "知识库 \(kbCount)" : "知识库"
@@ -314,15 +562,15 @@ private struct WorklistHeader<Trailing: View>: View {
                     .frame(width: 26, height: 26)
                     .contentShape(RoundedRectangle(cornerRadius: 5))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PaperPressButtonStyle(hoverWash: true))
             .help(appModel.sidebarCollapsed ? "显示侧栏 (⌘\\)" : "隐藏侧栏 (⌘\\)")
             .accessibilityLabel(appModel.sidebarCollapsed ? "Show sidebar" : "Hide sidebar")
 
             HStack(alignment: .center, spacing: 6) {
-                Image(systemName: appModel.worklistTab == .knowledge ? "books.vertical" : "list.bullet.clipboard")
+                Image(systemName: headerIcon)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.brand)
-                Text("我的清单")
+                Text("我的工作")
                     .font(Theme.Font.headerTitle)
                     .foregroundStyle(Theme.textPrimary)
                     .lineLimit(1)
@@ -333,31 +581,49 @@ private struct WorklistHeader<Trailing: View>: View {
                 selection: $model.worklistTab,
                 options: [
                     (value: AppModel.WorklistTab.tasks, label: "清单"),
+                    (value: AppModel.WorklistTab.router, label: "主管"),
                     (value: AppModel.WorklistTab.knowledge, label: kbTitle),
-                ]
+                ],
+                dots: sa.routerBusy ? [.router] : []
             )
-            .accessibilityLabel("切换清单与知识库")
+            .accessibilityLabel("切换清单、主管与知识库")
 
-            HStack(alignment: .center, spacing: 6) {
-                Text("·").foregroundStyle(Theme.textTertiary).accessibilityHidden(true)
-                Text(running ? "主管运行中 · \(sa.settings.codingAgent.label)" : WorklistHeaderText.router(running: false))
-                if !running {
-                    Button("启动") { appModel.openRouter() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                        .help("启动主管终端：对它说一句，它把任务加进清单并建议谁来做")
-                        .accessibilityLabel("启动主管")
+            if sa.org.registered {
+                let orgTitle = sa.org.organizationName(for: sa.org.settings.serverURL)
+                Button {
+                    appModel.openWorklistSettings(.org)
+                } label: {
+                    HStack(alignment: .center, spacing: 5) {
+                        Circle()
+                            .fill(sa.org.online ? Theme.Status.positive : Theme.Status.neutral)
+                            .frame(width: 6, height: 6)
+                        Image(systemName: "globe")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textTertiary)
+                        Text("\(orgTitle) · \(sa.org.online ? "在线" : "离线")")
+                    }
+                    .font(Theme.Font.headerMeta)
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.horizontal, 8)
+                    .frame(height: 22)
+                    .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 6))
+                    .lineLimit(1)
                 }
-                if !empty && budget.over {
-                    Text("·")
+                .buttonStyle(PaperPressButtonStyle())
+                .help("线上组织同步状态：\(sa.org.statusText)（点击打开组织设置）")
+                .accessibilityLabel("线上组织 \(orgTitle)，\(sa.org.online ? "在线" : "离线")")
+            }
+
+            if !empty && budget.over {
+                HStack(alignment: .center, spacing: 6) {
+                    Text("·").foregroundStyle(Theme.textTertiary).accessibilityHidden(true)
                     Text(budget.text).monospacedDigit()
                         .fontWeight(.semibold)
                         .foregroundStyle(Theme.textPrimary)
                 }
+                .font(Theme.Font.headerMeta)
+                .lineLimit(1)
             }
-            .font(Theme.Font.headerMeta)
-            .foregroundStyle(Theme.textTertiary)
-            .lineLimit(1)
 
             Spacer(minLength: 8)
 
@@ -389,18 +655,81 @@ enum WorklistHeaderText {
 
 // MARK: - 筛选一行
 
-/// 筛选独立成一行（Pass 2），不包卡：分段「全部 | 今天 | 本周」（Linen 凹槽，同谁来做 / 在线 已断开）+ 独立的「按项目」菜单。
+/// 筛选独立成一行（Pass 2 + 本地/线上分栏），不包卡：
+/// 最左侧「全部 | 本地项目 | 线上项目」分段 + 线上组织 / 本地项目目录菜单 + 右侧「全部 | 今天 | 本周」时间分段。
 private struct FilterRow: View {
+    @Binding var originFilter: WorklistOriginFilter
+    let originCounts: (all: Int, local: Int, online: Int)
+    let hasOnlineContext: Bool
+    @Binding var onlineOrigin: String?
+    let onlineOrigins: [String]
+    let orgRegistered: Bool
+    let orgName: (String) -> String
     @Binding var filter: WorklistFilter
     @Binding var project: String?
     let projects: [String]
+    let hasActiveFilter: Bool
+    let onReset: () -> Void
+
+    private var originOptions: [(value: WorklistOriginFilter, label: String)] {
+        [
+            (value: .all, label: WorklistOriginFilter.all.label),
+            (value: .local, label: originCounts.local > 0 ? "\(WorklistOriginFilter.local.label) \(originCounts.local)" : WorklistOriginFilter.local.label),
+            (value: .online, label: originCounts.online > 0 ? "\(WorklistOriginFilter.online.label) \(originCounts.online)" : WorklistOriginFilter.online.label),
+        ]
+    }
+
+    private var hasPrimaryFilters: Bool {
+        hasOnlineContext || projects.count > 1 || project != nil
+    }
 
     var body: some View {
-        HStack(spacing: Theme.Space.lg) {
-            SegmentedChoice(selection: $filter, options: WorklistFilter.allCases.map { (value: $0, label: $0.label) })
-                .help(WorklistFilter.help)
-                .accessibilityLabel("按时间筛选，当前：\(filter.label)")
-            if projects.count > 1 || project != nil {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: Theme.Space.lg) {
+                if hasPrimaryFilters {
+                    primaryFilters.fixedSize(horizontal: true, vertical: false)
+                    Spacer(minLength: Theme.Space.sm)
+                }
+                timeAndReset.fixedSize(horizontal: true, vertical: false)
+                if !hasPrimaryFilters {
+                    Spacer(minLength: 0)
+                }
+            }
+            VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                if hasPrimaryFilters { primaryFilters }
+                timeAndReset
+            }
+        }
+    }
+
+    private var primaryFilters: some View {
+        HStack(spacing: Theme.Space.md) {
+            if hasOnlineContext {
+                SegmentedChoice(selection: $originFilter, options: originOptions)
+                    .help("按任务来源分栏：全部 / 本地项目 / 线上项目")
+                    .accessibilityLabel("按来源筛选，当前：\(originFilter.label)")
+            }
+            if hasOnlineContext && originFilter == .online {
+                if onlineOrigins.count > 1 || (orgRegistered && !onlineOrigins.isEmpty) || onlineOrigin != nil {
+                    Menu {
+                        Button("全部组织") { onlineOrigin = nil }
+                        if !onlineOrigins.isEmpty { Divider() }
+                        ForEach(onlineOrigins, id: \.self) { origin in
+                            Button(orgName(origin)) { onlineOrigin = origin }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "globe").font(.system(size: 11))
+                            Text(onlineOrigin.map(orgName) ?? "全部组织")
+                        }
+                        .font(.caption.weight(onlineOrigin == nil ? .regular : .semibold))
+                        .foregroundStyle(onlineOrigin == nil ? Theme.textTertiary : Theme.textPrimary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help(onlineOrigin.map { "只看组织：\(orgName($0))" } ?? "按线上组织筛选")
+                }
+            } else if projects.count > 1 || project != nil {
                 Menu {
                     Button("全部项目") { project = nil }
                     if !projects.isEmpty { Divider() }
@@ -416,15 +745,44 @@ private struct FilterRow: View {
                     .foregroundStyle(project == nil ? Theme.textTertiary : Theme.textPrimary)
                 }
                 .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help(project.map { "只看 \($0)" } ?? "按项目目录筛选")
+                .fixedSize()
+                .help(project.map { "只看 \($0)" } ?? "按项目目录筛选")
             }
-            Spacer(minLength: 0)
+        }
+    }
+
+    private var timeAndReset: some View {
+        HStack(spacing: Theme.Space.sm) {
+            SegmentedChoice(selection: $filter, options: WorklistFilter.allCases.map { (value: $0, label: $0.label) })
+                .help(WorklistFilter.help)
+                .accessibilityLabel("按时间筛选，当前：\(filter.label)")
+            if hasActiveFilter {
+                Button("重置", action: onReset)
+                    .buttonStyle(PaperPressButtonStyle(hoverWash: true))
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(.horizontal, 6)
+                    .frame(height: 24)
+                    .help("清除所有筛选条件")
+                    .accessibilityLabel("重置筛选")
+            }
         }
     }
 }
 
 // MARK: - 分区与筛选（纯函数，可测）
+
+enum WorklistOriginFilter: Hashable, CaseIterable {
+    case all, local, online
+
+    var label: String {
+        switch self {
+        case .all: return "全部"
+        case .local: return "本地项目"
+        case .online: return "线上项目"
+        }
+    }
+}
 
 enum WorklistFilter: Hashable, CaseIterable {
     case all, today, week
@@ -527,10 +885,21 @@ struct WorklistSections: Equatable {
     }
 
     static func make(_ tasks: [TaskView], filter: WorklistFilter = .all, project: String? = nil, search: String = "",
+                     originFilter: WorklistOriginFilter = .all, onlineOrigin: String? = nil,
                      now: Date = Date(), calendar: Calendar = .current) -> WorklistSections {
         let q = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var r = WorklistSections()
         for tv in tasks {
+            let isOnline = !(tv.task.origin ?? "").isEmpty
+            switch originFilter {
+            case .all:
+                break
+            case .local:
+                if isOnline { continue }
+            case .online:
+                if !isOnline { continue }
+                if let org = onlineOrigin, tv.task.origin != org { continue }
+            }
             if let project, tv.task.scope != project { continue }
             if !q.isEmpty, !matches(tv, q) { continue }
             if !within(tv, filter, now: now, calendar: calendar) { continue }
@@ -571,6 +940,28 @@ struct WorklistSections: Equatable {
     static func staleLine(_ items: [Item], now: Date = Date()) -> String? {
         guard let oldest = items.compactMap(\.startedAt).min() else { return nil }
         return "\(WorklistText.ords(items.map(\.ord)))已做 \(Int((now.timeIntervalSince1970 - oldest) / 86400)) 天"
+    }
+
+    /// 统计来源任务数：全部 / 本地项目 / 线上项目（用于分栏标签）。
+    static func originCounts(_ tasks: [TaskView]) -> (all: Int, local: Int, online: Int) {
+        var local = 0
+        var online = 0
+        for tv in tasks {
+            if (tv.task.origin ?? "").isEmpty {
+                local += 1
+            } else {
+                online += 1
+            }
+        }
+        return (all: tasks.count, local: local, online: online)
+    }
+
+    /// 线上任务里出现过的组织源（去重排序后的非空 `task.origin`）。
+    static func onlineOrigins(_ tasks: [TaskView]) -> [String] {
+        Array(Set(tasks.compactMap { tv -> String? in
+            guard let origin = tv.task.origin, !origin.isEmpty else { return nil }
+            return origin
+        })).sorted()
     }
 
     /// 「按项目」菜单的候选：任务里出现过的目录（去重，按名字）。
@@ -776,7 +1167,7 @@ enum WorklistEchoText {
     }
 }
 
-/// 侧栏「我的清单」行的副标题（1A）：「N 件需要你」(琥珀) > 「N 件待分配」> 「N 件进行中」> 迁移失败 > 「清单是空的」。
+/// 侧栏「我的工作」行的副标题（1A）：「N 件需要你」(琥珀) > 「N 件待分配」> 「N 件进行中」> 迁移失败 > 「清单是空的」。
 /// `attention` = 着琥珀（只有需要你；待分配不着琥珀、不计数胶囊）。
 enum WorklistSidebarText {
     static func subtitle(needs: Int, unassigned: Int, open: Int, available: Bool = true) -> (text: String, attention: Bool) {
@@ -795,12 +1186,17 @@ enum WorklistSidebarText {
 /// 动作失败的原因是砖红小字贴在最下面。需要你时整行 amber 6% 底；键盘焦点 = 炭黑描边。
 struct TaskRow: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let view: TaskView
     /// 所在分区。
     let kind: WorklistSections.Kind
     var wide = true
     /// 窗口 < 720：行尾动作收进「…」菜单。
     var compact = false
+    /// 是否存在线上组织上下文（纯单机单项目下隐藏冗余来源徽标）。
+    var hasOnlineContext = true
+    /// 是否存在多个本地项目目录。
+    var multipleLocalProjects = true
     @FocusState.Binding var focused: Int64?
     let open: () -> Void
     let assign: () -> Void
@@ -810,6 +1206,7 @@ struct TaskRow: View {
     var finish: (() -> Void)? = nil
     /// ↑↓：把焦点移到上一行 / 下一行。
     var move: (Int) -> Void = { _ in }
+    @State private var isHovered = false
 
     var body: some View {
         let sa = appModel.superagent
@@ -825,6 +1222,13 @@ struct TaskRow: View {
                     Text(view.task.label)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(Theme.textTertiary)
+                        .fixedSize()
+                    TaskOriginBadge(
+                        task: view.task,
+                        showProject: true,
+                        hasOnlineContext: hasOnlineContext,
+                        multipleLocalProjects: multipleLocalProjects
+                    )
                     Text(view.task.title)
                         .font(Theme.Font.rowTitle)
                         .foregroundStyle(Theme.textPrimary)
@@ -834,6 +1238,8 @@ struct TaskRow: View {
                         Text("\(view.doneCount)/\(view.totalCount)")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(Theme.textTertiary)
+                            .contentTransition(.numericText())
+                            .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: view.doneCount)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 1)
                             .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 4))
@@ -861,7 +1267,7 @@ struct TaskRow: View {
                     } else {
                         Text(line.text).font(Theme.Font.rowSubtitle).foregroundStyle(Theme.textSecondary).lineLimit(1).truncationMode(.tail)
                         if let at = line.at { AgoText(time: at) }
-                        if wide, !view.task.scope.isEmpty {
+                        if wide, !(view.task.origin ?? "").isEmpty, !view.task.scope.isEmpty {
                             Text("· \(WorklistSections.projectName(view.task.scope))")
                                 .font(.caption)
                                 .foregroundStyle(Theme.textTertiary)
@@ -872,12 +1278,18 @@ struct TaskRow: View {
                 if let error {
                     HStack(spacing: Theme.Space.xs) {
                         Text(error).font(.caption).foregroundStyle(Theme.Status.error).lineLimit(2).textSelection(.enabled)
-                        Button { sa.actionErrors[view.id] = nil } label: { Image(systemName: "xmark") }
+                        Button {
+                            Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                                sa.actionErrors[view.id] = nil
+                            }
+                        } label: { Image(systemName: "xmark") }
                             .buttonStyle(.borderless).foregroundStyle(Theme.textTertiary).controlSize(.small)
                             .help("关闭").accessibilityLabel("关闭错误")
                     }
+                    .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
                 }
             }
+            .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: error != nil)
             Spacer(minLength: Theme.Space.md)
             if tag.text != kind.title { StateTag(text: tag.text, tint: tag.tint) }
             if compact, hasActions {
@@ -893,7 +1305,12 @@ struct TaskRow: View {
         .frame(minHeight: 52)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(needs ? Theme.Status.attention.opacity(0.06) : Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(isFocused ? Theme.brand : Theme.border, lineWidth: 1))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.md)
+                .stroke(isFocused ? Theme.brand : (isHovered ? Theme.borderStrong : Theme.border), lineWidth: 1)
+        )
+        .animation(Theme.Motion.value(Theme.Motion.micro, reduceMotion: reduceMotion), value: isHovered)
+        .onHover { isHovered = $0 }
         .contentShape(Rectangle())
         .onTapGesture {
             focused = view.id
@@ -990,14 +1407,24 @@ struct TaskNeedActions: View {
                     .disabled(sa.merging.contains(t.id))
                     .help(t.ticket.branch.isEmpty ? "结单" : "把 \(t.ticket.branch) 合并进主仓库当前分支，然后结单")
             } else {
+                let quickPlan = FinishPlan.derive(view, target: nil)
+                let canQuickFinish = quickPlan.branches.isEmpty && quickPlan.unfinishedOrds.isEmpty
                 plain("打回…") { appModel.taskFeedback = TaskFeedbackRequest(taskID: view.id) }
                     .help("意见送给原工单；没有工单的项会成为新的清单项")
-                prominent(sa.mergingTasks.contains(view.id) ? "合并中…" : "完成任务…") {
-                    if let finish { finish() } else { finishing = true }
+                if canQuickFinish {
+                    prominent(sa.mergingTasks.contains(view.id) ? "完成中…" : "完成任务") {
+                        _ = sa.approveTask(view.id)
+                    }
+                    .disabled(sa.mergingTasks.contains(view.id))
+                    .help("无待合并分支且清单全部完成，点击直接结单")
+                } else {
+                    prominent(sa.mergingTasks.contains(view.id) ? "合并中…" : "完成任务…") {
+                        if let finish { finish() } else { finishing = true }
+                    }
+                    .disabled(sa.mergingTasks.contains(view.id))
+                    .help("先看要合并的分支、没有分支的工单和没做完的项，确认后合并并完成")
+                    .sheet(isPresented: $finishing) { TaskFinishSheet(taskID: view.id).environment(appModel) }
                 }
-                .disabled(sa.mergingTasks.contains(view.id))
-                .help("先看要合并的分支、没有分支的工单和没做完的项，确认后合并并完成")
-                .sheet(isPresented: $finishing) { TaskFinishSheet(taskID: view.id).environment(appModel) }
             }
         case .answer?:
             if let t = view.ticket(needing: .answer) {
@@ -1093,11 +1520,13 @@ private struct AgoText: View {
 struct NewTaskSheet: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var seed: AppModel.NewTaskSeed? = nil
     let created: (Int64) -> Void
     @State private var title = ""
     @State private var request = ""
     @State private var scope = ""
+    @State private var scopeEditedByUser = false
     @State private var itemsText = ""
     @State private var workflow: String?
     @State private var priority: TaskPriority = .medium
@@ -1108,6 +1537,8 @@ struct NewTaskSheet: View {
     @State private var relatedIDs: Set<Int64> = []
     @State private var seedTaskRefs: [KnowledgeRef] = []
     @State private var showRelated = false
+    @State private var showMoreOptions = false
+    @State private var autoAssign = true
     @State private var error: String?
     /// 试过提交：从这以后校验不过才标砖红。
     @State private var tried = false
@@ -1120,6 +1551,10 @@ struct NewTaskSheet: View {
         if t.count > WorkTask.maxTitle { return "标题最多 \(WorkTask.maxTitle) 字" }
         if let long = items.first(where: { $0.count > Item.maxText }) { return "清单项最多 \(Item.maxText) 字：\(long.prefix(20))…" }
         return nil
+    }
+
+    private var hasNonDefaultMoreOptions: Bool {
+        !deps.isEmpty || workflow != nil || priority != .medium || hasDue
     }
 
     private var combinedRelatedRefs: [KnowledgeRef] {
@@ -1142,6 +1577,7 @@ struct NewTaskSheet: View {
                     return false
                 })
             }
+        let expandedMore = showMoreOptions || hasNonDefaultMoreOptions
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
             Text(seed == nil ? "新建任务" : "接着做 · 新建后续任务").font(Theme.Font.headerTitle)
             Field(title: "标题") {
@@ -1178,7 +1614,7 @@ struct NewTaskSheet: View {
                                 .background(Theme.chrome, in: RoundedRectangle(cornerRadius: 6))
                                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.border, lineWidth: 1))
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(PaperPressButtonStyle())
                             .help(entry.tldr)
                         }
                     }
@@ -1190,9 +1626,16 @@ struct NewTaskSheet: View {
                     HStack(spacing: Theme.Space.sm) {
                         Text(scope.isEmpty ? "不针对项目" : tilde(scope)).font(.caption.monospaced()).foregroundStyle(Theme.textSecondary)
                             .lineLimit(1).truncationMode(.head).help(scope)
-                        if !scope.isEmpty { Button("清除") { scope = "" }.controlSize(.small) }
-                        Button("选择…") { if let p = pickFolder(from: scope, message: "任务的项目目录；交给 Agent 的项在这里工作") { scope = p } }
-                            .controlSize(.small)
+                        if !scope.isEmpty {
+                            Button("清除") { scopeEditedByUser = true; scope = "" }.controlSize(.small)
+                        }
+                        Button("选择…") {
+                            if let p = pickFolder(from: scope, message: "任务的项目目录；交给 Agent 的项在这里工作") {
+                                scopeEditedByUser = true
+                                scope = p
+                            }
+                        }
+                        .controlSize(.small)
                     }
                 }
                 Field(title: "关联历史经验（可选）") {
@@ -1211,40 +1654,72 @@ struct NewTaskSheet: View {
                             }
                     }
                 }
-                Field(title: "依赖（可选）") {
-                    HStack(spacing: Theme.Space.sm) {
-                        Text(deps.isEmpty ? "没有前置任务" : deps.sorted().map { "A-\($0)" }.joined(separator: "、"))
-                            .font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
-                        Button("选择…") { showDeps = true }
-                            .controlSize(.small)
-                            .popover(isPresented: $showDeps, arrowEdge: .bottom) {
-                                DepsPicker(candidates: sa.openTasks.sorted { $0.id > $1.id }, selected: $deps)
+            }
+
+            VStack(alignment: .leading, spacing: Theme.Space.md) {
+                Button {
+                    Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                        showMoreOptions.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(expandedMore ? "收起更多选项" : "更多选项（依赖、工作流、优先级、截止）")
+                            .font(.caption.weight(.medium))
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .rotationEffect(.degrees(expandedMore ? 90 : 0))
+                            .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: expandedMore)
+                    }
+                    .foregroundStyle(Theme.textTertiary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if expandedMore {
+                    VStack(alignment: .leading, spacing: Theme.Space.md) {
+                        Field(title: "依赖（可选）") {
+                            HStack(spacing: Theme.Space.sm) {
+                                Text(deps.isEmpty ? "没有前置任务" : deps.sorted().map { "A-\($0)" }.joined(separator: "、"))
+                                    .font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                                Button("选择…") { showDeps = true }
+                                    .controlSize(.small)
+                                    .popover(isPresented: $showDeps, arrowEdge: .bottom) {
+                                        DepsPicker(candidates: sa.openTasks.sorted { $0.id > $1.id }, selected: $deps)
+                                    }
                             }
+                        }
+                        HStack(alignment: .top, spacing: Theme.Space.xl) {
+                            Field(title: "工作流") {
+                                Picker("", selection: $workflow) {
+                                    Text("按范围默认").tag(String?.none)
+                                    ForEach(sa.workflows) { w in Text(w.name).tag(String?.some(w.id)) }
+                                }
+                                .labelsHidden().fixedSize()
+                            }
+                            Field(title: "优先级") {
+                                Picker("", selection: $priority) {
+                                    ForEach(TaskPriority.allCases, id: \.self) { Text($0.label).tag($0) }
+                                }
+                                .pickerStyle(.segmented).labelsHidden().fixedSize()
+                            }
+                            Field(title: "截止") {
+                                HStack(spacing: Theme.Space.sm) {
+                                    Toggle("", isOn: $hasDue).labelsHidden().toggleStyle(.checkbox)
+                                    DatePicker("", selection: $due, displayedComponents: .date).labelsHidden().disabled(!hasDue)
+                                }
+                            }
+                        }
                     }
+                    .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
                 }
             }
-            HStack(alignment: .top, spacing: Theme.Space.xl) {
-                Field(title: "工作流") {
-                    Picker("", selection: $workflow) {
-                        Text("按范围默认").tag(String?.none)
-                        ForEach(sa.workflows) { w in Text(w.name).tag(String?.some(w.id)) }
-                    }
-                    .labelsHidden().fixedSize()
-                }
-                Field(title: "优先级") {
-                    Picker("", selection: $priority) {
-                        ForEach(TaskPriority.allCases, id: \.self) { Text($0.label).tag($0) }
-                    }
-                    .pickerStyle(.segmented).labelsHidden().fixedSize()
-                }
-                Field(title: "截止") {
-                    HStack(spacing: Theme.Space.sm) {
-                        Toggle("", isOn: $hasDue).labelsHidden().toggleStyle(.checkbox)
-                        DatePicker("", selection: $due, displayedComponents: .date).labelsHidden().disabled(!hasDue)
-                    }
-                }
-            }
-            Text(problem ?? "交给 Agent 的项之后在「谁来做」里定；关联的历史经验会自动附给执行 Agent。")
+
+            Toggle("建完直接按智能建议分配", isOn: $autoAssign)
+                .toggleStyle(.checkbox)
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+
+            Text(problem ?? (autoAssign ? "建完将按智能建议自动分配并开工单；若缺项目目录再弹窗确认。" : "交给 Agent 的项之后在「谁来做」里定；关联的历史经验会自动附给执行 Agent。"))
                 .font(.caption).foregroundStyle(problem == nil || !tried ? Theme.textTertiary : Theme.Status.error)
             SheetButtons(error: error, confirm: "建任务", enabled: true,
                          shortcut: KeyboardShortcut(.return, modifiers: .command)) {
@@ -1259,18 +1734,39 @@ struct NewTaskSheet: View {
                                              deps: deps.sorted(), related: combinedRelatedRefs))
                 }
                 if error == nil, let id {
+                    if autoAssign, let tv = sa.task(id) {
+                        let allocations: [SuperagentEngine.Allocation] = tv.items.map { item in
+                            var to = AssignHeuristic.suggest(item.text)
+                            if let role = to.role, !sa.roles.contains(where: { $0.name == role }) { to = .you }
+                            return SuperagentEngine.Allocation(ord: item.ord, to: to)
+                        }
+                        let needsDir = AssignPreview.needsDirectory(
+                            changes: allocations.map { ($0.ord, $0.to) },
+                            roles: sa.roles,
+                            scope: scope
+                        )
+                        let blockedByDeps = allocations.contains { $0.to.isAgent }
+                            && deps.contains { sa.task($0)?.task.status != .done }
+                        if !allocations.isEmpty, !needsDir, !blockedByDeps {
+                            if attempt(sa, { sa.assign(id, allocations, oneTicket: true) }) == nil {
+                                sa.noteEcho(id, WorklistEchoText.assigned(allocations))
+                            }
+                        }
+                    }
                     created(id)
                     dismiss()
                 } else if error == nil {
-                    error = "没有建成任务"
+                    error = "任务创建失败，请重试"
                 }
             }
         }
         .padding(Theme.Space.xl)
         .frame(width: 600)
+        .onChange(of: title) { _, _ in refreshInferredScope() }
+        .onChange(of: request) { _, _ in refreshInferredScope() }
         .onAppear {
             if let seed {
-                scope = seed.scope.isEmpty ? (WorkspaceStore.shared.selected?.path ?? "") : seed.scope
+                showMoreOptions = true
                 for ref in seed.relatedRefs {
                     switch ref {
                     case .knowledge(let kid):
@@ -1283,11 +1779,20 @@ struct NewTaskSheet: View {
                         }
                     }
                 }
-            } else {
-                scope = WorkspaceStore.shared.selected?.path ?? ""
             }
+            refreshInferredScope()
             focused = true
         }
+    }
+
+    private func refreshInferredScope() {
+        guard !scopeEditedByUser else { return }
+        let fallback = appModel.selectedConnection?.currentPath ?? ""
+        scope = AppModel.inferProjectDirectory(
+            explicit: seed?.scope ?? "",
+            text: title + "\n" + request,
+            fallbackDir: fallback
+        )
     }
 
     /// 每行一条；去掉行首的「- 」「• 」「1. 」「1、」。

@@ -20,7 +20,7 @@ struct MuxApp: App {
                     if let c = appModel.selectedConnection { appModel.detachTerminal(c) }
                 }
                 .keyboardShortcut("w", modifiers: .command)
-                .disabled(appModel.selectedConnection == nil)
+                .disabled(appModel.selectedConnection == nil || appModel.worklistSelected)
             }
             // App/menu-level shortcuts: AppKit resolves these before the focused SwiftTerm view,
             // so ⌘-shortcuts are not swallowed by the shell.
@@ -60,12 +60,31 @@ struct MuxApp: App {
 
                 Divider()
 
-                Button("搜索全部终端") { appModel.isShowingSearch = true }
-                    .keyboardShortcut("f")
+                let inWorklistSearchable = appModel.worklistSelected
+                    && !appModel.worklistShowsSettings
+                    && appModel.worklistTaskID == nil
+                    && appModel.worklistTab != .router
+                Button(inWorklistSearchable
+                       ? (appModel.worklistTab == .knowledge ? "搜索知识库" : "搜索清单")
+                       : "搜索全部终端") {
+                    if inWorklistSearchable {
+                        appModel.worklistSearchTogglePulse += 1
+                    } else {
+                        appModel.isShowingSearch = true
+                    }
+                }
+                .keyboardShortcut("f")
+
+                Button("向主管发话") {
+                    appModel.openWorklist()
+                    appModel.worklistTab = .tasks
+                    appModel.routerInputFocusPulse += 1
+                }
+                .keyboardShortcut("l", modifiers: .command)
 
                 Button("查看历史…") { appModel.showHistoryViewer() }
                     .keyboardShortcut("h", modifiers: [.command, .shift])
-                    .disabled(appModel.selectedConnection == nil)
+                    .disabled((appModel.isEmbeddedRouterVisible ? appModel.routerConnection : appModel.selectedConnection) == nil)
 
                 Divider()
 
@@ -104,6 +123,31 @@ struct MuxApp: App {
                 appModel.start()
                 DispatchQueue.main.async { delegate.adoptMainWindow() } // 关窗驻留菜单栏(决议 #3)
             }
+            .onOpenURL { url in
+                handleOpenURL(url)
+            }
+    }
+
+    /// 处理 `tfa://join?...`（或 `tfa://org-join?...`）一键唤起接入组织。
+    private func handleOpenURL(_ url: URL) {
+        guard url.scheme?.lowercased() == "tfa" else { return }
+        let host = url.host?.lowercased() ?? ""
+        guard host == "join" || host == "org-join" else { return }
+        delegate.showMainWindow()
+        if appModel.superagent.engine == nil {
+            appModel.startSuperagent()
+        }
+        let raw = url.absoluteString
+        Task { @MainActor in
+            let err = await appModel.superagent.org.register(phrase: raw)
+            if let err {
+                appModel.lastError = "接入组织失败：\(err)"
+                appModel.openWorklistSettings(.org)
+            } else {
+                appModel.lastError = nil
+                appModel.openWorklist()
+            }
+        }
     }
 }
 
@@ -157,7 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUs
         return false
     }
 
-    @objc private func showMainWindow() {
+    @objc func showMainWindow() {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         if let mainWindow {

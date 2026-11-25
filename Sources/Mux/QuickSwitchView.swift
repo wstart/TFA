@@ -6,6 +6,7 @@ import TmuxKit
 struct QuickSwitchView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var query = ""
     @State private var highlighted = 0
@@ -28,7 +29,7 @@ struct QuickSwitchView: View {
             HStack(spacing: Theme.Space.md) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
-                TextField("Switch to terminal…", text: $query)
+                TextField("快速切换终端…", text: $query)
                     .textFieldStyle(.plain)
                     .font(.title3)
                     .focused($fieldFocused)
@@ -45,7 +46,7 @@ struct QuickSwitchView: View {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 22))
                         .foregroundStyle(.tertiary)
-                    Text(appModel.connections.isEmpty ? "No terminals open" : "No matches")
+                    Text(appModel.connections.isEmpty ? "暂无打开的终端" : "没有匹配的终端")
                         .font(Theme.Font.emptyBody)
                         .foregroundStyle(.secondary)
                 }
@@ -78,7 +79,9 @@ struct QuickSwitchView: View {
                         .padding(Theme.Space.sm)
                     }
                     .onChange(of: highlighted) { _, h in
-                        withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(h, anchor: .center) }
+                        Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                            proxy.scrollTo(h, anchor: .center)
+                        }
                     }
                 }
             }

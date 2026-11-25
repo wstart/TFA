@@ -5,10 +5,12 @@ import SuperagentCore
 // 角色 · 规则 · 定时 · 其它 · 记录），一次只显示一组。各张卡还是 `SuperagentPanel.swift` 里的那几张，样式和行为不变；
 // 页头的副标题是这一段的状态，不是宣言。
 
-/// `appModel.worklistSelected && worklistShowsSettings` 时 RootView 显示它而不是清单。
-/// 工具栏「主管」从「主管」段进来，清单页头的齿轮回到上次看的那段；「‹ 我的清单」、Esc、⌘[ 都返回清单。
+/// `appModel.worklistSelected && worklistShowsSettings` 时 RootView 显示它而不是「我的工作」主视图。
+/// 工具栏「主管」从「主管」段进来，页头的齿轮回到上次看的那段；「‹ 我的工作」、Esc、⌘[ 都返回「我的工作」。
 struct WorklistSettingsPage: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var navNS
     @FocusState private var focused: Bool
 
     private struct NavGroup: Identifiable {
@@ -43,12 +45,13 @@ struct WorklistSettingsPage: View {
                 Button {
                     back()
                 } label: {
-                    Label("我的清单", systemImage: "chevron.left")
+                    Label("我的工作", systemImage: "chevron.left")
                         .font(Theme.Font.headerTitle)
                         .foregroundStyle(Theme.textSecondary)
                 }
-                .help("回到我的清单")
-                .accessibilityLabel("返回我的清单")
+                .buttonStyle(PaperPressButtonStyle(hoverWash: true))
+                .help("回到我的工作")
+                .accessibilityLabel("返回我的工作")
                 .keyboardShortcut("[", modifiers: .command)
             })
             HStack(alignment: .top, spacing: 0) {
@@ -64,7 +67,9 @@ struct WorklistSettingsPage: View {
                                 ForEach(group.items, id: \.segment) { item in
                                     let chosen = item.segment == segment
                                     Button {
-                                        appModel.worklistSettingsSegment = item.segment
+                                        Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                                            appModel.worklistSettingsSegment = item.segment
+                                        }
                                     } label: {
                                         HStack(spacing: 8) {
                                             Image(systemName: item.icon)
@@ -78,16 +83,22 @@ struct WorklistSettingsPage: View {
                                         .foregroundStyle(chosen ? Theme.onBrand : Theme.textPrimary)
                                         .padding(.horizontal, 10)
                                         .frame(height: 30)
-                                        .background(chosen ? Theme.brand : Color.clear,
-                                                    in: RoundedRectangle(cornerRadius: Theme.Radius.sm))
+                                        .background {
+                                            if chosen {
+                                                RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                                                    .fill(Theme.brand)
+                                                    .matchedGeometryEffect(id: "settings-nav-thumb", in: navNS)
+                                            }
+                                        }
                                         .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.sm))
                                     }
-                                    .buttonStyle(.plain)
+                                    .buttonStyle(PaperPressButtonStyle(hoverWash: !chosen))
                                     .accessibilityAddTraits(chosen ? .isSelected : [])
                                 }
                             }
                         }
                     }
+                    .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: segment)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 20)
                 }
@@ -118,18 +129,20 @@ struct WorklistSettingsPage: View {
         .onAppear { DispatchQueue.main.async { focused = true } }
         .onMoveCommand { direction in
             let visualOrder = navGroups.flatMap { $0.items.map(\.segment) }
-            switch direction {
-            case .left: appModel.worklistSettingsSegment = segment.stepped(by: -1)
-            case .right: appModel.worklistSettingsSegment = segment.stepped(by: 1)
-            case .up:
-                if let i = visualOrder.firstIndex(of: segment), i > 0 {
-                    appModel.worklistSettingsSegment = visualOrder[i - 1]
+            Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                switch direction {
+                case .left: appModel.worklistSettingsSegment = segment.stepped(by: -1)
+                case .right: appModel.worklistSettingsSegment = segment.stepped(by: 1)
+                case .up:
+                    if let i = visualOrder.firstIndex(of: segment), i > 0 {
+                        appModel.worklistSettingsSegment = visualOrder[i - 1]
+                    }
+                case .down:
+                    if let i = visualOrder.firstIndex(of: segment), i + 1 < visualOrder.count {
+                        appModel.worklistSettingsSegment = visualOrder[i + 1]
+                    }
+                default: break
                 }
-            case .down:
-                if let i = visualOrder.firstIndex(of: segment), i + 1 < visualOrder.count {
-                    appModel.worklistSettingsSegment = visualOrder[i + 1]
-                }
-            default: break
             }
         }
         .onExitCommand { back() }
@@ -159,6 +172,7 @@ struct WorklistSettingsPage: View {
 
     private func back() {
         appModel.worklistShowsSettings = false
+        appModel.syncEmbeddedRouterViewing()
     }
 }
 
