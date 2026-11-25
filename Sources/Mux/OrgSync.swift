@@ -55,7 +55,17 @@ final class OrgSync {
     @ObservationIgnored var directory: (OrgScopeDTO) -> String? = { OrgSync.workspaceDirectory($0) }
     /// 引擎里的任务变了（下行 / 领取 / 裁决）：让运行时刷新视图并跑一轮 Pass。
     @ObservationIgnored var onChanged: (() -> Void)?
+    /// 已知线上组织名称表（按规范化 `origin` 持久化在 UserDefaults；测试可注入内存存储）。
+    @ObservationIgnored var loadKnownWorkspaces: () -> [String: String] = {
+        UserDefaults.standard.dictionary(forKey: OrgSync.knownWorkspacesDefaultsKey) as? [String: String] ?? [:]
+    }
+    @ObservationIgnored var saveKnownWorkspaces: ([String: String]) -> Void = {
+        UserDefaults.standard.set($0, forKey: OrgSync.knownWorkspacesDefaultsKey)
+    }
 
+    /// 已记住的「服务器 URL → 组织名」映射（观察态，便于切换/断开后任务徽标仍展示可读组织名）。
+    private var knownWorkspaces: [String: String] = [:]
+    @ObservationIgnored private var kvWorkspaceCache: [String: String] = [:]
     @ObservationIgnored private var engine: SuperagentEngine?
     @ObservationIgnored private var token: String?
     @ObservationIgnored private var loops: [Task<Void, Never>] = []
@@ -79,17 +89,31 @@ final class OrgSync {
         self.engine = engine
         settings = (try? engine.store.orgSettings()) ?? OrgSettings()
         token = settings.nodeID.flatMap(loadToken)
+        kvWorkspaceCache = [:]
+        var loaded: [String: String] = [:]
+        for (rawOrigin, rawName) in loadKnownWorkspaces() {
+            let key = Self.canonicalOrigin(rawOrigin)
+            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !key.isEmpty, !name.isEmpty { loaded[key] = name }
+        }
+        knownWorkspaces = loaded
+        rememberWorkspace(settings.workspace, for: settings.serverURL)
         refreshPending()
     }
 
     /// 注册过才开始心跳、长轮询、兜底拉取、outbox 重放；第一轮先全量拉一次。
-    func start() {
+    func start(forceFullPull: Bool = false) {
         guard engine != nil, registered, loops.isEmpty else { return }
         tokenInvalid = false
+        var needFull = forceFullPull
         loops = [
             loop(every: { [weak self] in self?.heartbeatInterval ?? 30 }, first: true) { [weak self] in await self?.heartbeat() },
             eventsLoop(),
-            loop(every: { [weak self] in self?.pullInterval ?? 60 }, first: true) { [weak self] in await self?.pull(full: self?.settings.taskCursor == nil) },
+            loop(every: { [weak self] in self?.pullInterval ?? 60 }, first: true) { [weak self] in
+                let full = needFull || self?.settings.taskCursor == nil
+                needFull = false
+                await self?.pull(full: full)
+            },
             loop(every: { [weak self] in self?.drainInterval ?? 3 }, first: false) { [weak self] in await self?.drain() },
         ]
     }
@@ -101,14 +125,15 @@ final class OrgSync {
         online = false
     }
 
-    /// 注册：邀请码由管理员按成员生成、一次性；`node_id` 首次生成后不变（重复注册同一 id = 换 token）。返回错误文案（nil = 成功）。
+    /// 注册：邀请码由管理员按成员生成、一次性；`node_id` 首次生成后不变（重复注册同一 id = 换 token）。
+    /// `email` 允许为空字符串：服务端会直接根据 `invite` 反查绑定成员的邮箱并在响应里返回。返回错误文案（nil = 成功）。
     func register(server: String, email: String, invite: String) async -> String? {
         guard let engine else { return "工单数据库还没打开" }
         guard let base = Self.normalize(server) else { return "服务器地址要像 http://127.0.0.1:5180" }
         if Self.needsTLS(base) { return "公网地址要用 https://（节点 token 不能明文传）；本机或局域网才可以用 http://" }
         let email = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let invite = invite.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard email.contains("@") else { return "填你在组织里的邮箱" }
+        if !email.isEmpty, !email.contains("@") { return "填你在组织里的邮箱" }
         guard !invite.isEmpty else { return "填管理员给你的邀请码" }
         busy = true
         defer { busy = false }
@@ -121,20 +146,65 @@ final class OrgSync {
             stop()
             saveToken(r.token, nodeID)
             token = r.token
+            let resolvedEmail = r.person?.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             var s = OrgSettings()
             s.serverURL = base.absoluteString
-            s.email = email
+            s.email = (resolvedEmail?.isEmpty == false ? resolvedEmail! : email)
             s.nodeID = nodeID
             s.workspace = r.workspace?.name ?? ""
             if s.serverURL == settings.serverURL { s.taskCursor = settings.taskCursor; s.eventCursor = settings.eventCursor }
             settings = s
             try engine.store.saveOrgSettings(s)
+            rememberWorkspace(s.workspace, for: s.serverURL)
             tokenInvalid = false
             lastError = nil
             start()
             return nil
         } catch {
             return Self.describe(error)
+        }
+    }
+
+    /// 一句话或单链接接入组织（支持 `.../join/<code>`、`tfa://join?...` 或自然语言）。返回错误文案（nil = 成功）。
+    func register(phrase: String) async -> String? {
+        guard let spec = OrgJoinSpec.parse(phrase) else {
+            return "没在输入里识别出接入链接或邀请码，请粘贴类似 http://127.0.0.1:5180/join/xxxx 的链接"
+        }
+        return await register(server: spec.serverURL, email: spec.email ?? "", invite: spec.inviteCode)
+    }
+
+    /// 外部 CLI（`tfa org join` / `tfa org leave`）更新数据库与钥匙串后热重载连接状态。
+    func reloadFromStore() {
+        guard let engine else { return }
+        let disk = (try? engine.store.orgSettings()) ?? OrgSettings()
+        let diskToken = disk.nodeID.flatMap(loadToken)
+        let connectionChanged = disk.serverURL != settings.serverURL
+            || disk.nodeID != settings.nodeID
+            || diskToken != token
+        let metaChanged = disk.email != settings.email || disk.workspace != settings.workspace
+
+        if connectionChanged {
+            stop()
+            settings = disk
+            token = diskToken
+            tokenInvalid = false
+            lastError = nil
+            rememberWorkspace(disk.workspace, for: disk.serverURL)
+            refreshPending()
+            if registered {
+                start(forceFullPull: true)
+            }
+            return
+        }
+
+        if metaChanged {
+            settings.email = disk.email
+            settings.workspace = disk.workspace
+            rememberWorkspace(disk.workspace, for: disk.serverURL)
+            refreshPending()
+        }
+        if registered, loops.isEmpty, !tokenInvalid {
+            start(forceFullPull: true)
         }
     }
 
@@ -195,6 +265,73 @@ final class OrgSync {
     func taskURL(_ t: WorkTask) -> URL? {
         guard let origin = t.origin, let id = t.originID else { return nil }
         return URL(string: "\(origin)/tasks/\(id)")
+    }
+
+    static let knownWorkspacesDefaultsKey = "org.knownWorkspaces"
+
+    /// 规范化组织服务器地址（用作历史组织名映射键）。
+    static func canonicalOrigin(_ origin: String) -> String {
+        let trimmed = origin.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if let url = normalize(trimmed) {
+            return url.absoluteString.lowercased()
+        }
+        var s = trimmed.lowercased()
+        while s.hasSuffix("/") { s.removeLast() }
+        return s
+    }
+
+    static func workspaceKVKey(for origin: String) -> String {
+        "org.workspace.\(canonicalOrigin(origin))"
+    }
+
+    /// 记住某服务器地址对应的组织名，持久化保存，切换组织或断开后历史任务仍能显示可读组织名。
+    func rememberWorkspace(_ workspace: String, for origin: String) {
+        let name = workspace.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = Self.canonicalOrigin(origin)
+        guard !name.isEmpty, !key.isEmpty else { return }
+        if knownWorkspaces[key] != name {
+            knownWorkspaces[key] = name
+            saveKnownWorkspaces(knownWorkspaces)
+        }
+    }
+
+    /// 返回指定 `origin`（组织服务器 URL）的可读组织名称（优先匹配已知工作区名，其次当前 `settings.workspace`，兜底提取 host[:port]）。
+    func organizationName(for origin: String?) -> String {
+        guard let raw = origin?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return "" }
+        let key = Self.canonicalOrigin(raw)
+        if !key.isEmpty, let known = knownWorkspaces[key], !known.isEmpty {
+            return known
+        }
+        let currentWorkspace = settings.workspace.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !currentWorkspace.isEmpty, !key.isEmpty, Self.canonicalOrigin(settings.serverURL) == key {
+            return currentWorkspace
+        }
+        if !key.isEmpty {
+            if let cached = kvWorkspaceCache[key] {
+                if !cached.isEmpty { return cached }
+            } else if let engine {
+                let kvName = ((try? engine.store.kv(Self.workspaceKVKey(for: key))) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                kvWorkspaceCache[key] = kvName
+                if !kvName.isEmpty { return kvName }
+            }
+        }
+        return Self.fallbackHostLabel(for: raw)
+    }
+
+    private static func fallbackHostLabel(for raw: String) -> String {
+        if let url = normalize(raw), let host = url.host, !host.isEmpty {
+            let formattedHost = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
+            return url.port.map { "\(formattedHost):\($0)" } ?? formattedHost
+        }
+        var s = raw
+        for prefix in ["https://", "http://"] where s.lowercased().hasPrefix(prefix) {
+            s = String(s.dropFirst(prefix.count))
+            break
+        }
+        while s.hasSuffix("/") { s.removeLast() }
+        return s
     }
 
     // MARK: - 循环
@@ -508,23 +645,13 @@ final class OrgSync {
 
     /// `http://host:port`，去掉末尾的斜杠和路径。
     static func normalize(_ s: String) -> URL? {
-        var text = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.contains("://") { text = "http://" + text }
-        guard let u = URL(string: text), let scheme = u.scheme?.lowercased(), scheme == "http" || scheme == "https", let host = u.host, !host.isEmpty else { return nil }
-        return URL(string: "\(scheme)://\(host)" + (u.port.map { ":\($0)" } ?? ""))
+        OrgJoinSpec.normalizeServerURL(s)
     }
 
     /// 节点 token 走 `Authorization: Bearer` 明文：公网地址必须 https（协议 §6）。本机和局域网可以 http：
     /// loopback、localhost、*.local、10/8、172.16/12、192.168/16、169.254/16，以及 IPv6 的 ::1、fe80::/10、fc00::/7。
     static func needsTLS(_ url: URL) -> Bool {
-        guard url.scheme?.lowercased() == "http", let host = url.host?.lowercased(), !host.isEmpty else { return false }
-        if host == "localhost" || host.hasSuffix(".local") || host.hasSuffix(".localhost") { return false }
-        if host.contains(":") { return !(host == "::1" || host.hasPrefix("fe80:") || host.hasPrefix("fc") || host.hasPrefix("fd")) }
-        let parts = host.split(separator: ".").compactMap { Int($0) }
-        guard parts.count == 4 else { return true }
-        if parts[0] == 127 || parts[0] == 10 || (parts[0] == 192 && parts[1] == 168) || (parts[0] == 169 && parts[1] == 254)
-            || (parts[0] == 172 && (16...31).contains(parts[1])) { return false }
-        return true
+        OrgJoinSpec.needsTLS(url)
     }
 
     static func describe(_ error: Error) -> String {

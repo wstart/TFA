@@ -39,6 +39,7 @@ private struct MindmapCanvasWidthKey: PreferenceKey {
 
 struct TaskRelationTreeCard: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let view: TaskView
     let editable: Bool
 
@@ -109,7 +110,7 @@ struct TaskRelationTreeCard: View {
 
             if canToggleIndirect {
                 Button(collapsedTokens.isEmpty ? "只看直接关联" : "展开全部脉络") {
-                    withAnimation(.easeInOut(duration: 0.18)) {
+                    Theme.Motion.run(Theme.Motion.layout, reduceMotion: reduceMotion) {
                         if collapsedTokens.isEmpty {
                             collapsedTokens = graph.indirectFoldTokens
                         } else {
@@ -269,7 +270,7 @@ struct TaskRelationTreeCard: View {
     ) {
         guard graph.canvasSize.width > availableCanvasWidth + 4 else { return }
         if animated {
-            withAnimation(.easeInOut(duration: 0.18)) {
+            Theme.Motion.run(Theme.Motion.layout, reduceMotion: reduceMotion) {
                 proxy.scrollTo(graph.focusNodeID, anchor: .center)
             }
         } else {
@@ -327,91 +328,108 @@ struct TaskRelationTreeCard: View {
         let hasLeftHandleIDs = Set(
             graph.nodes.compactMap { $0.upstreamFoldToken != nil ? $0.id : nil }
         )
+        let baseEdges = graph.edges.sorted { lhs, rhs in
+            if lhs.touchesFocus != rhs.touchesFocus { return !lhs.touchesFocus }
+            return false
+        }
+        let highlightedEdges = hoveredID.map { hid in
+            graph.edges.filter { $0.fromID == hid || $0.toID == hid }
+        } ?? []
 
-        return Canvas { context, _ in
-            // 先绘制普通/降噪边，再绘制悬停高亮边，确保高亮链路始终清晰压在顶层
-            let orderedEdges = graph.edges.sorted { lhs, rhs in
-                let lhsHighlighted = hoveredID != nil && (lhs.fromID == hoveredID || lhs.toID == hoveredID)
-                let rhsHighlighted = hoveredID != nil && (rhs.fromID == hoveredID || rhs.toID == hoveredID)
-                if lhsHighlighted != rhsHighlighted { return !lhsHighlighted }
-                if lhs.touchesFocus != rhs.touchesFocus { return !lhs.touchesFocus }
-                return false
-            }
-
-            for edge in orderedEdges {
-                let isHighlighted = hoveredID != nil && (edge.fromID == hoveredID || edge.toID == hoveredID)
-                let isDimmed = hoveredID != nil && !isHighlighted
-
-                let lineWidth: CGFloat
-                let strokeColor: Color
-                if isHighlighted {
-                    lineWidth = 2.0
-                    strokeColor = Theme.brand
-                } else if isDimmed {
-                    lineWidth = edge.touchesFocus ? 1.5 : 1.25
-                    strokeColor = Theme.borderStrong.opacity(0.28)
-                } else if edge.touchesFocus {
-                    lineWidth = 1.65
-                    strokeColor = Theme.borderStrong
-                } else {
-                    lineWidth = 1.35
-                    strokeColor = Theme.borderStrong.opacity(0.75)
+        return ZStack {
+            // 底层常规边：悬停任意节点时整体随节点卡片同步平滑降噪（避免 Canvas 单帧硬跳）
+            Canvas { context, _ in
+                for edge in baseEdges {
+                    let lineWidth: CGFloat = edge.touchesFocus ? 1.65 : 1.35
+                    let strokeColor: Color = edge.touchesFocus ? Theme.borderStrong : Theme.borderStrong.opacity(0.75)
+                    Self.drawEdge(
+                        edge,
+                        in: &context,
+                        hasLeftHandleIDs: hasLeftHandleIDs,
+                        lineWidth: lineWidth,
+                        strokeColor: strokeColor
+                    )
                 }
-
-                let strokeStyle: StrokeStyle
-                if edge.kind == .experience {
-                    strokeStyle = StrokeStyle(lineWidth: lineWidth, lineCap: .round, dash: [5, 3.5])
-                } else {
-                    strokeStyle = StrokeStyle(lineWidth: lineWidth, lineCap: .round)
-                }
-
-                // 若目标节点左端口挂有折叠按钮，终点提前停靠在折叠按钮左缘，避免微箭头被遮挡
-                let arrowTip = hasLeftHandleIDs.contains(edge.toID)
-                    ? CGPoint(x: max(edge.start.x + 8, edge.end.x - 9.5), y: edge.end.y)
-                    : edge.end
-
-                var curve = Path()
-                curve.move(to: edge.start)
-                curve.addCurve(to: arrowTip, control1: edge.control1, control2: edge.control2)
-                context.stroke(curve, with: .color(strokeColor), style: strokeStyle)
-
-                // 起点：4.5pt 实心发送端口圆点
-                let startDotRect = CGRect(
-                    x: edge.start.x - 2.25,
-                    y: edge.start.y - 2.25,
-                    width: 4.5,
-                    height: 4.5
-                )
-                context.fill(Path(ellipseIn: startDotRect), with: .color(strokeColor))
-
-                // 终点：指向右侧（沿末端切线方向）的 5pt 翼长微箭头
-                let dx = arrowTip.x - edge.control2.x
-                let dy = arrowTip.y - edge.control2.y
-                let angle = hypot(dx, dy) > 0.5 ? atan2(dy, dx) : 0
-                let wingLength: CGFloat = 5.0
-                let wingSpread: CGFloat = 0.50
-                let p1 = CGPoint(
-                    x: arrowTip.x - wingLength * cos(angle - wingSpread),
-                    y: arrowTip.y - wingLength * sin(angle - wingSpread)
-                )
-                let p2 = CGPoint(
-                    x: arrowTip.x - wingLength * cos(angle + wingSpread),
-                    y: arrowTip.y - wingLength * sin(angle + wingSpread)
-                )
-                var arrow = Path()
-                arrow.move(to: p1)
-                arrow.addLine(to: arrowTip)
-                arrow.addLine(to: p2)
-                context.stroke(
-                    arrow,
-                    with: .color(strokeColor),
-                    style: StrokeStyle(lineWidth: max(1.4, lineWidth), lineCap: .round, lineJoin: .round)
-                )
             }
+            .opacity(hoveredID == nil ? 1.0 : 0.34)
+            .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: hoveredID != nil)
+
+            // 顶层高亮边：与悬停节点相连的链路平滑浮现并始终压在顶层
+            Canvas { context, _ in
+                for edge in highlightedEdges {
+                    Self.drawEdge(
+                        edge,
+                        in: &context,
+                        hasLeftHandleIDs: hasLeftHandleIDs,
+                        lineWidth: 2.0,
+                        strokeColor: Theme.brand
+                    )
+                }
+            }
+            .opacity(hoveredID == nil ? 0.0 : 1.0)
+            .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: hoveredID)
         }
         .frame(width: graph.canvasSize.width, height: graph.canvasSize.height)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+
+    private static func drawEdge(
+        _ edge: TaskRelationGraphLayout.PositionedEdge,
+        in context: inout GraphicsContext,
+        hasLeftHandleIDs: Set<String>,
+        lineWidth: CGFloat,
+        strokeColor: Color
+    ) {
+        let strokeStyle: StrokeStyle
+        if edge.kind == .experience {
+            strokeStyle = StrokeStyle(lineWidth: lineWidth, lineCap: .round, dash: [5, 3.5])
+        } else {
+            strokeStyle = StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+        }
+
+        // 若目标节点左端口挂有折叠按钮，终点提前停靠在折叠按钮左缘，避免微箭头被遮挡
+        let arrowTip = hasLeftHandleIDs.contains(edge.toID)
+            ? CGPoint(x: max(edge.start.x + 8, edge.end.x - 9.5), y: edge.end.y)
+            : edge.end
+
+        var curve = Path()
+        curve.move(to: edge.start)
+        curve.addCurve(to: arrowTip, control1: edge.control1, control2: edge.control2)
+        context.stroke(curve, with: .color(strokeColor), style: strokeStyle)
+
+        // 起点：4.5pt 实心发送端口圆点
+        let startDotRect = CGRect(
+            x: edge.start.x - 2.25,
+            y: edge.start.y - 2.25,
+            width: 4.5,
+            height: 4.5
+        )
+        context.fill(Path(ellipseIn: startDotRect), with: .color(strokeColor))
+
+        // 终点：指向右侧（沿末端切线方向）的 5pt 翼长微箭头
+        let dx = arrowTip.x - edge.control2.x
+        let dy = arrowTip.y - edge.control2.y
+        let angle = hypot(dx, dy) > 0.5 ? atan2(dy, dx) : 0
+        let wingLength: CGFloat = 5.0
+        let wingSpread: CGFloat = 0.50
+        let p1 = CGPoint(
+            x: arrowTip.x - wingLength * cos(angle - wingSpread),
+            y: arrowTip.y - wingLength * sin(angle - wingSpread)
+        )
+        let p2 = CGPoint(
+            x: arrowTip.x - wingLength * cos(angle + wingSpread),
+            y: arrowTip.y - wingLength * sin(angle + wingSpread)
+        )
+        var arrow = Path()
+        arrow.move(to: p1)
+        arrow.addLine(to: arrowTip)
+        arrow.addLine(to: p2)
+        context.stroke(
+            arrow,
+            with: .color(strokeColor),
+            style: StrokeStyle(lineWidth: max(1.4, lineWidth), lineCap: .round, lineJoin: .round)
+        )
     }
 
     // MARK: - 节点卡片与左右折叠端口层
@@ -437,7 +455,7 @@ struct TaskRelationTreeCard: View {
                             isAdjacentHovered: isAdjacentHovered,
                             isDimmed: isDimmed,
                             onHoverChanged: { hovering in
-                                withAnimation(.easeOut(duration: 0.14)) {
+                                Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
                                     if hovering {
                                         hoveredNodeID = positioned.id
                                     } else if hoveredNodeID == positioned.id {
@@ -458,7 +476,7 @@ struct TaskRelationTreeCard: View {
                             isAdjacentHovered: isAdjacentHovered,
                             isDimmed: isDimmed,
                             onHoverChanged: { hovering in
-                                withAnimation(.easeOut(duration: 0.14)) {
+                                Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
                                     if hovering {
                                         hoveredNodeID = positioned.id
                                     } else if hoveredNodeID == positioned.id {
@@ -489,10 +507,12 @@ struct TaskRelationTreeCard: View {
                         hiddenCount: positioned.hiddenUpstreamCount,
                         nodeLabel: positioned.node.label,
                         onHoverChanged: { hovering in
-                            if hovering {
-                                hoveredNodeID = positioned.id
-                            } else if hoveredNodeID == positioned.id {
-                                hoveredNodeID = nil
+                            Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                                if hovering {
+                                    hoveredNodeID = positioned.id
+                                } else if hoveredNodeID == positioned.id {
+                                    hoveredNodeID = nil
+                                }
                             }
                         },
                         action: { toggleFoldToken(upToken) }
@@ -507,10 +527,12 @@ struct TaskRelationTreeCard: View {
                         hiddenCount: positioned.hiddenDownstreamCount,
                         nodeLabel: positioned.node.label,
                         onHoverChanged: { hovering in
-                            if hovering {
-                                hoveredNodeID = positioned.id
-                            } else if hoveredNodeID == positioned.id {
-                                hoveredNodeID = nil
+                            Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                                if hovering {
+                                    hoveredNodeID = positioned.id
+                                } else if hoveredNodeID == positioned.id {
+                                    hoveredNodeID = nil
+                                }
                             }
                         },
                         action: { toggleFoldToken(downToken) }
@@ -525,7 +547,7 @@ struct TaskRelationTreeCard: View {
     // MARK: - 交互辅助
 
     private func toggleFoldToken(_ token: String) {
-        withAnimation(.easeInOut(duration: 0.18)) {
+        Theme.Motion.run(Theme.Motion.layout, reduceMotion: reduceMotion) {
             if collapsedTokens.contains(token) {
                 collapsedTokens.remove(token)
             } else {
@@ -992,6 +1014,7 @@ private struct MindmapFoldHandle: View {
     let onHoverChanged: (Bool) -> Void
     let action: () -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
     var body: some View {
@@ -1021,6 +1044,8 @@ private struct MindmapFoldHandle: View {
                         )
                 }
             }
+            .scaleEffect(hovering && !reduceMotion ? 1.06 : 1.0)
+            .animation(Theme.Motion.value(Theme.Motion.micro, reduceMotion: reduceMotion), value: hovering)
             .contentShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)

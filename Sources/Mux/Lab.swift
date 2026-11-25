@@ -330,6 +330,7 @@ private struct PtyMonitorPane: View {
 /// A system-monitor card: small title, one large value, a detail line, and an optional usage bar
 /// (amber past 85% — the one moment the panel needs your eye).
 private struct MetricCard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let title: String
     let big: String
     let detail: String
@@ -340,6 +341,8 @@ private struct MetricCard: View {
             Text(title).font(.caption).foregroundStyle(Theme.textTertiary)
             Text(big)
                 .font(.system(size: 22, weight: .semibold, design: .rounded).monospacedDigit())
+                .contentTransition(.numericText())
+                .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: big)
                 .lineLimit(1).minimumScaleFactor(0.6)
             if let fraction {
                 GeometryReader { geo in
@@ -348,7 +351,7 @@ private struct MetricCard: View {
                         Capsule()
                             .fill(fraction > 0.85 ? Theme.Status.attention : Theme.brand)
                             .frame(width: max(0, min(1, fraction)) * geo.size.width)
-                            .animation(.easeOut(duration: 0.3), value: fraction)
+                            .animation(Theme.Motion.value(Theme.Motion.layout, reduceMotion: reduceMotion), value: fraction)
                     }
                 }
                 .frame(height: 6)

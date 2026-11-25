@@ -7,6 +7,10 @@ import SuperagentCore
 
 /// 从原文和退回说明里认出项目目录：`~/…` 或 `/Users/…`，到空白或中文标点为止；只认真实存在的文件夹，家目录和根目录不算。
 enum ScopeGuess {
+    static func directory(in text: String, isDirectory: (String) -> Bool = ScopeGuess.isDirectory) -> String? {
+        directory(in: [text], isDirectory: isDirectory)
+    }
+
     static func directory(in texts: [String], isDirectory: (String) -> Bool = ScopeGuess.isDirectory) -> String? {
         guard let re = try? NSRegularExpression(pattern: #"(?:~|/Users)/[^\s，。、；：:（）()「」『』"'<>,;]*"#) else { return nil }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -177,51 +181,119 @@ struct NextStep: Equatable {
         let directory = needsDirectory ? guess([target.task.request, target.task.title] + items.map(\.text) + extra) : nil
         return QuickAssign(target: target.id, ords: ords, role: role, needsDirectory: needsDirectory, directory: directory)
     }
+
+    /// 折叠态预览清洗：将连续空行合并为单个换行，避免空行白白占掉折叠预览行数；同时返回是否需要显示「展开完整内容」按钮。
+    static func previewBody(_ raw: String, maxPreviewLines: Int = 4, maxPreviewChars: Int = 150) -> (preview: String, canExpand: Bool) {
+        let normalized = raw
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return ("", false) }
+        let rawLines = normalized.components(separatedBy: "\n")
+        let nonBlankLines = rawLines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        let preview = nonBlankLines.joined(separator: "\n")
+        let collapsedBlankLines = nonBlankLines.count < rawLines.count
+        let newlineCount = max(0, nonBlankLines.count - 1)
+        let canExpand = newlineCount >= maxPreviewLines
+            || normalized.count > maxPreviewChars
+            || (collapsedBlankLines && normalized.count > 80)
+        return (preview, canExpand)
+    }
+
+    /// 找出当前横幅关联的工单号（供「查看工单 #id 详情」使用）。
+    static func relevantTicketID(_ step: NextStep, in view: TaskView) -> Int64? {
+        if let tid = step.ticket { return tid }
+        guard let need = view.needsYou.first else { return nil }
+        if let tk = view.ticket(needing: need) { return tk.id }
+        if need == .blocked, let link = view.handbackNeed { return link.ticketID }
+        if need == .review {
+            return view.tickets.last { $0.ticket.reviewOf == nil && !$0.ticket.reportSummary.isEmpty }?.id
+                ?? view.tickets.last { !$0.ticket.reportSummary.isEmpty }?.id
+        }
+        return nil
+    }
 }
 
 // MARK: - 横幅
 
 struct NextStepBanner: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let view: TaskView
     /// 打开这张卡的「谁来做」。
     let assign: () -> Void
     /// 人在横幅里换过的目录（盖过认出来的）。
     @State private var chosenDirectory: String?
+    /// 正文是否展开完整内容。
+    @State private var bodyExpanded = false
 
     var body: some View {
         let sa = appModel.superagent
-        let step = NextStep.make(view, task: { sa.task($0) }, roles: sa.roles)
-        Group {
-            if step.tone == .quiet { quiet(step) } else { loud(step) }
+        let step = NextStep.make(view, task: { sa.task($0) }, roles: sa.roles) { texts in
+            let inferred = AppModel.inferProjectDirectory(
+                text: texts.joined(separator: "\n"),
+                fallbackDir: appModel.selectedConnection?.currentPath ?? ""
+            )
+            return inferred.isEmpty ? nil : inferred
         }
-        .onChange(of: view.id) { _, _ in chosenDirectory = nil }
+        Group {
+            if step.tone == .quiet {
+                quiet(step).transition(.opacity)
+            } else {
+                loud(step).transition(.opacity)
+            }
+        }
+        .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: step.tone)
+        .onChange(of: view.id) { _, _ in
+            chosenDirectory = nil
+            bodyExpanded = false
+        }
+        .onChange(of: step.body) { _, _ in
+            bodyExpanded = false
+        }
     }
 
     // MARK: 深色：需要你 / 定谁来做
 
     private func loud(_ step: NextStep) -> some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 20) {
-                words(step).frame(minWidth: 320, alignment: .leading)
-                Spacer(minLength: 0)
-                actions(step).fixedSize()
-            }
-            VStack(alignment: .leading, spacing: 14) {
-                words(step)
-                actions(step)
+        let bodyInfo = NextStep.previewBody(step.body)
+        let isExpanded = bodyExpanded && bodyInfo.canExpand
+        let relevantTicketID = NextStep.relevantTicketID(step, in: view)
+        return Group {
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 14) {
+                    words(step, preview: bodyInfo.preview, canExpand: bodyInfo.canExpand, isExpanded: true, relevantTicketID: relevantTicketID)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack {
+                        Spacer(minLength: 0)
+                        actions(step)
+                    }
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .center, spacing: 20) {
+                        words(step, preview: bodyInfo.preview, canExpand: bodyInfo.canExpand, isExpanded: false, relevantTicketID: relevantTicketID)
+                            .frame(minWidth: 320, alignment: .leading)
+                        Spacer(minLength: 0)
+                        actions(step).fixedSize()
+                    }
+                    VStack(alignment: .leading, spacing: 14) {
+                        words(step, preview: bodyInfo.preview, canExpand: bodyInfo.canExpand, isExpanded: false, relevantTicketID: relevantTicketID)
+                        actions(step)
+                    }
+                }
             }
         }
         .padding(.vertical, 16)
         .padding(.horizontal, 20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: Theme.Radius.lg).fill(BannerInk.cardFill))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.lg).stroke(BannerInk.cardStroke, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.lg).stroke(step.tone == .needsYou ? BannerInk.needsYouStroke : BannerInk.cardStroke, lineWidth: 1))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("下一步：\(step.title)")
     }
 
-    private func words(_ step: NextStep) -> some View {
+    private func words(_ step: NextStep, preview: String, canExpand: Bool, isExpanded: Bool, relevantTicketID: Int64?) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 7) {
                 Circle().fill(step.tone == .needsYou ? BannerInk.amberDot : BannerInk.mutedText).frame(width: 6, height: 6)
@@ -232,9 +304,58 @@ struct NextStepBanner: View {
             Text(step.title).font(.system(size: 16, weight: .semibold)).foregroundStyle(BannerInk.titleText)
                 .lineLimit(2).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             if !step.body.isEmpty {
-                Text(step.body).font(.system(size: 13)).foregroundStyle(BannerInk.bodyText)
-                    .lineLimit(3).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                    .help(step.body)
+                if isExpanded {
+                    Text(step.body)
+                        .font(.system(size: 13))
+                        .foregroundStyle(BannerInk.bodyText)
+                        .lineLimit(nil)
+                        .lineSpacing(3.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                } else {
+                    Text(preview)
+                        .font(.system(size: 13))
+                        .foregroundStyle(BannerInk.bodyText)
+                        .lineLimit(5)
+                        .lineSpacing(2.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .help(step.body)
+                }
+            }
+            if canExpand || relevantTicketID != nil {
+                HStack(spacing: 14) {
+                    if canExpand {
+                        Button {
+                            Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) { bodyExpanded.toggle() }
+                        } label: {
+                            Text(isExpanded ? "收起内容 ▴" : "展开完整内容 ▾")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(BannerInk.amberText)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(isExpanded ? "收起内容" : "展开完整内容")
+                    }
+                    if let tid = relevantTicketID {
+                        Button {
+                            appModel.goToTicket(tid)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "doc.text.magnifyingglass")
+                                    .font(.system(size: 10.5))
+                                Text("查看工单 #\(tid) 详情")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .foregroundStyle(BannerInk.bodyText)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("打开工单 #\(tid)（终端在线时跳终端，已结束时弹出完整工单归档记录）")
+                        .accessibilityLabel("查看工单 #\(tid) 详情")
+                    }
+                }
+                .padding(.top, 2)
             }
         }
     }
@@ -245,8 +366,7 @@ struct NextStepBanner: View {
                 if q.needsDirectory { directoryButton(q) }
                 Button("交给\(q.role)") { hand(q) }
                     .buttonStyle(BannerButtonStyle(kind: .prominent))
-                    .disabled(q.needsDirectory && (chosenDirectory ?? q.directory) == nil)
-                    .help(q.needsDirectory && (chosenDirectory ?? q.directory) == nil ? "先选一个项目目录" : "交给\(q.role)，开一张工单")
+                    .help(q.needsDirectory && (chosenDirectory ?? q.directory) == nil ? "点选项目目录并直接交给\(q.role)" : "交给\(q.role)，开一张工单")
                 if q.target != view.id {
                     Button("打开 A-\(q.target)") { appModel.openWorklist(task: q.target) }
                         .buttonStyle(BannerButtonStyle(kind: .ghost))
@@ -272,33 +392,70 @@ struct NextStepBanner: View {
             }
         }
         .buttonStyle(BannerButtonStyle(kind: .outline))
-        .help(dir == nil ? "这个任务还没有项目目录：选一个，\(q.role)在那里工作" : (chosenDirectory == nil ? "目录是从原文里认出来的，点了更换" : dir!))
+        .help(dir == nil ? "这个任务还没有项目目录：选一个，\(q.role)在那里工作" : (chosenDirectory == nil ? "目录是系统自动识别的，点击可更换" : dir!))
         .accessibilityLabel(dir.map { "目录 \($0)，点了更换" } ?? "选择项目目录")
     }
 
-    /// 设目录（需要时）→ 交给角色；失败的原因贴在这张卡上。
+    /// 设目录（需要时直接弹出选择框并一步派单）→ 交给角色；失败的原因贴在这张卡上。
     private func hand(_ q: NextStep.QuickAssign) {
         let sa = appModel.superagent
         if q.needsDirectory {
-            guard let dir = chosenDirectory ?? q.directory else { return }
-            if let e = attempt(sa, { sa.updateTask(q.target, scope: dir) }) { sa.actionErrors[view.id] = e; return }
+            let resolved: String
+            if let existing = chosenDirectory ?? q.directory {
+                resolved = existing
+            } else if let picked = pickFolder(from: "", message: "选择项目目录，选完立即交给\(q.role)") {
+                chosenDirectory = picked
+                resolved = picked
+            } else {
+                return
+            }
+            if let e = attempt(sa, { sa.updateTask(q.target, scope: resolved) }) { sa.actionErrors[view.id] = e; return }
         }
         let allocations = q.ords.map { SuperagentEngine.Allocation(ord: $0, to: .agent(role: q.role)) }
         if let e = attempt(sa, { sa.assign(q.target, allocations, oneTicket: true) }) { sa.actionErrors[view.id] = e; return }
         sa.noteEcho(view.id, q.target == view.id ? "已交给\(q.role)（\(WorklistText.ords(q.ords))）" : "已把 A-\(q.target) 交给\(q.role)")
     }
 
-    // MARK: 浅色静默条：不用你管时只占紧凑一行，不抢占视觉重心
+    // MARK: 浅色静默条：不用你管时只占紧凑一行，不抢占视觉重心；正文较长或含换行时支持一键展开全文
 
     private func quiet(_ step: NextStep) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            Circle().fill(Theme.Status.positive).frame(width: 7, height: 7).accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
+        let canExpandQuiet = !step.body.isEmpty && (step.body.count > 70 || step.body.contains("\n"))
+        let isExpanded = bodyExpanded && canExpandQuiet
+        return HStack(alignment: isExpanded ? .top : .center, spacing: 12) {
+            Circle().fill(Theme.Status.positive).frame(width: 7, height: 7)
+                .padding(.top, isExpanded ? 5 : 0)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: isExpanded ? 5 : 2) {
                 Text(step.title).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textPrimary)
-                    .lineLimit(1).textSelection(.enabled)
+                    .lineLimit(isExpanded ? nil : 1).textSelection(.enabled)
                 if !step.body.isEmpty {
-                    Text(step.body).font(.system(size: 12)).foregroundStyle(Theme.textTertiary)
-                        .lineLimit(1).help(step.body)
+                    if isExpanded {
+                        Text(step.body)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textSecondary)
+                            .lineLimit(nil)
+                            .lineSpacing(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    } else {
+                        Text(NextStep.previewBody(step.body).preview.replacingOccurrences(of: "\n", with: " "))
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textTertiary)
+                            .lineLimit(1)
+                            .help(step.body)
+                    }
+                    if canExpandQuiet {
+                        Button {
+                            Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) { bodyExpanded.toggle() }
+                        } label: {
+                            Text(isExpanded ? "收起 ▴" : "展开完整内容 ▾")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(Theme.textSecondary)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(isExpanded ? "收起内容" : "展开完整内容")
+                    }
                 }
             }
             Spacer(minLength: 0)
@@ -336,10 +493,31 @@ struct NextStepBanner: View {
     }
 }
 
-/// 横幅上的颜色：无论浅色或深色主题，强调横幅都保持高对比深色卡片，避免翻转后失真。
+/// 横幅上的颜色：浅色下保持高对比深炭卡片；深色下略提背景层次并加温和亮边/琥珀边，避免与普通深色卡片混成一片。
 private enum BannerInk {
-    static let cardFill = Color(.sRGB, red: 0.118, green: 0.125, blue: 0.149, opacity: 1)    // #1e2026
-    static let cardStroke = Color(.sRGB, red: 0.220, green: 0.235, blue: 0.278, opacity: 1)  // #383c47
+    private static func dynamic(
+        light: (CGFloat, CGFloat, CGFloat, CGFloat),
+        dark: (CGFloat, CGFloat, CGFloat, CGFloat)
+    ) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let c = isDark ? dark : light
+            return NSColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: c.3)
+        })
+    }
+
+    static let cardFill = dynamic(
+        light: (0.118, 0.125, 0.149, 1), // #1e2026
+        dark: (0.153, 0.169, 0.212, 1)   // #272b36 — 明显高于深色普通卡片 #1e2128
+    )
+    static let cardStroke = dynamic(
+        light: (0.220, 0.235, 0.278, 1), // #383c47
+        dark: (0.310, 0.345, 0.424, 1)   // #4f586c — 深色下清晰的纸面轮廓线
+    )
+    static let needsYouStroke = dynamic(
+        light: (0.220, 0.235, 0.278, 1), // #383c47
+        dark: (0.941, 0.659, 0.251, 0.44)// 深色下温和琥珀描边，一眼区分「等你决定」
+    )
     static let titleText = Color(.sRGB, red: 0.965, green: 0.969, blue: 0.976, opacity: 1)   // #f6f7f9
     static let mutedText = Color(.sRGB, red: 0.651, green: 0.678, blue: 0.729, opacity: 1)   // #a6adb9
     static let amberDot = Color(.sRGB, red: 0.941, green: 0.659, blue: 0.251, opacity: 1)    // #f0a840
@@ -355,6 +533,7 @@ struct BannerButtonStyle: ButtonStyle {
     enum Kind { case prominent, outline, ghost, text }
     var kind: Kind
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         let label = configuration.label
@@ -372,7 +551,9 @@ struct BannerButtonStyle: ButtonStyle {
             }
         }
         .contentShape(Rectangle())
-        .opacity(isEnabled ? (configuration.isPressed ? 0.7 : 1) : 0.4)
+        .opacity(isEnabled ? (configuration.isPressed ? 0.72 : 1) : 0.4)
+        .scaleEffect(isEnabled && configuration.isPressed && !reduceMotion ? 0.985 : 1)
+        .animation(Theme.Motion.value(Theme.Motion.micro, reduceMotion: reduceMotion), value: configuration.isPressed)
     }
 
     private var foreground: Color {

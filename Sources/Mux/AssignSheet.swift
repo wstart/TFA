@@ -5,10 +5,16 @@ import SuperagentCore
 // 「谁来做」（TFA-工作清单-需求文档 §9.3、注意事项 F-12 / F-13 / D-08 / C-03）：每个清单项选 你 / 某个角色的 Agent；
 // 交给 Agent 的项才开工单。在哪个目录、能否改文件由角色定义决定，这里不选。
 
-/// 没有主管建议时的默认执行者（注意事项 F-13）：含「改 / 修 / 实现 / 提交 / 加 / 删 / 开发」→ 开发；含「查 / 问 / 分析 / 总结 / 看看」→ 助理；其余 → 你。
+/// 没有主管建议时的默认执行者（注意事项 F-13）：开发词 → 开发；调研/排查/分析词 → 助理；其余 → 你。
 enum AssignHeuristic {
-    static let developerWords = ["改", "修", "实现", "提交", "加", "删", "开发"]
-    static let assistantWords = ["查", "问", "分析", "总结", "看看"]
+    static let developerWords = [
+        "改", "修", "实现", "提交", "加", "删", "开发",
+        "重构", "优化", "修复", "编写", "调试", "迁移", "接入", "补测", "适配", "升级",
+    ]
+    static let assistantWords = [
+        "查", "问", "分析", "总结", "看看",
+        "调研", "排查", "梳理", "整理", "汇总", "对比", "复盘",
+    ]
     /// 看起来要改文件（注意事项 D-08：交给只读角色时提示，不拦）。
     static let editWords = ["改", "修", "提交", "实现"]
 
@@ -78,6 +84,7 @@ enum AssignPreview {
 struct AssignSheet: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let view: TaskView
     /// 角色（按 `tfa read roles` 顺序）：分段控件的选项、只读提示。
     let roles: [Role]
@@ -89,7 +96,9 @@ struct AssignSheet: View {
     @State private var error: String?
     /// 确认前列出会被中断的终端（改派有工单的项；注意事项 C-03）。
     @State private var interrupting: [String]?
-    /// 任务的目录：`view` 是打开时的快照，在这里选了目录要立刻反映出来。
+    /// 关闭时有未确认改动：用非阻塞 SwiftUI alert 替代阻塞主线程的 NSAlert。
+    @State private var confirmDiscard = false
+    /// 任务的目录：`view` 是打开时的快照，在这里选了或自动推导出目录要立刻反映出来。
     @State private var scope: String
 
     struct Row: Identifiable, Equatable {
@@ -100,7 +109,8 @@ struct AssignSheet: View {
     }
 
     /// 默认值在这里算好（sheet 按内容定大小，不能等 onAppear）：`Item.assignee` 有值就用它，否则按启发式；
-    /// 启发式给的角色不存在就退到你。
+    /// 启发式给的角色不存在就退到你；任务还没目录时自动按四级目录推导预填。
+    @MainActor
     init(view: TaskView, roles: [Role], focusOrd: Int? = nil) {
         self.view = view
         self.roles = roles
@@ -113,9 +123,14 @@ struct AssignSheet: View {
             }
             return Row(item: item, text: item.text, to: to)
         }
+        let inferredScope = view.task.scope.isEmpty
+            ? AppModel.inferProjectDirectory(
+                text: ([view.task.title, view.task.request] + view.items.map(\.text)).joined(separator: "\n")
+            )
+            : view.task.scope
         _rows = State(initialValue: rows)
         _initial = State(initialValue: rows)
-        _scope = State(initialValue: view.task.scope)
+        _scope = State(initialValue: inferredScope)
     }
 
     /// 分段控件的选项：你 + 各角色（按 `roles` 顺序）；项当前的角色不在列表里也补上，免得没得选。
@@ -179,8 +194,42 @@ struct AssignSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
             Text("谁来做 · \(view.task.label) \(view.task.title)").font(Theme.Font.headerTitle).lineLimit(2)
-            Text("每一项选你或某个角色的 Agent。默认是主管的建议，可以改。交给 Agent 的项会开工单；在哪个目录、能否改文件由角色决定。")
+            Text("每一项选你或某个角色的 Agent。默认是智能建议，可以改。交给 Agent 的项会开工单；在哪个目录、能否改文件由角色决定。")
                 .font(.caption).foregroundStyle(Theme.textTertiary).fixedSize(horizontal: false, vertical: true)
+            if openRows.count >= 2 {
+                HStack(spacing: Theme.Space.sm) {
+                    Text("一键全设为：").font(.caption).foregroundStyle(Theme.textTertiary)
+                    ForEach(options, id: \.self) { opt in
+                        let allMatch = openRows.allSatisfy { $0.to == opt }
+                        Button {
+                            Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                                for idx in rows.indices where rows[idx].item.status != .done {
+                                    rows[idx].to = opt
+                                }
+                            }
+                        } label: {
+                            Text(opt.label)
+                                .font(.system(size: 11, weight: allMatch ? .semibold : .regular))
+                                .foregroundStyle(allMatch ? Theme.onBrand : Theme.textSecondary)
+                                .padding(.horizontal, 8)
+                                .frame(height: 22)
+                                .background(allMatch ? Theme.brand : Theme.surface2, in: RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(PaperPressButtonStyle())
+                    }
+                    if dirty {
+                        Spacer(minLength: 4)
+                        Button("重置预选") {
+                            Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                                rows = initial
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                    }
+                }
+            }
             Hairline()
             ScrollViewReader { proxy in
                 ScrollView {
@@ -211,17 +260,54 @@ struct AssignSheet: View {
                 Toggle("同一角色的项合成一张工单", isOn: $oneTicket).toggleStyle(.switch).controlSize(.small)
             }
             if needsDirectory {
-                HStack(spacing: Theme.Space.md) {
-                    Text("开发要改文件，这个任务还没有项目目录。").font(.caption).foregroundStyle(Theme.Status.attention)
-                    Button("选择目录…") {
-                        if let p = pickFolder(from: scope, message: "任务的项目目录：交给会改文件的角色（开发）时在这里工作") {
-                            if let e = attempt(appModel.superagent, { appModel.superagent.updateTask(view.id, scope: p) }) { error = e } else { scope = p }
+                VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                    HStack(spacing: Theme.Space.md) {
+                        Text("开发要改文件，这个任务还没有项目目录。").font(.caption).foregroundStyle(Theme.Status.attention)
+                        Button("选择目录…") {
+                            if let p = pickFolder(from: scope, message: "任务的项目目录：交给会改文件的角色（开发）时在这里工作") {
+                                if let e = attempt(appModel.superagent, { appModel.superagent.updateTask(view.id, scope: p) }) { error = e } else { scope = p }
+                            }
+                        }
+                        .controlSize(.small)
+                    }
+                    let workspaces = WorkspaceStore.shared.projects.filter { ScopeGuess.isDirectory($0.path) }
+                    if !workspaces.isEmpty {
+                        FlowLayout(spacing: 6) {
+                            ForEach(workspaces) { ws in
+                                Button {
+                                    if let e = attempt(appModel.superagent, { appModel.superagent.updateTask(view.id, scope: ws.path) }) {
+                                        error = e
+                                    } else {
+                                        scope = ws.path
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "folder").font(.system(size: 10))
+                                        Text(ws.name).font(.system(size: 11, weight: .medium))
+                                    }
+                                    .foregroundStyle(Theme.textPrimary)
+                                    .padding(.horizontal, 8)
+                                    .frame(height: 22)
+                                    .background(Theme.chrome, in: RoundedRectangle(cornerRadius: 6))
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.border, lineWidth: 1))
+                                }
+                                .buttonStyle(PaperPressButtonStyle())
+                                .help("设为项目目录：\(ws.path)")
+                            }
                         }
                     }
-                    .controlSize(.small)
                 }
             } else if !scope.isEmpty, scope != view.task.scope {
-                Text("项目目录：\(tilde(scope))").font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1).truncationMode(.head)
+                HStack(spacing: Theme.Space.sm) {
+                    Image(systemName: "folder").font(.system(size: 11)).foregroundStyle(Theme.textTertiary)
+                    Text("已自动匹配目录：\(tilde(scope))").font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1).truncationMode(.head)
+                    Spacer(minLength: 0)
+                    Button("更换…") {
+                        if let p = pickFolder(from: scope, message: "任务的项目目录") { scope = p }
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                }
             }
             if let consequence {
                 Text(consequence).font(.caption).foregroundStyle(Theme.textSecondary)
@@ -234,8 +320,10 @@ struct AssignSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack {
-                    if let problem, problem != "没有改动" {
-                        Text(problem).font(.caption).foregroundStyle(Theme.Status.error)
+                    if let problem {
+                        Text(problem == "没有改动" ? "修改任意项的执行人或内容后即可确认" : problem)
+                            .font(.caption)
+                            .foregroundStyle(problem == "没有改动" ? Theme.textTertiary : Theme.Status.error)
                     }
                     Spacer()
                     Button("取消", role: .cancel) { cancel() }.keyboardShortcut(.cancelAction)
@@ -253,6 +341,15 @@ struct AssignSheet: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text((interrupting ?? []).joined(separator: "、") + "。改派有工单的项要先停掉那张工单；终端、目录和已有改动都保留。")
+        }
+        .alert("分配还没确认", isPresented: $confirmDiscard) {
+            if problem == nil {
+                Button("确认分配") { confirm() }
+            }
+            Button("放弃改动", role: .destructive) { dismiss() }
+            Button("继续编辑", role: .cancel) {}
+        } message: {
+            Text("确认分配后交给 Agent 的项会开工单；放弃则什么都不变。")
         }
     }
 
@@ -293,20 +390,10 @@ struct AssignSheet: View {
         return nil
     }
 
-    /// 关闭时有改动未确认：保存 / 放弃 / 取消三选（DESIGN.md）。
+    /// 关闭时有改动未确认：弹出非阻塞 SwiftUI `.alert`（确认分配 / 放弃改动 / 继续编辑）。
     private func cancel() {
         guard dirty else { dismiss(); return }
-        let alert = NSAlert()
-        alert.messageText = "分配还没确认"
-        alert.informativeText = "确认分配后交给 Agent 的项会开工单；放弃则什么都不变。"
-        alert.addButton(withTitle: "确认分配")
-        alert.addButton(withTitle: "放弃改动")
-        alert.addButton(withTitle: "取消")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: if problem == nil { confirm() }
-        case .alertSecondButtonReturn: dismiss()
-        default: break
-        }
+        confirmDiscard = true
     }
 
     private func confirm() {
@@ -318,9 +405,15 @@ struct AssignSheet: View {
         if unique.isEmpty { perform() } else { interrupting = unique }
     }
 
-    /// 先改文字，再 `assign`（只送改了的项）；任一步失败就停，错误留在表单里。
+    /// 先补齐自动推导的目录，再改文字、最后 `assign`（只送改了的项）；任一步失败就停，错误留在表单里。
     private func perform() {
         let sa = appModel.superagent
+        if scope != view.task.scope, !scope.isEmpty {
+            if let e = attempt(sa, { sa.updateTask(view.id, scope: scope) }) {
+                error = e
+                return
+            }
+        }
         for r in changed where r.text != r.item.text {
             if let e = attempt(sa, { sa.editItem(view.id, ord: r.item.ord, text: r.text.trimmingCharacters(in: .whitespacesAndNewlines)) }) {
                 error = "第 \(r.item.ord) 项：\(e)"

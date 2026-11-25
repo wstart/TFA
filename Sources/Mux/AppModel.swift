@@ -31,15 +31,16 @@ final class AppModel {
     var tunnelsSelected = false
     /// True when the「主管」panel (Super-agent tickets / needs-you / rules) is shown in the detail area.
     var superagentSelected = false
-    /// True when「我的清单」(the work list) is shown in the detail area; `worklistTaskID` = the task card pushed
-    /// inside it (nil = the list), `worklistShowsSettings` = the settings sub-page is pushed instead of the list
+    /// True when「我的工作」(tasks / embedded router / knowledge) is shown in the detail area; `worklistTaskID` = the task card pushed
+    /// inside it (nil = the tab view), `worklistShowsSettings` = the settings sub-page is pushed instead of the tab view
     /// (`WorklistSettingsPage`; back / Esc clear it).
     var worklistSelected = false
     var worklistTaskID: Int64?
     var worklistShowsSettings = false
-    /// 任务卡上展开改动的工单（「看改动」，`showTaskDiff`）；nil = 不展开。换任务时清掉。
+    /// 「我的工作」顶部三栏：清单 / 主管（内嵌实时终端）/ 知识库。
     enum WorklistTab: String, CaseIterable, Hashable {
         case tasks
+        case router
         case knowledge
     }
 
@@ -62,6 +63,77 @@ final class AppModel {
     var worklistTab: WorklistTab = .tasks
     var worklistFocusedKnowledgeID: Int64?
     var newTaskSeed: NewTaskSeed?
+    /// 供 ⌘F 在「我的工作」（清单 / 知识库）内就地开关或聚焦搜索框。
+    var worklistSearchTogglePulse: Int = 0
+    /// 供 ⌘L 在「我的工作 · 清单」直接聚焦顶部主管发话框。
+    var routerInputFocusPulse: Int = 0
+
+    /// 四级智能项目目录推导（显式传入工作区参数，纯函数可测）：
+    /// ① `explicit` 有效非家目录 → ② `ScopeGuess.directory(in: text)` → ③ `selectedWorkspace` 有效非家目录 →
+    /// ④ `allWorkspaces` 仅 1 个有效非家目录 → ⑤ `fallbackDir` 有效非家目录 → `""`。
+    static func inferProjectDirectory(
+        explicit: String = "",
+        text: String = "",
+        selectedWorkspace: String?,
+        allWorkspaces: [String] = [],
+        fallbackDir: String = "",
+        isDirectory: (String) -> Bool = ScopeGuess.isDirectory
+    ) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        func normalizeValid(_ raw: String?) -> String? {
+            guard let raw else { return nil }
+            var p = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !p.isEmpty else { return nil }
+            if p.hasPrefix("~") {
+                p = home + String(p.dropFirst())
+            }
+            while p.count > 1, p.hasSuffix("/") { p.removeLast() }
+            guard p != home, p != "/", isDirectory(p) else { return nil }
+            return p
+        }
+        if let p = normalizeValid(explicit) { return p }
+        if !text.isEmpty, let guessed = ScopeGuess.directory(in: text, isDirectory: isDirectory) { return guessed }
+        if let p = normalizeValid(selectedWorkspace) { return p }
+        let validWorkspaces = Array(Set(allWorkspaces.compactMap(normalizeValid)))
+        if validWorkspaces.count == 1, let only = validWorkspaces.first { return only }
+        if let p = normalizeValid(fallbackDir) { return p }
+        return ""
+    }
+
+    /// 便捷重载：未传 `selectedWorkspace` 时仅按传入的 `allWorkspaces` 列表推导。
+    static func inferProjectDirectory(
+        explicit: String = "",
+        text: String = "",
+        allWorkspaces: [String],
+        fallbackDir: String = "",
+        isDirectory: (String) -> Bool = ScopeGuess.isDirectory
+    ) -> String {
+        inferProjectDirectory(
+            explicit: explicit,
+            text: text,
+            selectedWorkspace: nil,
+            allWorkspaces: allWorkspaces,
+            fallbackDir: fallbackDir,
+            isDirectory: isDirectory
+        )
+    }
+
+    /// 便捷重载：自动读取当前 `WorkspaceStore.shared` 的选中项目与全部项目列表。
+    static func inferProjectDirectory(
+        explicit: String = "",
+        text: String = "",
+        fallbackDir: String = "",
+        isDirectory: (String) -> Bool = ScopeGuess.isDirectory
+    ) -> String {
+        inferProjectDirectory(
+            explicit: explicit,
+            text: text,
+            selectedWorkspace: WorkspaceStore.shared.selected?.path,
+            allWorkspaces: WorkspaceStore.shared.projects.map(\.path),
+            fallbackDir: fallbackDir,
+            isDirectory: isDirectory
+        )
+    }
     var inspectingTicket: TicketArchiveRequest?
     var worklistDiffTicketID: Int64?
     /// 设置子页当前的段（设计评审 2026-11-08，2A）；`openWorklistSettings` 不给段就保持上次的。
@@ -108,6 +180,19 @@ final class AppModel {
 
     /// Super-agent execution layer (主管 + 工单): runs the effects the engine queues in superagent.db.
     let superagent = SuperagentRuntime()
+
+    /// 上次触发内嵌主管自动自愈的时刻（用于 3s 冷却防抖，防止极端配置错误下死循环）。
+    @ObservationIgnored var lastRouterAutoHealAt: Date = .distantPast
+    /// 延迟执行的主管自愈任务句柄。
+    @ObservationIgnored var routerAutoHealTask: Task<Void, Never>?
+
+    static func isRouterSessionName(_ name: String) -> Bool {
+        name == "主管" || name.hasPrefix("主管-")
+    }
+
+    func isRouterConnection(_ conn: ConnectionSession) -> Bool {
+        conn.host == nil && (conn.id == routerConnection?.id || Self.isRouterSessionName(conn.controller.connection.sessionName))
+    }
 
     /// Per-session right-click menu state — shared by the sidebar row and the terminal area so both
     /// surfaces offer the same actions; its sheets/alerts are hosted once at the root.
@@ -245,7 +330,7 @@ final class AppModel {
         migrateLegacyKeysIfNeeded() // one-time: name-keyed env/groups/assignees → UUID keys
         startScheduler() // ONE heartbeat: activity sampling + session snapshots
         startSuperagent()
-        // 首屏是「我的清单」（迁移失败时回退到旧的主管面板）。不再自动选中上次的终端：它仍记在
+        // 首屏是「我的工作」（迁移失败时回退到旧的主管面板）。不再自动选中上次的终端：它仍记在
         // lastActiveStableID 里，点它时照常连接。
         openWorklist()
         // The script 设置「安装 Shell 集成」sources (off main; writes only when it changed).
@@ -483,6 +568,10 @@ final class AppModel {
     /// != …` short-circuits) — and we'd stay stuck on the tool pane. Detect that and leave the tool
     /// pane + re-show the terminal explicitly.
     func activateTerminal(_ id: UUID) {
+        if let rid = routerConnection?.id, id == rid, worklistAvailable {
+            openRouter()
+            return
+        }
         if selectedConnectionID == id {
             let onTool = axisSelected || labSelected || skillsSelected || claudeMdSelected
                 || tunnelsSelected || groupNoteSelected || superagentSelected || worklistSelected
@@ -498,25 +587,47 @@ final class AppModel {
     /// to a terminal restores the last one — this just flips the detail area over to the Lab.
     /// Clear every tool-pane flag in ONE place — so adding a pane (like the group note) can't leave a
     /// stale flag set behind the newly-opened one. Each `open*` calls this, then sets its own flag.
-    private func clearToolPanes() {
+    func clearToolPanes() {
         axisSelected = false; labSelected = false; skillsSelected = false
         claudeMdSelected = false; tunnelsSelected = false; groupNoteSelected = false
         superagentSelected = false; worklistSelected = false
     }
 
-    /// 「我的清单」可用：启动时的工单 → 任务迁移成功。失败时清单页不开，回退到旧的主管面板（注意事项 K-05）。
+    /// 「我的工作」可用：启动时的工单 → 任务迁移成功。失败时回退到旧的主管面板（注意事项 K-05）。
     var worklistAvailable: Bool { superagent.worklistAvailable }
 
-    /// 打开清单的设置子页（2A）：工具栏「主管」给 `.router`，清单页头的齿轮不给段、回到上次看的那段。
+    /// 当前是否正在「我的工作 · 主管」标签内直接展示实时主管终端。
+    var isEmbeddedRouterVisible: Bool {
+        worklistSelected && !worklistShowsSettings && worklistTaskID == nil && worklistTab == .router
+    }
+
+    /// 同步内嵌主管终端的可见/连接/焦点状态：
+    /// - 在「我的工作 · 主管」可见时：仅主管终端标为正在浏览并懒连接；
+    /// - 切到「清单 / 知识库 / 任务卡 / 设置」时：调用 `leaveTerminals()` 立即释放终端焦点，不吞键盘输入。
+    func syncEmbeddedRouterViewing() {
+        if isEmbeddedRouterVisible {
+            let rid = routerConnection?.id
+            for c in connections {
+                if c.id == rid { c.markViewed() } else { c.resignViewing() }
+            }
+            if let conn = routerConnection {
+                ensureConnected(conn.id)
+            }
+        } else if worklistSelected {
+            leaveTerminals()
+        }
+    }
+
+    /// 打开「我的工作」设置子页（2A）：工具栏「主管」给 `.router`，页头齿轮不给段、回到上次看的那段。
     func openWorklistSettings(_ segment: WorklistSettingsSegment? = nil) {
         if let segment { worklistSettingsSegment = segment }
         openWorklist(settings: true)
     }
 
-    /// 工具栏「主管」格高亮：清单的设置子页在屏幕上，或回退的主管面板在屏幕上。
+    /// 工具栏「主管」格高亮：设置子页在屏幕上，或回退的主管面板在屏幕上。
     var superagentToolSelected: Bool { superagentSelected || (worklistSelected && worklistShowsSettings) }
 
-    /// Show「我的清单」: the list, or one task's card (`task`), or the settings sub-page (`settings`).
+    /// Show「我的工作」: the tabs (list / router / knowledge), or one task's card (`task`), or the settings sub-page (`settings`).
     func openWorklist(task: Int64? = nil, settings: Bool = false) {
         guard worklistAvailable else { return openSuperagent() }
         clearToolPanes(); worklistSelected = true
@@ -524,10 +635,10 @@ final class AppModel {
         worklistTaskID = task
         if task != nil { worklistTab = .tasks }
         worklistShowsSettings = settings
-        leaveTerminals()
+        syncEmbeddedRouterViewing()
     }
 
-    /// 打开「我的清单 · 知识库」子视图，可选自动展开某张知识卡片。
+    /// 打开「我的工作 · 知识库」子视图，可选自动展开某张知识卡片。
     func openKnowledgeBase(entryID: Int64? = nil) {
         guard worklistAvailable else { return openSuperagent() }
         clearToolPanes(); worklistSelected = true
@@ -542,6 +653,7 @@ final class AppModel {
     func startDerivedTask(scope: String, ref: KnowledgeRef, refTitle: String) {
         openWorklist()
         worklistTab = .tasks
+        syncEmbeddedRouterViewing()
         newTaskSeed = NewTaskSeed(scope: scope, relatedRefs: [ref], relatedBadges: [(ref: ref, title: refTitle)])
     }
 
@@ -609,7 +721,8 @@ final class AppModel {
     /// Open the read-only history viewer for the active terminal (no-op without a live pane). Lets the
     /// user scroll back through scrollback even when the live pane is on the alternate screen.
     func showHistoryViewer() {
-        guard let c = selectedConnection, c.primaryPane != nil else { return }
+        let target = isEmbeddedRouterVisible ? routerConnection : selectedConnection
+        guard let c = target, c.primaryPane != nil else { return }
         historyViewer = c
     }
 
@@ -685,6 +798,7 @@ final class AppModel {
     /// so dormant/restored rows we haven't reconnected to are preserved.
     private func snapshotSessions() async {
         for conn in connections where conn.host == nil && conn.state.connected {
+            if isRouterConnection(conn) { continue }
             guard let pane = conn.primaryPane?.id else { continue }
             let name = conn.controller.connection.sessionName
             let cwd = conn.currentPath ?? ""
@@ -719,6 +833,7 @@ final class AppModel {
     /// (the exit path can't await), but it freshens cwd/command and keeps the last scrollback row.
     private func snapshotMetadataNow() {
         for conn in connections where conn.host == nil && conn.state.connected {
+            if isRouterConnection(conn) { continue }
             sessionStore.upsertMeta(
                 tfaID: conn.stableID, name: conn.controller.connection.sessionName,
                 cwd: conn.currentPath ?? "", command: conn.subtitle,
@@ -735,7 +850,12 @@ final class AppModel {
     /// ENDED record (not auto-recreated on selection), so a reboot never mass-launches agents.
     func restoreMissingSessions(liveLocalNames: Set<String>) {
         var existing = Set(connections.compactMap { $0.host == nil ? $0.controller.connection.sessionName : nil })
-        for r in sessionStore.roster() where !liveLocalNames.contains(r.name) && !existing.contains(r.name) {
+        for r in sessionStore.roster() {
+            if Self.isRouterSessionName(r.name) {
+                sessionStore.remove(tfaID: r.tfaID)
+                continue
+            }
+            guard !liveLocalNames.contains(r.name) && !existing.contains(r.name) else { continue }
             existing.insert(r.name) // roster is newest-first: an older row reusing a name stays hidden
             makeEndedPlaceholder(from: r)
         }
@@ -793,6 +913,7 @@ final class AppModel {
         guard !rows.isEmpty else { return }
         let byName = Dictionary(rows.map { ($0.session, $0) }, uniquingKeysWith: { a, _ in a })
         for conn in connections where conn.host == nil && !conn.isEnded && !conn.stableID.isEmpty {
+            if isRouterConnection(conn) { continue }
             let name = conn.controller.connection.sessionName
             guard let m = byName[name] else { continue }
             sessionStore.upsertMeta(tfaID: conn.stableID, name: name, cwd: m.path, command: m.command,
@@ -815,10 +936,14 @@ final class AppModel {
     /// `connections` — so the keys always match what the eye sees and never jump to a terminal hidden
     /// on another host. (Live filter text lives in the sidebar view, so it's not reflected here.)
     var visibleConnections: [ConnectionSession] {
+        let routerID = routerConnection?.id
         var out: [ConnectionSession] = []
         for g in currentGroups { out.append(contentsOf: visibleTerminals(in: g)) }
         out.append(contentsOf: visibleUngroupedTerminals)
         out.append(contentsOf: visibleEndedUngroupedTerminals)
+        if let routerID {
+            out.removeAll { $0.id == routerID }
+        }
         return out
     }
 
@@ -991,6 +1116,26 @@ final class AppModel {
     /// never dropped: its folder, command and last screen are saved, and the row stays in place (same
     /// group) as a recoverable ended record. Remote terminals keep the old toast + removal.
     func handleConnectionClosed(_ conn: ConnectionSession) {
+        if isRouterConnection(conn) {
+            let wasViewingEmbeddedRouter = isEmbeddedRouterVisible
+            if !conn.stableID.isEmpty {
+                sessionStore.remove(tfaID: conn.stableID)
+            }
+            let sessionName = conn.controller.attachedSession?.name ?? conn.controller.connection.sessionName
+            conn.disconnect()
+            if worklistSelected && selectedConnectionID == conn.id {
+                connections.removeAll { $0.id == conn.id }
+            } else {
+                removeConnection(conn)
+            }
+            if superagent.routerSession == sessionName || superagent.routerSession == conn.controller.connection.sessionName {
+                superagent.routerSession = nil
+            }
+            if wasViewingEmbeddedRouter {
+                scheduleRouterAutoHeal()
+            }
+            return
+        }
         guard conn.host == nil, !conn.stableID.isEmpty else {
             if let err = conn.connectError { lastError = "\(conn.title): \(err)" }
             removeConnection(conn)

@@ -10,19 +10,27 @@ struct NewSessionSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var name = ""
+    @State private var lastAutoName = ""
+    @State private var nameEditedByUser = false
     @State private var folder = FileManager.default.homeDirectoryForCurrentUser.path
     @State private var taken: Set<String> = []
     @State private var axis = AxisModelService.shared
     @FocusState private var nameFocused: Bool
 
     private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    /// tmux uses ':' and '.' to target windows/panes; automatically normalize them instead of blocking the user.
+    private var normalizedName: String { Self.normalizeSessionName(trimmed) }
 
-    /// Only surfaced once the user has typed something invalid — an empty field just disables 创建.
+    private static func normalizeSessionName(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ":", with: "：")
+            .replacingOccurrences(of: ".", with: "·")
+    }
+
+    /// Only surfaced when the normalized name collides with an existing local session.
     private var nameError: String? {
-        guard !trimmed.isEmpty else { return nil }
-        // tmux uses ':' and '.' to target windows/panes, so they can't appear in a session name.
-        if trimmed.contains(":") || trimmed.contains(".") { return "名字不能包含 : 或 ." }
-        if taken.contains(trimmed) { return "已有同名会话" }
+        guard !normalizedName.isEmpty else { return nil }
+        if taken.contains(normalizedName) { return "已有同名会话「\(normalizedName)」" }
         return nil
     }
     private var launchKind: AppModel.NewSessionLaunchKind { appModel.newSessionLaunchKind }
@@ -33,7 +41,7 @@ struct NewSessionSheet: View {
         case .antigravity: return AgentPlatform.antigravity.executablePath != nil
         }
     }
-    private var canCreate: Bool { !trimmed.isEmpty && nameError == nil && launchAvailable }
+    private var canCreate: Bool { !normalizedName.isEmpty && nameError == nil && launchAvailable }
 
     private var badgeKind: TerminalKind {
         switch launchKind {
@@ -77,8 +85,17 @@ struct NewSessionSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled()
                     .focused($nameFocused)
+                    .onChange(of: name) { _, new in
+                        if new != lastAutoName {
+                            nameEditedByUser = true
+                        }
+                    }
                 if let err = nameError {
                     Text(err).font(.caption).foregroundStyle(Theme.Status.error)
+                } else if !trimmed.isEmpty && normalizedName != trimmed {
+                    Text("将自动保存为会话名「\(normalizedName)」")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textTertiary)
                 }
             }
 
@@ -115,9 +132,20 @@ struct NewSessionSheet: View {
         .padding(Theme.Space.xl)
         .frame(width: 420)
         .onAppear {
-            if let project = WorkspaceStore.shared.selected { folder = project.path }
-            if name.isEmpty { name = appModel.suggestedLocalSessionName() }
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            if let project = WorkspaceStore.shared.selected, Self.directoryExists(project.path) {
+                folder = project.path
+            } else if let cwd = appModel.selectedConnection?.currentPath,
+                      !cwd.isEmpty, cwd != home, Self.directoryExists(cwd) {
+                folder = cwd
+            }
             taken = appModel.takenLocalSessionNames()
+            if name.isEmpty {
+                let suggested = suggestedName(forFolder: folder)
+                lastAutoName = suggested
+                name = suggested
+                nameEditedByUser = false
+            }
             nameFocused = true
         }
         .task { if launchKind == .axisClaude { await axis.refresh() } }
@@ -168,7 +196,33 @@ struct NewSessionSheet: View {
         panel.prompt = "选择"
         panel.message = "选择新会话的起始文件夹"
         panel.directoryURL = URL(fileURLWithPath: folder)
-        if panel.runModal() == .OK, let url = panel.url { folder = url.path }
+        if panel.runModal() == .OK, let url = panel.url {
+            folder = url.path
+            if !nameEditedByUser || trimmed.isEmpty {
+                let suggested = suggestedName(forFolder: url.path)
+                lastAutoName = suggested
+                name = suggested
+                nameEditedByUser = false
+            }
+        }
+    }
+
+    private func suggestedName(forFolder path: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let rawBase = (path == home || path.isEmpty) ? "" : URL(fileURLWithPath: path).lastPathComponent
+        let base = Self.normalizeSessionName(rawBase)
+        guard !base.isEmpty, base != "/" else {
+            return appModel.suggestedLocalSessionName()
+        }
+        if !taken.contains(base) { return base }
+        var n = 2
+        while taken.contains("\(base)-\(n)") { n += 1 }
+        return "\(base)-\(n)"
+    }
+
+    private static func directoryExists(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
     }
 
     private func create() {
@@ -180,7 +234,7 @@ struct NewSessionSheet: View {
             case .antigravity: return AgentPlatform.agyCommand(resume: false)
             }
         }()
-        appModel.createLocalSession(name: trimmed, startDirectory: folder, command: cmd)
+        appModel.createLocalSession(name: normalizedName, startDirectory: folder, command: cmd)
         dismiss()
     }
 }

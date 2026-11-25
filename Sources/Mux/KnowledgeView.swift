@@ -6,6 +6,7 @@ import SuperagentCore
 
 struct KnowledgeBrowserView: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let search: String
     let showingNewEntry: Binding<Bool>
 
@@ -13,6 +14,8 @@ struct KnowledgeBrowserView: View {
     @State private var selectedTag: String?
     @State private var editingEntry: KnowledgeEntry?
     @State private var expandedIDs: Set<Int64> = []
+    @State private var archivedUndo: (id: Int64, title: String)?
+    @State private var undoDismissTask: Task<Void, Never>?
 
     var body: some View {
         let sa = appModel.superagent
@@ -25,7 +28,57 @@ struct KnowledgeBrowserView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.xl) {
                 if let e = sa.actionError {
-                    Banner(text: e) { sa.actionError = nil }
+                    Banner(text: e) {
+                        Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                            sa.actionError = nil
+                        }
+                    }
+                    .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
+                }
+
+                if let undo = archivedUndo {
+                    HStack(spacing: Theme.Space.md) {
+                        Image(systemName: "archivebox")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textSecondary)
+                        Text("已归档「\(undo.title)」")
+                            .font(.callout)
+                            .foregroundStyle(Theme.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 8)
+                        Button("撤销") {
+                            undoDismissTask?.cancel()
+                            undoDismissTask = nil
+                            sa.setKnowledgeArchived(undo.id, archived: false)
+                            Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                                archivedUndo = nil
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        Button {
+                            undoDismissTask?.cancel()
+                            undoDismissTask = nil
+                            Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                                archivedUndo = nil
+                            }
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Theme.textTertiary)
+                                .frame(width: 18, height: 18)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(PaperPressButtonStyle(hoverWash: true, cornerRadius: 4))
+                        .help("关闭提示")
+                        .accessibilityLabel("关闭提示")
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.md))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.md).stroke(Theme.border, lineWidth: 1))
+                    .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
                 }
 
                 if sa.unindexedDoneCount > 0 {
@@ -59,7 +112,8 @@ struct KnowledgeBrowserView: View {
                                     view: kv,
                                     expanded: isExpanded(kv.id),
                                     toggleExpand: { toggle(kv.id) },
-                                    edit: { editingEntry = kv.entry }
+                                    edit: { editingEntry = kv.entry },
+                                    archive: { archiveWithUndo(id: kv.entry.id, title: kv.entry.title) }
                                 )
                             }
                         }
@@ -80,7 +134,8 @@ struct KnowledgeBrowserView: View {
                                     view: kv,
                                     expanded: isExpanded(kv.id),
                                     toggleExpand: { toggle(kv.id) },
-                                    edit: { editingEntry = kv.entry }
+                                    edit: { editingEntry = kv.entry },
+                                    archive: { archiveWithUndo(id: kv.entry.id, title: kv.entry.title) }
                                 )
                             }
                         }
@@ -92,7 +147,12 @@ struct KnowledgeBrowserView: View {
             .frame(maxWidth: 960, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
         }
+        .animation(Theme.Motion.value(Theme.Motion.panel, reduceMotion: reduceMotion), value: archivedUndo?.id)
         .onAppear { focusRequestedEntry() }
+        .onDisappear {
+            undoDismissTask?.cancel()
+            undoDismissTask = nil
+        }
         .onChange(of: appModel.worklistFocusedKnowledgeID) { _, _ in focusRequestedEntry() }
         .sheet(item: $editingEntry) { entry in
             KnowledgeEditSheet(existing: entry).environment(appModel)
@@ -103,9 +163,28 @@ struct KnowledgeBrowserView: View {
         }
     }
 
+    private func archiveWithUndo(id: Int64, title: String) {
+        let sa = appModel.superagent
+        sa.setKnowledgeArchived(id, archived: true)
+        undoDismissTask?.cancel()
+        Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+            archivedUndo = (id: id, title: title)
+        }
+        undoDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled, archivedUndo?.id == id else { return }
+            Theme.Motion.run(Theme.Motion.echo, reduceMotion: reduceMotion) {
+                archivedUndo = nil
+            }
+            undoDismissTask = nil
+        }
+    }
+
     private func isExpanded(_ id: Int64) -> Bool { expandedIDs.contains(id) }
     private func toggle(_ id: Int64) {
-        if expandedIDs.contains(id) { expandedIDs.remove(id) } else { expandedIDs.insert(id) }
+        Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+            if expandedIDs.contains(id) { expandedIDs.remove(id) } else { expandedIDs.insert(id) }
+        }
     }
 
     private func focusRequestedEntry() {
@@ -150,7 +229,9 @@ struct KnowledgeBrowserView: View {
             HStack(alignment: .center, spacing: Theme.Space.md) {
                 Menu {
                     Button {
-                        selectedProject = nil
+                        Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                            selectedProject = nil
+                        }
                     } label: {
                         if selectedProject == nil { Label("全部项目", systemImage: "checkmark") } else { Text("全部项目") }
                     }
@@ -158,7 +239,9 @@ struct KnowledgeBrowserView: View {
                     ForEach(projects, id: \.self) { p in
                         let name = WorklistSections.projectName(p)
                         Button {
-                            selectedProject = p
+                            Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                                selectedProject = p
+                            }
                         } label: {
                             if selectedProject == p { Label(name, systemImage: "checkmark") } else { Text(name) }
                         }
@@ -185,7 +268,9 @@ struct KnowledgeBrowserView: View {
                             ForEach(tags, id: \.self) { tag in
                                 let active = selectedTag == tag
                                 Button {
-                                    selectedTag = active ? nil : tag
+                                    Theme.Motion.run(Theme.Motion.snap, reduceMotion: reduceMotion) {
+                                        selectedTag = active ? nil : tag
+                                    }
                                 } label: {
                                     Text("#\(tag)")
                                         .font(.system(size: 11, weight: active ? .semibold : .regular))
@@ -194,7 +279,7 @@ struct KnowledgeBrowserView: View {
                                         .frame(height: 22)
                                         .background(active ? Theme.brand : Theme.surface2, in: Capsule())
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(PaperPressButtonStyle())
                             }
                         }
                     }
@@ -285,10 +370,13 @@ struct KnowledgeBrowserView: View {
 
 private struct KnowledgeCardRow: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let view: KnowledgeView
     let expanded: Bool
     let toggleExpand: () -> Void
     let edit: () -> Void
+    let archive: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
         let sa = appModel.superagent
@@ -367,9 +455,7 @@ private struct KnowledgeCardRow: View {
                         }
                     }
                     Divider()
-                    Button("归档隐藏", role: .destructive) {
-                        sa.setKnowledgeArchived(e.id, archived: true)
-                    }
+                    Button("归档隐藏", role: .destructive, action: archive)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                         .foregroundStyle(Theme.textSecondary)
@@ -401,8 +487,11 @@ private struct KnowledgeCardRow: View {
             }
 
             if expanded {
-                Hairline()
-                KnowledgeBodySections(entry: e, derivedTasks: view.derivedTasks)
+                VStack(alignment: .leading, spacing: 10) {
+                    Hairline()
+                    KnowledgeBodySections(entry: e, derivedTasks: view.derivedTasks)
+                }
+                .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
             }
 
             HStack(alignment: .center, spacing: 6) {
@@ -429,7 +518,12 @@ private struct KnowledgeCardRow: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card).stroke(e.pinned ? Theme.borderStrong : Theme.border, lineWidth: 1))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.card)
+                .stroke(e.pinned || isHovered ? Theme.borderStrong : Theme.border, lineWidth: 1)
+        )
+        .animation(Theme.Motion.value(Theme.Motion.micro, reduceMotion: reduceMotion), value: isHovered)
+        .onHover { isHovered = $0 }
         .contentShape(Rectangle())
         .onTapGesture { toggleExpand() }
     }
@@ -706,6 +800,7 @@ struct KnowledgeEditSheet: View {
                 error: error,
                 confirm: "保存",
                 enabled: !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                disabledReason: "请先填写经验标题",
                 shortcut: KeyboardShortcut(.return, modifiers: .command)
             ) {
                 let draft = KnowledgeDraft(

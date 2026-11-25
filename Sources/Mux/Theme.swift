@@ -126,6 +126,88 @@ enum Theme {
     }
 }
 
+extension Theme {
+    /// 统一动效令牌与无障碍减弱动态守卫（见 DESIGN.md §8）。
+    /// 纸面工作台全部采用临界阻尼（零回弹 `extraBounce: 0`）；唯一允许持续循环的只有 `equalizer`。
+    enum Motion {
+        static let micro = Animation.easeOut(duration: 0.10)
+        static let snap = Animation.snappy(duration: 0.15, extraBounce: 0)
+        static let panel = Animation.snappy(duration: 0.20, extraBounce: 0)
+        static let layout = Animation.smooth(duration: 0.24, extraBounce: 0)
+        static let echo = Animation.easeOut(duration: 0.22)
+        static let equalizer = Animation.easeInOut(duration: 0.42).repeatForever(autoreverses: true)
+
+        static func value(_ animation: Animation, reduceMotion: Bool) -> Animation? {
+            reduceMotion ? nil : animation
+        }
+
+        @MainActor
+        @discardableResult
+        static func run<Result>(
+            _ animation: Animation = Theme.Motion.panel,
+            reduceMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+            _ body: () throws -> Result
+        ) rethrows -> Result {
+            if reduceMotion {
+                var tx = Transaction(animation: nil)
+                tx.disablesAnimations = true
+                return try withTransaction(tx, body)
+            }
+            return try withAnimation(animation, body)
+        }
+
+        static func reveal(edge: Edge = .top, reduceMotion: Bool) -> AnyTransition {
+            reduceMotion ? .opacity : .opacity.combined(with: .move(edge: edge))
+        }
+    }
+}
+
+/// 纸面工作台通用按压/悬停原语：零阴影零位移，可选柔和纸面洗底，按下轻降不透明度并在非减弱动态下微缩至 0.985。
+struct PaperPressButtonStyle: ButtonStyle {
+    let hoverWash: Bool
+    let cornerRadius: CGFloat
+
+    init(hoverWash: Bool = false, cornerRadius: CGFloat = Theme.Radius.sm) {
+        self.hoverWash = hoverWash
+        self.cornerRadius = cornerRadius
+    }
+
+    func makeBody(configuration: Configuration) -> some View {
+        PaperPressButtonBody(
+            configuration: configuration,
+            hoverWash: hoverWash,
+            cornerRadius: cornerRadius
+        )
+    }
+}
+
+private struct PaperPressButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    let hoverWash: Bool
+    let cornerRadius: CGFloat
+    @State private var isHovered = false
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        configuration.label
+            .background {
+                if hoverWash {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .fill(isHovered && isEnabled ? Theme.surface2.opacity(0.55) : Color.clear)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.76 : 1) : 0.45)
+            .scaleEffect(isEnabled && configuration.isPressed && !reduceMotion ? 0.985 : 1)
+            .animation(Theme.Motion.value(Theme.Motion.micro, reduceMotion: reduceMotion), value: configuration.isPressed)
+            .animation(Theme.Motion.value(Theme.Motion.micro, reduceMotion: reduceMotion), value: isHovered)
+            .onHover { hovering in
+                if hoverWash { isHovered = hovering }
+            }
+    }
+}
+
 /// The connection state of a terminal, distilled to ONE model so the sidebar row and the active
 /// header render it identically — symbol + tint + label (never color alone). This is the single
 /// place the error > reconnecting > connected > connecting priority lives.
@@ -177,11 +259,11 @@ enum TerminalStatus: Equatable {
     /// VoiceOver / tooltip text.
     var label: String {
         switch self {
-        case .connected: return "Connected"
-        case .failed: return "Connection failed"
-        case .reconnecting: return "Reconnecting"
-        case .connecting: return "Connecting"
-        case .dormant: return "Idle — select to connect"
+        case .connected: return "已连接"
+        case .failed: return "连接失败"
+        case .reconnecting: return "正在重连"
+        case .connecting: return "正在连接"
+        case .dormant: return "未连接 — 点击打开"
         case .ended: return "已断开 — 可恢复"
         }
     }
@@ -291,6 +373,7 @@ struct StateTag: View {
     var body: some View {
         Text(text)
             .font(.system(size: 11, weight: .medium))
+            .contentTransition(.opacity)
             .foregroundStyle(tint)
             .padding(.horizontal, 7)
             .padding(.vertical, 2)

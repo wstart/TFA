@@ -20,7 +20,7 @@ cd "$ROOT"
 BIN_NAME="Mux"        # SwiftPM executable target (built binary name) — keep as "Mux"
 APP_NAME="TFA"        # user-facing app/bundle name
 BUNDLE_ID="com.tfa.app"
-VERSION="0.24.0"
+VERSION="0.25.0"
 
 # Code signing / notarization (Developer ID). The signing identity is auto-detected from the keychain
 # (the first "Developer ID Application" identity) so no personal name/team is hardcoded in this repo;
@@ -94,6 +94,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key>            <string>$VERSION</string>
     <key>LSMinimumSystemVersion</key>     <string>14.0</string>
     <key>NSHighResolutionCapable</key>    <true/>${ICON_PLIST}
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.tfa.app.url</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>tfa</string>
+            </array>
+        </dict>
+    </array>
     <key>NSPrincipalClass</key>           <string>NSApplication</string>
 </dict>
 </plist>

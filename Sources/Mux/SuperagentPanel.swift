@@ -202,22 +202,22 @@ struct NeedsYouCard: View {
     private func actions(_ t: Ticket) -> some View {
         let sa = appModel.superagent
         return HStack(spacing: Theme.Space.sm) {
+            Button("停止") { confirmStop = true }
+                .buttonStyle(.borderless).foregroundStyle(Theme.textTertiary)
+            Spacer()
+            Button("前往终端") { appModel.goToTicket(t.id) }.disabled(t.session.isEmpty)
             switch item.stage.needsPerson {
             case .review:
+                Button("打回…") { write(.reject) }
                 Button(sa.merging.contains(t.id) ? "合并中…" : "通过") { sa.approve(t.id) }.buttonStyle(.borderedProminent)
                     .disabled(sa.merging.contains(t.id))
                     .help(t.branch.isEmpty ? "结单" : "把 \(t.branch) 合并进主仓库当前分支，然后结单")
-                Button("打回…") { write(.reject) }
             case .answer:
                 Button("回答…") { write(.answer) }.buttonStyle(.borderedProminent)
             default:
-                Button("重试") { sa.retry(t.id) }.buttonStyle(.borderedProminent)
                 Button("补充…") { write(.add) }
+                Button("重试") { sa.retry(t.id) }.buttonStyle(.borderedProminent)
             }
-            Button("前往终端") { appModel.goToTicket(t.id) }.disabled(t.session.isEmpty)
-            Spacer()
-            Button("停止") { confirmStop = true }
-                .buttonStyle(.borderless).foregroundStyle(Theme.textTertiary)
         }
     }
 
@@ -372,8 +372,18 @@ struct RolesCard: View {
                     Button { editing = RoleDraft(role: r, isNew: false) } label: { Image(systemName: "pencil") }
                         .buttonStyle(.borderless).help("编辑")
                     if !r.isBuiltin {
-                        Button { deleting = r } label: { Image(systemName: "trash") }
-                            .buttonStyle(.borderless).foregroundStyle(Theme.textTertiary).help("删除")
+                        Menu {
+                            Button("删除角色", role: .destructive) { deleting = r }
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .foregroundStyle(Theme.textTertiary)
+                                .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("更多操作")
+                        .accessibilityLabel("更多操作")
                     }
                 }
             }
@@ -407,12 +417,14 @@ private struct RoleSheet: View {
     @State private var error: String?
 
     private var builtin: Bool { !draft.isNew && draft.role.isBuiltin }
-    private var valid: Bool {
-        !role.name.trimmingCharacters(in: .whitespaces).isEmpty
-            && !role.scope.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !role.behavior.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && role.behavior.count <= Role.maxBehavior
+    private var disabledReason: String? {
+        if role.name.trimmingCharacters(in: .whitespaces).isEmpty { return "请填写角色名称" }
+        if role.scope.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请填写「接什么」说明" }
+        if role.behavior.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请填写「主要行为」" }
+        if role.behavior.count > Role.maxBehavior { return "主要行为超出字数上限" }
+        return nil
     }
+    private var valid: Bool { disabledReason == nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
@@ -452,7 +464,8 @@ private struct RoleSheet: View {
                     .foregroundStyle(role.behavior.count > Role.maxBehavior ? Theme.Status.error : Theme.textTertiary)
             }
             .font(.caption)
-            SheetButtons(error: error, confirm: "保存", enabled: valid) {
+            SheetButtons(error: error, confirm: "保存", enabled: valid, disabledReason: disabledReason,
+                         shortcut: KeyboardShortcut(.return, modifiers: .command)) {
                 error = save(role)
                 if error == nil { dismiss() }
             }
@@ -513,8 +526,18 @@ struct RulesCard: View {
                     Spacer(minLength: Theme.Space.sm)
                     Button { editing = rule } label: { Image(systemName: "pencil") }
                         .buttonStyle(.borderless).help("编辑")
-                    Button { deleting = rule } label: { Image(systemName: "trash") }
-                        .buttonStyle(.borderless).foregroundStyle(Theme.textTertiary).help("删除")
+                    Menu {
+                        Button("删除规则", role: .destructive) { deleting = rule }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .foregroundStyle(Theme.textTertiary)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("更多操作")
+                    .accessibilityLabel("更多操作")
                 }
             }
             Button { editing = Rule(id: nextID("r", sa.rules.map(\.id)), name: "", instruction: "") } label: {
@@ -562,11 +585,13 @@ private struct RuleSheet: View {
     @State private var role = Role.developer
     @State private var error: String?
 
-    private var valid: Bool {
-        !name.trimmingCharacters(in: .whitespaces).isEmpty
-            && !instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && instruction.count <= Rule.maxInstruction
+    private var disabledReason: String? {
+        if name.trimmingCharacters(in: .whitespaces).isEmpty { return "请填写规则名称" }
+        if instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请填写接单条件说明" }
+        if instruction.count > Rule.maxInstruction { return "条件说明超出字数上限" }
+        return nil
     }
+    private var valid: Bool { disabledReason == nil }
     /// 规则原来的角色被删了也列出来，免得没得选。
     private var options: [(value: String, label: String)] {
         var names = roles.map(\.name)
@@ -597,7 +622,8 @@ private struct RuleSheet: View {
                     Text("命中规则建的任务，清单项全部交给这个角色。").font(.caption).foregroundStyle(Theme.textTertiary)
                 }
             }
-            SheetButtons(error: error, confirm: "保存", enabled: valid) {
+            SheetButtons(error: error, confirm: "保存", enabled: valid, disabledReason: disabledReason,
+                         shortcut: KeyboardShortcut(.return, modifiers: .command)) {
                 error = save(Rule(id: rule.id, name: name.trimmingCharacters(in: .whitespaces), enabled: rule.enabled,
                                   instruction: instruction.trimmingCharacters(in: .whitespacesAndNewlines), role: role))
                 if error == nil { dismiss() }
@@ -685,8 +711,18 @@ struct SchedulesCard: View {
                     Spacer(minLength: Theme.Space.sm)
                     Button { editing = s } label: { Image(systemName: "pencil") }
                         .buttonStyle(.borderless).help("编辑")
-                    Button { deleting = s } label: { Image(systemName: "trash") }
-                        .buttonStyle(.borderless).foregroundStyle(Theme.textTertiary).help("删除")
+                    Menu {
+                        Button("删除定时任务", role: .destructive) { deleting = s }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .foregroundStyle(Theme.textTertiary)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("更多操作")
+                    .accessibilityLabel("更多操作")
                 }
             }
             Button {
@@ -729,10 +765,13 @@ private struct ScheduleSheet: View {
     @State private var assignee = ""
     @State private var error: String?
 
-    private var valid: Bool {
-        !name.trimmingCharacters(in: .whitespaces).isEmpty
-            && !request.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !repo.isEmpty
+    private var disabledReason: String? {
+        if name.trimmingCharacters(in: .whitespaces).isEmpty { return "请填写定时任务名称" }
+        if request.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请填写定时请求内容" }
+        if repo.isEmpty { return "请选择执行目录" }
+        return nil
     }
+    private var valid: Bool { disabledReason == nil }
     /// 待分配 / 你 / 各角色；原来的角色被删了也列出来。
     private var options: [(value: String, label: String)] {
         var list: [(String, String)] = [("", "待分配"), ("你", "你")] + roles.map { ($0.name, $0.name) }
@@ -772,7 +811,8 @@ private struct ScheduleSheet: View {
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
             }
-            SheetButtons(error: error, confirm: "保存", enabled: valid) {
+            SheetButtons(error: error, confirm: "保存", enabled: valid, disabledReason: disabledReason,
+                         shortcut: KeyboardShortcut(.return, modifiers: .command)) {
                 var s = schedule
                 s.name = name.trimmingCharacters(in: .whitespaces)
                 s.time = Self.hhmm(time)
@@ -815,19 +855,7 @@ struct SettingsCard: View {
                     .accessibilityLabel("界面外观")
             }
 
-            SettingRow(title: "执行与主管 Agent", note: Self.agentNote(s.codingAgent)) {
-                HStack(spacing: Theme.Space.sm) {
-                    if appModel.superagent.routerSession != nil {
-                        Button("重启主管") { appModel.restartRouter() }
-                            .controlSize(.small)
-                            .help("关闭当前主管终端并用所选 Agent 重新启动")
-                    }
-                    SegmentedChoice(selection: bind(\.codingAgent), options: CodingAgentKind.allCases.map { (value: $0, label: $0.label) })
-                        .accessibilityLabel("执行与主管 Agent")
-                }
-            }
-
-            SettingRow(title: "每个开发工单独立建 git worktree") {
+            SettingRow(title: "为每个开发工单隔离独立代码目录（git worktree）") {
                 Toggle("", isOn: bind(\.worktree)).labelsHidden().toggleStyle(.switch).controlSize(.small)
             }
 
@@ -875,9 +903,9 @@ struct SettingsCard: View {
 
             Hairline()
 
-            SettingRow(title: "看门狗巡检", note: "定时检查执行中的工单是否偏离清单项，连续偏离才提醒你") {
+            SettingRow(title: "执行偏离巡检", note: "定时检查执行中的工单是否偏离清单项，连续偏离才提醒你") {
                 Toggle("", isOn: bind(\.watchdogEnabled)).labelsHidden().toggleStyle(.switch).controlSize(.small)
-                    .accessibilityLabel("看门狗")
+                    .accessibilityLabel("执行偏离巡检")
             }
             if s.watchdogEnabled {
                 SettingRow(title: "巡检间隔") {
@@ -895,7 +923,7 @@ struct SettingsCard: View {
                     SettingRow(title: "每天打扰预算", note: "超预算后合并转告，不压制「需要你」") {
                         Stepper(value: bind(\.interruptionBudget), in: 1...30) { Text("\(s.interruptionBudget) 次").monospacedDigit() }
                     }
-                    SettingRow(title: "交付前 Web 验收（LobeHub Acceptance）", note: "需要 Node ≥ 22.15；仅对 Web 界面改动生效") {
+                    SettingRow(title: "Web 界面自动验收（交付前启动浏览器核对）", note: "需要 Node ≥ 22.15；仅对 Web 界面改动生效") {
                         Button("安装工具") {
                             appModel.runSetupCommand(name: "安装验收工具", "npm install -g @lobehub/cli && lh acceptance install")
                         }
@@ -907,14 +935,6 @@ struct SettingsCard: View {
             }
         }
         .saCard()
-    }
-
-    private static func agentNote(_ kind: CodingAgentKind) -> String {
-        switch kind {
-        case .claude: return "使用本机安装的 Claude Code 命令行"
-        case .axisClaude: return "使用内置 axis-claude，连接本机 axis-model 服务"
-        case .antigravity: return "使用本机安装的 Antigravity (agy) 命令行，自动同步角色配置"
-        }
     }
 
     private static func backendNote(_ kind: ModelBackendKind) -> String {
@@ -1043,8 +1063,18 @@ struct WorkflowsCard: View {
                     if !w.isBuiltin {
                         Button { editing = w } label: { Image(systemName: "pencil") }
                             .buttonStyle(.borderless).help("编辑")
-                        Button { deleting = w } label: { Image(systemName: "trash") }
-                            .buttonStyle(.borderless).foregroundStyle(Theme.textTertiary).help("删除")
+                        Menu {
+                            Button("删除模板", role: .destructive) { deleting = w }
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .foregroundStyle(Theme.textTertiary)
+                                .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("更多操作")
+                        .accessibilityLabel("更多操作")
                     }
                 }
             }
@@ -1093,7 +1123,7 @@ private struct WorkflowSheet: View {
             Field(title: "名称") {
                 TextField("例如：开发 → 测试", text: $name).textFieldStyle(.roundedBorder)
             }
-            Field(title: "阶段（顺序即流程；代码只看种类）") {
+            Field(title: "阶段顺序（系统按右侧类型识别待领取、进行中、评审与完成）") {
                 VStack(spacing: Theme.Space.xs) {
                     ForEach(stages.indices, id: \.self) { i in
                         HStack(spacing: Theme.Space.sm) {
@@ -1128,7 +1158,8 @@ private struct WorkflowSheet: View {
             }
             Text(problem ?? "最后一个阶段是「完成」；「待领取」只在最前；至少一个「进行中」。")
                 .font(.caption).foregroundStyle(problem == nil ? Theme.textTertiary : Theme.Status.error)
-            SheetButtons(error: error, confirm: "保存", enabled: problem == nil) {
+            SheetButtons(error: error, confirm: "保存", enabled: problem == nil, disabledReason: problem,
+                         shortcut: KeyboardShortcut(.return, modifiers: .command)) {
                 error = save(draft)
                 if error == nil { dismiss() }
             }
@@ -1304,16 +1335,22 @@ struct PanelSection<Content: View>: View {
 
 /// 默认收起的分区（最近结束、决定记录）。
 struct Collapsible<Content: View>: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let title: String
     @ViewBuilder let content: () -> Content
     @State private var expanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
-            Button { expanded.toggle() } label: {
+            Button {
+                Theme.Motion.run(Theme.Motion.panel, reduceMotion: reduceMotion) {
+                    expanded.toggle()
+                }
+            } label: {
                 HStack(spacing: Theme.Space.xs) {
                     Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
                         .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .animation(Theme.Motion.value(Theme.Motion.snap, reduceMotion: reduceMotion), value: expanded)
                     Text(title).font(Theme.Font.sectionHeader)
                 }
                 .foregroundStyle(Theme.textTertiary)
@@ -1321,7 +1358,10 @@ struct Collapsible<Content: View>: View {
             }
             .buttonStyle(.plain)
             .padding(.horizontal, Theme.Space.xs)
-            if expanded { content() }
+            if expanded {
+                content()
+                    .transition(Theme.Motion.reveal(edge: .top, reduceMotion: reduceMotion))
+            }
         }
     }
 }
@@ -1368,12 +1408,13 @@ struct Field<Content: View>: View {
     }
 }
 
-/// 表单底部：错误（草稿保留）+ 取消 / 主按钮。
+/// 表单底部：错误（草稿保留）+ 禁用原因（若有）+ 取消 / 主按钮。
 struct SheetButtons: View {
     @Environment(\.dismiss) private var dismiss
     let error: String?
     let confirm: String
     let enabled: Bool
+    var disabledReason: String? = nil
     var shortcut = KeyboardShortcut.defaultAction
     let action: () -> Void
 
@@ -1383,7 +1424,13 @@ struct SheetButtons: View {
                 Text(error).font(.caption).foregroundStyle(Theme.Status.error).textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack {
+            HStack(spacing: Theme.Space.sm) {
+                if !enabled, let reason = disabledReason, !reason.isEmpty {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1)
+                }
                 Spacer()
                 Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
                 Button(confirm, action: action).buttonStyle(.borderedProminent).keyboardShortcut(shortcut).disabled(!enabled)
